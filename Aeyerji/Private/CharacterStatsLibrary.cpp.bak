@@ -1,0 +1,555 @@
+#include "CharacterStatsLibrary.h"
+
+#include "AbilitySystemInterface.h"
+#include "AbilitySystemComponent.h"
+#include "Aeyerji/AeyerjiGameMode.h"
+#include "Aeyerji/AeyerjiPlayerState.h"
+#include "Aeyerji/AeyerjiSaveGame.h"
+#include "Attributes/AeyerjiAttributeSet.h"
+#include "GameFramework/GameStateBase.h"
+#include "GameFramework/Controller.h"
+#include "GameFramework/Character.h"
+#include "AIController.h"
+#include "Blueprint/AIBlueprintHelperLibrary.h"
+#include "Navigation/PathFollowingComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Progression/AeyerjiLevelingComponent.h"
+#include "Logging/AeyerjiLog.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/Guid.h"
+#include "HAL/PlatformMisc.h"
+#include "Templates/SubclassOf.h"
+#include "Microsoft/AllowMicrosoftPlatformTypes.h"
+#include "GameplayTagContainer.h"
+#include "Kismet/KismetMathLibrary.h"
+
+
+/*Logging helper*/
+static UAbilitySystemComponent* FindASCChecked(const AAeyerjiPlayerState* PS)
+{
+	if (!PS)
+	{
+		UE_LOG(LogTemp, Error,
+			   TEXT("LoadAeyerjiChar NULL PlayerState passed in"));
+		return nullptr;
+	}
+
+	/* 1️⃣  Does the PlayerState already own a pawn? */
+	APawn* Pawn = PS->GetPawn();
+	if (!Pawn)
+	{
+		UE_LOG(LogTemp, Error,
+			   TEXT("LoadAeyerjiChar  PS %s has no Pawn yet (OnRep_PlayerState fired before possession)"),
+			   *GetNameSafe(PS));
+		return nullptr;
+	}
+
+	/* 2️⃣  Does that pawn actually expose an ASC? */
+	const bool bImplementsASI = Pawn->GetClass()->ImplementsInterface(UAbilitySystemInterface::StaticClass());
+	if (!bImplementsASI)
+	{
+		UE_LOG(LogTemp, Error,
+			   TEXT("LoadAeyerjiChar  Pawn %s does NOT implement IAbilitySystemInterface"),
+			   *GetNameSafe(Pawn));
+		return nullptr;
+	}
+
+	/* 3️⃣  Is the component pointer valid? */
+	if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Pawn))
+	{
+		UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent();
+		if (!ASC)
+		{
+			UE_LOG(LogTemp, Error,
+				   TEXT("LoadAeyerjiChar  Pawn %s implements ASI but GetAbilitySystemComponent() returned NULL"),
+				   *GetNameSafe(Pawn));
+		}
+		return ASC;
+	}
+
+	return nullptr;    // should never hit
+}
+
+FString UCharacterStatsLibrary::MakeStableCharSlotName(const APlayerState* PS)
+{
+	if (!PS) return TEXT("UNKNOWN_Char");
+
+	// 1) Real online IDs stay first-class
+	const FUniqueNetIdRepl& NetId = PS->GetUniqueId();
+	if (NetId.IsValid())
+	{
+		const FUniqueNetId& Raw = *NetId.GetUniqueNetId();
+		if (!Raw.GetType().IsEqual(FName("NULL"), ENameCase::IgnoreCase))
+			return Raw.ToString() + TEXT("_Char");
+	}
+
+	// 2) Use the replicated PlayerId – identical on server & clients
+	int32 StableIndex = PS->GetPlayerId();
+	if (StableIndex < 0) StableIndex = 0;              // safety net
+
+	// 3) Append date stamp (unchanged)
+	const TCHAR* Months[] = {
+		TEXT("JANUARY"), TEXT("FEBRUARY"), TEXT("MARCH"),  TEXT("APRIL"),
+		TEXT("MAY"),     TEXT("JUNE"),     TEXT("JULY"),   TEXT("AUGUST"),
+		TEXT("SEPTEMBER"),TEXT("OCTOBER"), TEXT("NOVEMBER"),TEXT("DECEMBER")
+	};
+	const FDateTime Now   = FDateTime::Now();
+	const FString  Stamp  = FString::Printf(
+			TEXT("%02d%s%d"), Now.GetDay(), Months[Now.GetMonth()-1], Now.GetYear());
+
+	return FString::Printf(TEXT("%d_%s"), StableIndex, *Stamp);
+}
+
+/* ------------------ Load helper ------------------ */
+void UCharacterStatsLibrary::LoadAeyerjiChar(
+	UAeyerjiSaveGame*    Data,
+	AAeyerjiPlayerState* PS,
+	UAbilitySystemComponent* ASC)
+{
+	//TODO add somewhere here a function that can look at previous day's saves if this one doesn't exist yet.
+	if (!Data)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Called with null Data. Aborting load."));
+		return;
+	}
+	if (!PS)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Called with null PlayerState. Aborting load."));
+		return;
+	}
+	
+	if (!ASC)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Called with null ASC. Aborting load."));
+		return;
+	}
+
+	const UAeyerjiAttributeSet* RuntimeSet = const_cast<UAeyerjiAttributeSet*>(ASC->GetSet<UAeyerjiAttributeSet>());
+	if (!RuntimeSet)
+	{
+		UE_LOG(LogTemp, Error, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Runtime AttrSet missing"));
+		return;
+	}
+	
+	const float SavedXP    = Data->Attributes.XP;
+	const int32 SavedLevel = FMath::Max(1, Data->Attributes.Level);
+	UE_LOG(LogTemp, Log, TEXT("LoadAeyerjiChar: Restoring XP to %f, Level to %d"), SavedXP, SavedLevel);
+	if (ASC->GetOwnerRole() == ROLE_Authority)
+	{
+		APawn* Pawn = PS->GetPawn();
+		UAeyerjiLevelingComponent* Leveling = Pawn ? Pawn->FindComponentByClass<UAeyerjiLevelingComponent>() : nullptr;
+
+		// Restore Level first so XPMax is correct
+		if (Leveling)
+		{
+			Leveling->SetLevel(SavedLevel);
+		}
+		else
+		{
+			ASC->SetNumericAttributeBase(RuntimeSet->GetLevelAttribute(), static_cast<float>(SavedLevel));
+		}
+
+		// Clamp XP to current XPMax and apply
+		const float ClampedXP = FMath::Clamp(SavedXP, 0.f, RuntimeSet->GetXPMax());
+		ASC->SetNumericAttributeBase(RuntimeSet->GetXPAttribute(), ClampedXP);
+
+		// Ensure any level-scaled infinite effects are up-to-date after load
+		if (Leveling)
+		{
+			Leveling->ForceRefreshForCurrentLevel();
+		}
+	}
+	/* ---------- Restore any other replicated data ---------- */
+	PS->Server_SetActionBar(Data->ActionBar);
+}
+
+
+/* ---------- save ---------- */
+void UCharacterStatsLibrary::SaveAeyerjiChar(
+		UAeyerjiSaveGame*				Data,
+		const AAeyerjiPlayerState*		PS,
+		const FString					Slot)
+{
+	if (!Data || !PS)
+	{
+		UE_LOG(LogTemp, Error, TEXT("SaveAeyerjiChar: Called with null Data or PlayerState. Aborting save."));
+		return;
+	}
+	
+
+	const APawn* Pawn = PS->GetPawn();
+	if (Pawn)
+	{
+		if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Pawn))
+		{
+			if (const UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent())
+			{
+				for (UAttributeSet* Set : ASC->GetSpawnedAttributes())
+				{
+					if (IsValid(Set) && Cast<UAeyerjiAttributeSet>(Set))
+					{
+						UAeyerjiAttributeSet* AeyerjiSet = Cast<UAeyerjiAttributeSet>(Set);
+						UE_LOG(LogTemp, Log, TEXT("SaveAeyerjiChar: Found Attribute XP found '%f'"), AeyerjiSet->GetXP());
+						
+\r\n\t\t\t\t\t\t\tData->Attributes.XP = AeyerjiSet->GetXP();\r\n\t\t\t\t\t\t\tData->Attributes.Level = FMath::RoundToInt(AeyerjiSet->GetLevel());\r\n\t\t\t\t\t\t\tData->Attributes.Level = FMath::RoundToInt(AeyerjiSet->GetLevel());
+					}
+				}
+			}
+		}
+	}
+	
+
+	// Save action bar data
+	Data->ActionBar = PS->ActionBar;
+	FString FirstSlotName = PS->ActionBar.Num() ? PS->ActionBar[0].Description.ToString()
+								: TEXT("Empty");
+	FString SecondSlotName = PS->ActionBar.Num() ? PS->ActionBar[1].Description.ToString()
+								: TEXT("Empty");
+	UE_LOGFMT(LogTemp, Log,
+		"Saving to slot '{Slot}'. XP={XP}, Level={Level}. SaveGameName='{SaveGameName}', First item='{First}', Second item='{Second}'",
+		("Slot", Slot),
+		("XP", Data->Attributes.XP),
+	\t("Level", Data->Attributes.Level),
+		("SaveGameName", Data->GetName()),
+		("First", PS->ActionBar.Num() ? PS->ActionBar[0].Description.ToString() : TEXT("Empty")),
+		("Second", PS->ActionBar.Num() > 1 ? PS->ActionBar[1].Description.ToString() : TEXT("Empty")));
+
+
+	// If you ever introduce multiple characters per account,
+	// extend the struct with CharacterId etc.
+	if (!UGameplayStatics::SaveGameToSlot(Data, Slot, 0))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Save failed for slot %s"), *Slot);
+	}
+}
+
+int32 UCharacterStatsLibrary::TagDepth(const FGameplayTag& Tag)
+{
+	int32 Depth = 0;
+	const FString S = Tag.ToString();
+	for (const TCHAR Ch : S)
+	{
+		if (Ch == TEXT('.')) { ++Depth; }
+	}
+	return Depth;
+}
+
+FGameplayTag UCharacterStatsLibrary::GetLeafTagFromBranchTag(const UAbilitySystemComponent* ASC, FGameplayTag BranchTag)
+{
+	if (!ASC || !BranchTag.IsValid())
+	{
+		return BranchTag; // fallback
+	}
+
+	FGameplayTag BestTag;           // invalid means "not found yet"
+	int32        BestDepth = -1;
+	bool         bBestWasDynamic = false;
+
+	auto Consider = [&](const FGameplayTag& Candidate, bool bFromDynamic)
+	{
+		if (!Candidate.IsValid()) return;
+		// Only consider tags that are at/under the branch (hierarchical match).
+		if (!Candidate.MatchesTag(BranchTag)) return;
+
+		const int32 Depth = TagDepth(Candidate);
+		const bool  bPrefer = (Depth > BestDepth) || (Depth == BestDepth && bFromDynamic && !bBestWasDynamic);
+		if (bPrefer)
+		{
+			BestTag         = Candidate;
+			BestDepth       = Depth;
+			bBestWasDynamic = bFromDynamic;
+		}
+	};
+
+	// Scan all activatable abilities
+	const TArray<FGameplayAbilitySpec>& Specs = ASC->GetActivatableAbilities();
+	for (const FGameplayAbilitySpec& Spec : Specs)
+	{
+		// 1) Dynamic spec source tags (replacement for deprecated DynamicAbilityTags)
+		{
+			TArray<FGameplayTag> Dyn;
+			Spec.GetDynamicSpecSourceTags().GetGameplayTagArray(Dyn);
+			for (const FGameplayTag& T : Dyn)
+			{
+				Consider(T, /*bFromDynamic=*/true);
+			}
+		}
+
+		// 2) Ability asset tags (the GA's AbilityTags, i.e. your "AssetTags (Default AbilityTags)")
+		if (Spec.Ability)
+		{
+			const FGameplayTagContainer& AbilityTags = Spec.Ability->GetAssetTags();
+			TArray<FGameplayTag> Arr;
+			AbilityTags.GetGameplayTagArray(Arr);
+			for (const FGameplayTag& T : Arr)
+			{
+				Consider(T, /*bFromDynamic=*/false);
+			}
+		}
+	}
+
+	// If nothing deeper was found, return the branch itself (safe fallback).
+	return BestTag.IsValid() ? BestTag : BranchTag;
+}
+
+FGameplayTag UCharacterStatsLibrary::GetLeafTagFromBranchTag_Container(const UAbilitySystemComponent* ASC, const FGameplayTagContainer& BranchTags)
+{
+	// Use the first tag in the container as the branch.
+	FGameplayTag Branch;
+	{
+		TArray<FGameplayTag> Arr;
+		BranchTags.GetGameplayTagArray(Arr);
+		if (Arr.Num() > 0) { Branch = Arr[0]; }
+	}
+	return GetLeafTagFromBranchTag(ASC, Branch);
+}
+
+FGameplayTagContainer UCharacterStatsLibrary::MakeContainerFromLeaf(const UAbilitySystemComponent* ASC, FGameplayTag BranchTag)
+{
+	FGameplayTagContainer Out;
+	Out.AddTag(GetLeafTagFromBranchTag(ASC, BranchTag));
+	return Out;
+}
+
+namespace
+{
+	// Internal: pick the best spec and its deepest matching tag under BranchTag.
+	const FGameplayAbilitySpec* FindBestSpecForBranchTag(
+		const UAbilitySystemComponent* ASC,
+		const FGameplayTag& BranchTag,
+		FGameplayTag& OutLeafTag)
+	{
+		if (!ASC || !BranchTag.IsValid())
+		{
+			OutLeafTag = BranchTag;
+			return nullptr;
+		}
+
+		const FGameplayAbilitySpec* BestSpec = nullptr;
+		FGameplayTag BestTag;
+		int32 BestDepth = -1;
+		bool bBestWasDynamic = false;
+
+		auto Consider = [&](const FGameplayTag& Candidate, bool bFromDynamic, const FGameplayAbilitySpec& Spec)
+		{
+			if (!Candidate.IsValid() || !Candidate.MatchesTag(BranchTag))
+				return;
+
+			const int32 Depth = UCharacterStatsLibrary::TagDepth(Candidate);
+			const bool bPrefer = (Depth > BestDepth) || (Depth == BestDepth && bFromDynamic && !bBestWasDynamic);
+			if (bPrefer)
+			{
+				BestSpec        = &Spec;
+				BestTag         = Candidate;
+				BestDepth       = Depth;
+				bBestWasDynamic = bFromDynamic;
+			}
+		};
+
+		const TArray<FGameplayAbilitySpec>& Specs = ASC->GetActivatableAbilities();
+		for (const FGameplayAbilitySpec& Spec : Specs)
+		{
+			// 1) Dynamic spec source tags (UE 5.6 replacement for DynamicAbilityTags)
+			TArray<FGameplayTag> Dyn;
+			Spec.GetDynamicSpecSourceTags().GetGameplayTagArray(Dyn);
+			for (const FGameplayTag& T : Dyn)
+			{
+				Consider(T, /*bFromDynamic=*/true, Spec);
+			}
+			
+			// 2) Ability asset tags (GA AbilityTags)
+			if (Spec.Ability)
+			{
+				const FGameplayTagContainer& AbilityTags = Spec.Ability->GetAssetTags();
+				TArray<FGameplayTag> Tags;
+				AbilityTags.GetGameplayTagArray(Tags);
+				for (const FGameplayTag& T : Tags)
+				{
+					Consider(T, /*bFromDynamic=*/false, Spec);
+				}
+			}
+		}
+
+		OutLeafTag = BestTag.IsValid() ? BestTag : BranchTag;
+		return BestSpec;
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+TSubclassOf<UGameplayAbility> UCharacterStatsLibrary::GetAbilityClassForBranchTag(
+	const UAbilitySystemComponent* ASC, FGameplayTag BranchTag)
+{
+	FGameplayTag Leaf;
+	if (const FGameplayAbilitySpec* Spec = FindBestSpecForBranchTag(ASC, BranchTag, Leaf))
+	{
+		return Spec->Ability ? Spec->Ability->GetClass() : nullptr;
+	}
+	return nullptr;
+}
+
+UGameplayAbility* UCharacterStatsLibrary::GetAbilityCDOForBranchTag(
+	const UAbilitySystemComponent* ASC, FGameplayTag BranchTag)
+{
+	FGameplayTag Leaf;
+	if (const FGameplayAbilitySpec* Spec = FindBestSpecForBranchTag(ASC, BranchTag, Leaf))
+	{
+		// Spec.Ability points at the CDO of the ability class.
+		return Spec->Ability;
+	}
+	return nullptr;
+}
+
+static UAbilitySystemComponent* GetAscFromActor(const AActor* Actor)
+{
+	if (!Actor) return nullptr;
+
+	// 1) If the actor itself implements ASI
+	if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Actor))
+	{
+		return ASI->GetAbilitySystemComponent();
+	}
+
+	// 2) If it's a pawn/character, try its components
+	if (const APawn* Pawn = Cast<APawn>(Actor))
+	{
+		// Common case: ASC is on the pawn
+		if (const IAbilitySystemInterface* PawnASI = Cast<IAbilitySystemInterface>(Pawn))
+		{
+			return PawnASI->GetAbilitySystemComponent();
+		}
+		// Or on the PlayerState (GAS common pattern)
+		if (const APlayerState* PS = Pawn->GetPlayerState())
+		{
+			if (const IAbilitySystemInterface* PSASI = Cast<IAbilitySystemInterface>(PS))
+			{
+				return PSASI->GetAbilitySystemComponent();
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+float UCharacterStatsLibrary::GetAttackRangeFromActorASC(const AActor* Actor, float FallbackRange)
+{
+	const UAbilitySystemComponent* ASC = GetAscFromActor(Actor);
+	if (!ASC) return (FallbackRange > 0.f) ? FallbackRange : 0.f;
+
+	const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>();
+	if (!Set) return (FallbackRange > 0.f) ? FallbackRange : 0.f;
+
+	const float Range = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackRangeAttribute());
+	return (Range > 0.f) ? Range : ((FallbackRange > 0.f) ? FallbackRange : 0.f);
+}
+
+bool UCharacterStatsLibrary::ComputeAttackRangeDestination(const FVector& SelfLocation2D,
+                                                           const FVector& TargetLocation2D,
+                                                           const float AttackRange,
+                                                           float StopAtPercentOfRange,
+                                                           FVector& OutDestination)
+{
+	// Default: stay where we are
+	OutDestination = SelfLocation2D;
+
+	if (AttackRange <= 0.f)
+	{
+		return false;
+	}
+
+	// Normalize percentage: accept 0..1 or 0..100
+	float P = StopAtPercentOfRange;
+	if (P <= 0.f)
+	{
+		P = 0.8f; // sensible default: stop at 80% of range
+	}
+	else if (P > 1.f)
+	{
+		P = (P <= 100.f) ? (P * 0.01f) : 1.f;
+	}
+	P = FMath::Clamp(P, 0.0f, 1.0f);
+
+	const float DesiredDistance = AttackRange * P;
+
+	// Work strictly in 2D (ignore Z)
+	FVector ToSelf = SelfLocation2D - TargetLocation2D;
+	ToSelf.Z = 0.f;
+
+	const float CurrentDistance = ToSelf.Size2D();
+	if (CurrentDistance <= DesiredDistance + KINDA_SMALL_NUMBER)
+	{
+		// Already inside the desired ring; no move needed
+		return false;
+	}
+
+	const FVector DirFromTargetToSelf = ToSelf.GetSafeNormal();
+	if (DirFromTargetToSelf.IsNearlyZero())
+	{
+		return false; // overlapping positions; no stable direction
+	}
+
+	// Point on the ray from Target toward Self, at DesiredDistance from Target
+	FVector NewLoc = TargetLocation2D + DirFromTargetToSelf * DesiredDistance;
+
+	// Keep current height
+	NewLoc.Z = SelfLocation2D.Z;
+
+	OutDestination = NewLoc;
+	return true;
+}
+
+bool UCharacterStatsLibrary::IsWithinAttackRange(const AActor* SelfActor,
+                                                 const AActor* TargetActor,
+                                                 float StopAtPercentOfRange,
+                                                 float FallbackRange)
+{
+	if (!SelfActor || !TargetActor) return false;
+
+	const float Range = GetAttackRangeFromActorASC(SelfActor, FallbackRange) * FMath::Max(StopAtPercentOfRange, 0.f);
+	if (Range <= 0.f) return false;
+
+	const FVector A = SelfActor->GetActorLocation();
+	const FVector B = TargetActor->GetActorLocation();
+	return FVector::DistSquared(A, B) <= FMath::Square(Range);
+}
+
+void UCharacterStatsLibrary::SmoothFaceActorTowardTarget(AActor* Source, AActor* Target, float DeltaSeconds,
+	float InterpSpeed, bool bYawOnly, float ToleranceDeg, FRotator& OutNewRotation, bool& bWithinTolerance)
+{
+	OutNewRotation = FRotator::ZeroRotator;
+	bWithinTolerance = false;
+
+	if (!Source || !Target || DeltaSeconds <= 0.f || InterpSpeed <= 0.f)
+	{
+		return;
+	}
+
+	const FVector SrcLoc = Source->GetActorLocation();
+	const FVector TgtLoc = Target->GetActorLocation();
+
+	const FRotator Current = Source->GetActorRotation();
+	FRotator Desired = UKismetMathLibrary::FindLookAtRotation(SrcLoc, TgtLoc);
+
+	if (bYawOnly)
+	{
+		Desired.Pitch = 0.f;
+		Desired.Roll  = 0.f;
+	}
+
+	// Interp with shortest path
+	const FRotator NewRot = FMath::RInterpTo(Current, Desired, DeltaSeconds, InterpSpeed);
+
+	// Are we close enough?
+	const FRotator DeltaRot = UKismetMathLibrary::NormalizedDeltaRotator(Desired, NewRot);
+	const float AngleErr = bYawOnly ? FMath::Abs(DeltaRot.Yaw)
+									: FMath::Max3(FMath::Abs(DeltaRot.Pitch), FMath::Abs(DeltaRot.Yaw), FMath::Abs(DeltaRot.Roll));
+	bWithinTolerance = AngleErr <= ToleranceDeg;
+
+	OutNewRotation = NewRot;
+}
+
+
+
+
+
+
