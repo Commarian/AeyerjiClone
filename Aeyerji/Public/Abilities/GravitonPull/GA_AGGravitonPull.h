@@ -61,15 +61,15 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="GravitonPull|Effects")
 	TSubclassOf<UGameplayEffect> AilmentEffectClass;
 
-	/** SetByCaller tag used for damage magnitude. Example: "Data.Damage". */
+	/** SetByCaller tag used for damage magnitude. Example: "SetByCaller.Damage.Instant". */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="GravitonPull|Tags")
 	FGameplayTag DamageSetByCallerTag;
 
-	/** SetByCaller tag used for slow strength (0..1). Example: "Data.SlowPercent". */
+	/** SetByCaller tag used for slow strength (0..1). Example: "SetByCaller.SlowPercent". */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="GravitonPull|Tags")
 	FGameplayTag SlowSetByCallerTag;
 
-	/** SetByCaller tag used for ailment stack count. Example: "Data.Stacks". */
+	/** SetByCaller tag used for ailment stack count. Example: "SetByCaller.Stacks". */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="GravitonPull|Tags")
 	FGameplayTag AilmentStacksSetByCallerTag;
 
@@ -81,24 +81,39 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="GravitonPull|VFX")
 	TObjectPtr<UNiagaraSystem> ImpactVFX = nullptr;
 
-private:
-	/** Forward trace from the player's viewpoint to find a valid pull target. */
-	AActor* FindTargetForPull(const FGameplayAbilityActorInfo* ActorInfo,
+	/** Blueprint hook to override how the pull target is chosen. */
+	UFUNCTION(BlueprintNativeEvent, Category="GravitonPull|Hooks")
+	AActor* FindTargetForPull(const FGameplayAbilityActorInfo& ActorInfo,
 	                          FVector& OutHitLocation,
 	                          FVector& OutHitNormal) const;
+	virtual AActor* FindTargetForPull_Implementation(const FGameplayAbilityActorInfo& ActorInfo,
+	                                                 FVector& OutHitLocation,
+	                                                 FVector& OutHitNormal) const;
 
-	/** Teleport the target toward the Astral Guardian by PullDistance (or less). */
+	/** Blueprint hook to override pull displacement logic. */
+	UFUNCTION(BlueprintNativeEvent, Category="GravitonPull|Hooks")
 	void PullTarget(AActor* Target,
 	                const FVector& HitLocation,
-	                const FGameplayAbilityActorInfo* ActorInfo) const;
+	                const FGameplayAbilityActorInfo& ActorInfo) const;
+	virtual void PullTarget_Implementation(AActor* Target,
+	                                       const FVector& HitLocation,
+	                                       const FGameplayAbilityActorInfo& ActorInfo) const;
 
-	/** Apply damage, slow, and ailment according to GravitonConfig and Effect classes. */
+	/** Blueprint hook to override how damage and debuffs are applied. */
+	UFUNCTION(BlueprintNativeEvent, Category="GravitonPull|Hooks")
 	void ApplyEffectsToTarget(AActor* Target,
-	                          const FGameplayAbilityActorInfo* ActorInfo) const;
+	                          const FGameplayAbilityActorInfo& ActorInfo) const;
+	virtual void ApplyEffectsToTarget_Implementation(AActor* Target,
+	                                                 const FGameplayAbilityActorInfo& ActorInfo) const;
 
-	/** Spawn beam and impact VFX for a successful pull. */
+	/** Blueprint hook to override visuals for a successful pull. */
+	UFUNCTION(BlueprintNativeEvent, Category="GravitonPull|Hooks")
 	void PlayPullVisuals(AActor* Target,
 	                     const FVector& HitLocation,
 	                     const FVector& HitNormal,
-	                     const FGameplayAbilityActorInfo* ActorInfo) const;
+	                     const FGameplayAbilityActorInfo& ActorInfo) const;
+	virtual void PlayPullVisuals_Implementation(AActor* Target,
+	                                            const FVector& HitLocation,
+	                                            const FVector& HitNormal,
+	                                            const FGameplayAbilityActorInfo& ActorInfo) const;
 };

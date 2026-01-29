@@ -4,11 +4,15 @@
 #include "Net/UnrealNetwork.h"
 #include "Player/PlayerParentNative.h"
 #include "CharacterStatsLibrary.h"
+#include "Player/PlayerStatsTrackingComponent.h"
+#include "AeyerjiGameState.h"
 
 AAeyerjiPlayerState::AAeyerjiPlayerState()
 {
-	ActionBar.SetNum(6);
+	ActionBar.SetNum(7);
 	bReplicates = true;
+
+	PlayerStatsTracking = CreateDefaultSubobject<UPlayerStatsTrackingComponent>(TEXT("PlayerStatsTracking"));
 }
 
 void AAeyerjiPlayerState::Server_SetActionBar_Implementation(
@@ -118,6 +122,46 @@ void AAeyerjiPlayerState::Server_SetActionBar_Implementation(
 		}
 	}
 
+	// 2.5) Enforce potion-only slot (last index): only tags starting with "Ability.Potion" allowed.
+	if (Sanitized.Num() > 0)
+	{
+		const int32 PotionSlotIndex = Sanitized.Num() - 1;
+		const FAeyerjiAbilitySlot& OldSlot = ActionBar.IsValidIndex(PotionSlotIndex) ? ActionBar[PotionSlotIndex] : FAeyerjiAbilitySlot();
+		FAeyerjiAbilitySlot& NewSlot = Sanitized[PotionSlotIndex];
+
+		const auto IsSlotEmpty = [](const FAeyerjiAbilitySlot& Slot) -> bool
+		{
+			return Slot.Tag.IsEmpty() && Slot.Class == nullptr;
+		};
+
+		const auto HasPotionTag = [](const FGameplayTagContainer& TagContainer) -> bool
+		{
+			static const FString PotionTagPrefix(TEXT("Ability.Potion"));
+			for (const FGameplayTag& Tag : TagContainer)
+			{
+				if (Tag.IsValid() && Tag.ToString().StartsWith(PotionTagPrefix))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+		if (!IsSlotEmpty(NewSlot) && !HasPotionTag(NewSlot.Tag))
+		{
+			const TSubclassOf<UGameplayAbility> BlockedClass = OldSlot.Class ? OldSlot.Class : NewSlot.Class;
+			NewSlot = OldSlot;
+
+			AJ_LOG(this, TEXT("Potion slot swap blocked: requires tag prefix Ability.Potion"));
+			static const FText SwapBlockedReason = NSLOCTEXT(
+				"AAeyerjiPlayerState",
+				"SwapBlockedPotionSlot",
+				"Only potion abilities can be placed in the potion slot.");
+			OnActionBarSwapBlocked.Broadcast(SwapBlockedReason, BlockedClass);
+			Client_ActionBarSwapBlocked(SwapBlockedReason, BlockedClass);
+		}
+	}
+
 	// 3) Final de-duplication pass: ensure only one instance of each ability remains.
 	TSet<TSubclassOf<UGameplayAbility>> Seen;
 	for (int32 Idx = 0; Idx < Sanitized.Num(); ++Idx)
@@ -182,6 +226,72 @@ void AAeyerjiPlayerState::RequestSetSaveSlotOverride(const FString& NewSlot)
 	else
 	{
 		Server_SetSaveSlotOverride(NewSlot);
+	}
+}
+
+void AAeyerjiPlayerState::RequestStartRun()
+{
+	if (HasAuthority())
+	{
+		Server_RequestStartRun_Implementation();
+		return;
+	}
+
+	Server_RequestStartRun();
+}
+
+void AAeyerjiPlayerState::Server_RequestStartRun_Implementation()
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (AAeyerjiGameState* GS = World->GetGameState<AAeyerjiGameState>())
+		{
+			GS->Server_StartRun();
+		}
+	}
+}
+
+void AAeyerjiPlayerState::RequestEndRun()
+{
+	if (HasAuthority())
+	{
+		Server_RequestEndRun_Implementation();
+		return;
+	}
+
+	Server_RequestEndRun();
+}
+
+void AAeyerjiPlayerState::Server_RequestEndRun_Implementation()
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (AAeyerjiGameState* GS = World->GetGameState<AAeyerjiGameState>())
+		{
+			GS->Server_MarkRunComplete();
+		}
+	}
+}
+
+void AAeyerjiPlayerState::RequestReturnToMenu()
+{
+	if (HasAuthority())
+	{
+		Server_RequestReturnToMenu_Implementation();
+		return;
+	}
+
+	Server_RequestReturnToMenu();
+}
+
+void AAeyerjiPlayerState::Server_RequestReturnToMenu_Implementation()
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (AAeyerjiGameState* GS = World->GetGameState<AAeyerjiGameState>())
+		{
+			GS->Server_ReturnToMenu();
+		}
 	}
 }
 

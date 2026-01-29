@@ -56,6 +56,14 @@ bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* Dr
 	}
 
 	const FVector2D ScreenPos = DragEvent.GetScreenSpacePosition();
+	const FVector2D LocalPos = GridPanel_Items->GetCachedGeometry().AbsoluteToLocal(ScreenPos);
+	const FIntPoint GridSize = GetInventoryComponent()->GetGridSize();
+	const FVector2D GridExtent = GridPanel_Items->GetCachedGeometry().GetLocalSize();
+	const float CellWidth = (GridSize.X > 0) ? GridExtent.X / FMath::Max(1, GridSize.X) : CellSize.X;
+	const float CellHeight = (GridSize.Y > 0) ? GridExtent.Y / FMath::Max(1, GridSize.Y) : CellSize.Y;
+	const int32 HoverCellX = FMath::Clamp(FMath::FloorToInt(LocalPos.X / FMath::Max(1.f, CellWidth)), 0, FMath::Max(0, GridSize.X - 1));
+	const int32 HoverCellY = FMath::Clamp(FMath::FloorToInt(LocalPos.Y / FMath::Max(1.f, CellHeight)), 0, FMath::Max(0, GridSize.Y - 1));
+
 	FIntPoint TargetTopLeft;
 	if (!ScreenToGridCell(ScreenPos, DragOp->ItemSize, DragOp->GrabOffsetPx, TargetTopLeft))
 	{
@@ -79,7 +87,35 @@ bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* Dr
 	{
 		if (!InventoryComponent->CanPlaceItemAt(TargetTopLeft, ItemSize, DragOp->ItemId))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[InventoryBagDnD] Bag CanPlaceItemAt rejected Item=%s Size=(%d,%d) Target=(%d,%d)"),
+			// If blocked, attempt a swap with the item occupying the target cell.
+			TArray<FInventoryItemGridData> Placements;
+			InventoryComponent->GetGridPlacements(Placements);
+
+			auto DoesPlacementCoverCell = [](const FInventoryItemGridData& Placement, int32 CellX, int32 CellY)
+			{
+				const int32 SizeX = FMath::Max(1, Placement.Size.X);
+				const int32 SizeY = FMath::Max(1, Placement.Size.Y);
+				return CellX >= Placement.TopLeft.X && CellX < Placement.TopLeft.X + SizeX
+					&& CellY >= Placement.TopLeft.Y && CellY < Placement.TopLeft.Y + SizeY;
+			};
+
+			const FInventoryItemGridData* TargetPlacement = Placements.FindByPredicate(
+				[&TargetTopLeft, &HoverCellX, &HoverCellY, DoesPlacementCoverCell](const FInventoryItemGridData& Entry)
+				{
+					return Entry.IsValid()
+						&& (DoesPlacementCoverCell(Entry, TargetTopLeft.X, TargetTopLeft.Y)
+							|| DoesPlacementCoverCell(Entry, HoverCellX, HoverCellY));
+				});
+
+			if (TargetPlacement && TargetPlacement->ItemId != DragOp->ItemId && TargetPlacement->ItemId.IsValid())
+			{
+				InventoryComponent->Server_SwapItemsInGrid(DragOp->ItemId, TargetPlacement->ItemId);
+				UE_LOG(LogTemp, Display, TEXT("[InventoryBagDnD] Swap request %s <-> %s"),
+					*DragOp->ItemId.ToString(), *TargetPlacement->ItemId.ToString());
+				return true;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[InventoryBagDnD] Bag CanPlaceItemAt rejected Item=%s Size=(%d,%d) Target=(%d,%d) and no swap target"),
 				*DragOp->ItemId.ToString(), ItemSize.X, ItemSize.Y, TargetTopLeft.X, TargetTopLeft.Y);
 			return false;
 		}

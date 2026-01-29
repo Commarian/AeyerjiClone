@@ -72,9 +72,11 @@ struct AEYERJI_API FItemGrantedEffect
 {
 	GENERATED_BODY()
 
+	/** Gameplay effect class to apply/grant while the item (or affix) is active. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	TSubclassOf<UGameplayEffect> EffectClass;
 
+	/** Base gameplay effect level used when creating the effect spec (can be scaled later by rarity rules). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	float EffectLevel = 1.f;
 
@@ -90,9 +92,11 @@ struct AEYERJI_API FItemGrantedAbility
 {
 	GENERATED_BODY()
 
+	/** Gameplay ability class to grant while the item (or affix) is active. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	TSubclassOf<UGameplayAbility> AbilityClass;
 
+	/** Ability level to grant (passed to the ability spec). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	int32 AbilityLevel = 1;
 
@@ -112,15 +116,19 @@ struct AEYERJI_API FAffixTier
 {
 	GENERATED_BODY()
 
+	/** Relative chance to pick this tier among other eligible tiers (0 disables this tier). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	int32 Weight = 1;
 
+	/** Minimum UnitRoll value for this tier (UnitRoll is later multiplied by each AttributeRoll.Scale). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	float MinRoll = 1.f;
 
+	/** Maximum UnitRoll value for this tier (swapped with MinRoll at runtime if entered inverted). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	float MaxRoll = 1.f;
 
+	/** Minimum item level required for this tier to be eligible during generation. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	int32 MinItemLevel = 1;
 };
@@ -130,12 +138,15 @@ struct AEYERJI_API FAttributeRoll
 {
 	GENERATED_BODY()
 
+	/** Attribute to modify. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	FGameplayAttribute Attribute;
 
+	/** Multiplier applied to the tier's UnitRoll to produce the final magnitude for this attribute. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	float Scale = 1.f;
 
+	/** How the magnitude is applied (additive, multiplicative, or override). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	EItemModOp Op = EItemModOp::Additive;
 };
@@ -204,6 +215,7 @@ struct AEYERJI_API FEquipmentSlotFilter
 {
 	GENERATED_BODY()
 
+	/** If non-empty, the affix can only roll for items whose equipped slot is contained in this list. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	TArray<EEquipmentSlot> AllowedSlots;
 };

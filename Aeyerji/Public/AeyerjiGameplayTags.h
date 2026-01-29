@@ -9,6 +9,9 @@ namespace AeyerjiTags
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Primary);
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Primary_Ranged_Basic);
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Primary_Melee_Basic);
+
+	// Damage types
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageType_Physical); // Damage.Type.Physical
 		
 	// Add more as needed: Secondary attack, Status effects, etc.
 

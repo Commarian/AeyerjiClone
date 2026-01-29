@@ -35,6 +35,16 @@ public:
     float PerLevelScalar = 0.5f;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards|Overrides")
+    bool bOverride_DifficultyMultiplierRange = false;
+
+    /** Difficulty multiplier applied via lerp(Min, Max, DifficultyScale) where DifficultyScale is curved 0..1. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards", meta=(ClampMin="0.0", EditCondition="bOverride_DifficultyMultiplierRange"))
+    float DifficultyMinMultiplier = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards", meta=(ClampMin="0.0", EditCondition="bOverride_DifficultyMultiplierRange"))
+    float DifficultyMaxMultiplier = 1.5f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards|Overrides")
     bool bOverride_KillerBonusPercent = false;
 
     /** Killer gets +X%; others get -X% */

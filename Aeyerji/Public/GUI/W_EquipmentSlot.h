@@ -41,6 +41,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
 	UAeyerjiItemInstance *GetCurrentItem() const { return CurrentItem.Get(); }
 
+	/** True when the mouse is over this slot or its icon. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	bool IsMouseOverItem() const;
+
+	/** Drop the currently equipped item at the owner's feet. */
+	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Equipment")
+	bool DropItemToGround(float ForwardOffset = 100.f);
+
 	EEquipmentSlot GetEffectiveSlotType() const;
 	int32 GetEffectiveSlotIndex() const;
 
@@ -50,6 +58,9 @@ protected:
 	virtual FReply NativeOnMouseButtonDown(
 		const FGeometry &InGeometry,
 		const FPointerEvent &InMouseEvent) override;
+	virtual FReply NativeOnMouseButtonDoubleClick(
+		const FGeometry& InGeometry,
+		const FPointerEvent& InMouseEvent) override;
 	virtual void NativeOnDragDetected(
 		const FGeometry &InGeometry,
 		const FPointerEvent &InMouseEvent,

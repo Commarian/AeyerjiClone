@@ -41,9 +41,6 @@ APlayerParentNative::APlayerParentNative()
 
   bReplicateUsingRegisteredSubObjectList = true;
 
-  InventoryComponent = CreateDefaultSubobject<UAeyerjiInventoryComponent>(
-      TEXT("InventoryComponent"));
-
   RHandMeshComp =
       CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("RHandMeshComp"));
 
@@ -171,40 +168,40 @@ UAeyerjiInventoryComponent* APlayerParentNative::ResolveInventoryComponent()
     return InventoryComponent;
   }
 
-  if (UAeyerjiInventoryComponent* Existing =
-          FindComponentByClass<UAeyerjiInventoryComponent>())
+  TInlineComponentArray<UAeyerjiInventoryComponent*> InventoryComponents(this);
+  for (UAeyerjiInventoryComponent* Existing : InventoryComponents)
   {
-    InventoryComponent = Existing;
+    if (!Existing)
+    {
+      continue;
+    }
+
+    if (InventoryComponentName.IsNone() || Existing->GetFName() == InventoryComponentName)
+    {
+      InventoryComponent = Existing;
+      return InventoryComponent;
+    }
+  }
+
+  if (InventoryComponents.Num() > 0)
+  {
+    InventoryComponent = InventoryComponents[0];
+    AJ_LOG(this,
+           TEXT("InventoryComponent not found by name '%s' on %s (found %d inventory component(s)); using %s."),
+           *InventoryComponentName.ToString(),
+           *GetName(),
+           InventoryComponents.Num(),
+           *GetNameSafe(InventoryComponent));
     return InventoryComponent;
   }
-
-  return CreateRuntimeInventoryComponent(TEXT("InventoryComponentRuntime"));
-}
-
-UAeyerjiInventoryComponent* APlayerParentNative::CreateRuntimeInventoryComponent(
-    const FName& ComponentName)
-
-{
-
-  UAeyerjiInventoryComponent* NewComponent =
-      NewObject<UAeyerjiInventoryComponent>(
-          this, UAeyerjiInventoryComponent::StaticClass(), ComponentName);
-
-  if (!NewComponent)
+  else
   {
     AJ_LOG(this,
-           TEXT("EnsureInventoryComponent failed - could not create component "
-                "for %s"),
-           *GetName());
-    return nullptr;
+           TEXT("InventoryComponent '%s' missing on %s. Add it in the Blueprint."),
+           *InventoryComponentName.ToString(), *GetName());
   }
 
-  AddInstanceComponent(NewComponent);
-  NewComponent->OnComponentCreated();
-  NewComponent->RegisterComponent();
-  NewComponent->SetIsReplicated(true);
-
-  return NewComponent;
+  return nullptr;
 }
 
 void APlayerParentNative::HandleInventoryComponentResolved(
@@ -215,6 +212,16 @@ void APlayerParentNative::HandleInventoryComponentResolved(
   if (!ResolvedComponent)
   {
     return;
+  }
+
+  if (!ResolvedComponent->GetIsReplicated())
+  {
+    ResolvedComponent->SetIsReplicated(true);
+  }
+
+  if (bReplicateUsingRegisteredSubObjectList)
+  {
+    AddReplicatedSubObject(ResolvedComponent);
   }
 
   if (InventoryComponent != ResolvedComponent)
@@ -522,10 +529,6 @@ void APlayerParentNative::InitAbilityActorInfo()
 
         Leveling->AddReapplyInfiniteEffect(GE_PrimaryAttributes_Infinite);
       }
-
-      const int32 StartLvl = FMath::Max(1, StartLevelOnBeginPlay);
-
-      Leveling->SetLevel(StartLvl); // also refreshes infinite effects/abilities
     }
 
   }
@@ -662,12 +665,15 @@ void APlayerParentNative::HandleASCReady()
 
   {
 
-    AJ_LOG(
-        this,
-        TEXT(
-            "HandleASCReady - Requesting character load (locally controlled)"));
-
-    Server_RequestLoadCharacter();
+    if (!bSaveLoaded && !bSaveLoadRequested)
+    {
+      bSaveLoadRequested = true;
+      AJ_LOG(
+          this,
+          TEXT(
+              "HandleASCReady - Requesting character load (locally controlled)"));
+      Server_RequestLoadCharacter();
+    }
   }
 
   AJ_LOG(this, TEXT("HandleASCReady completed"));
@@ -676,6 +682,15 @@ void APlayerParentNative::HandleASCReady()
 void APlayerParentNative::Server_RequestLoadCharacter_Implementation()
 
 {
+
+  if (bSaveLoaded)
+  {
+    UE_LOG(LogTemp, Verbose,
+           TEXT("Server_RequestLoadCharacter: Save already loaded for %s; skipping."),
+           *GetNameSafe(this));
+    Client_OnSaveLoaded(true);
+    return;
+  }
 
   const FString Slot =
 
@@ -704,10 +719,11 @@ void APlayerParentNative::Server_RequestLoadCharacter_Implementation()
           // Brand-new slot: ensure the save data starts from clean defaults
           Data->ActionBar.Reset();
           Data->Attributes = FAttrSnapshot();
+          Data->Attributes.Level = FMath::Max(1, StartLevelOnBeginPlay);
 
           UE_LOG(LogTemp, Display,
-                 TEXT("Server_RequestLoadCharacter: Slot=%s newly created -> zeroing XP/Level"),
-                 *Slot);
+                 TEXT("Server_RequestLoadCharacter: Slot=%s newly created -> initializing XP=0 Level=%d"),
+                 *Slot, Data->Attributes.Level);
         }
 
         // Always load from the save object so fresh slots use their defaults
@@ -742,6 +758,7 @@ void APlayerParentNative::Server_RequestLoadCharacter_Implementation()
 
   }
 
+  bSaveLoaded = bLoadedOK;
   Client_OnSaveLoaded(bLoadedOK);
 }
 
@@ -750,6 +767,12 @@ void APlayerParentNative::Client_OnSaveLoaded_Implementation(bool bSuccess)
 {
 
   TryLoadingSave();
+
+  bSaveLoaded = bSuccess;
+  if (!bSuccess)
+  {
+    bSaveLoadRequested = false;
+  }
 
   if (bSuccess)
 

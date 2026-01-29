@@ -60,6 +60,7 @@ public:
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CritChance,        Category="Stats|Derived", SaveGame) FGameplayAttributeData CritChance;         AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, CritChance)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_DodgeChance,       Category="Stats|Derived", SaveGame) FGameplayAttributeData DodgeChance;        AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, DodgeChance)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_SpellPower,        Category="Stats|Derived", SaveGame) FGameplayAttributeData SpellPower;         AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, SpellPower)
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_MagicAmp,          Category="Stats|Derived", SaveGame) FGameplayAttributeData MagicAmp;           AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, MagicAmp)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_ManaRegen,         Category="Stats|Derived", SaveGame) FGameplayAttributeData ManaRegen;          AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, ManaRegen)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_HPRegen,           Category="Stats|Derived", SaveGame) FGameplayAttributeData HPRegen;            AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, HPRegen)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CooldownReduction, Category="Stats|Derived", SaveGame) FGameplayAttributeData CooldownReduction;  AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, CooldownReduction)
@@ -102,6 +103,7 @@ public:
     UFUNCTION() void OnRep_CritChance                (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, CritChance, Old); }
     UFUNCTION() void OnRep_DodgeChance               (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, DodgeChance, Old); }
     UFUNCTION() void OnRep_SpellPower                (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, SpellPower, Old); }
+    UFUNCTION() void OnRep_MagicAmp                  (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, MagicAmp, Old); }
     UFUNCTION() void OnRep_ManaRegen                 (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, ManaRegen, Old); }
     UFUNCTION() void OnRep_HPRegen                   (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, HPRegen, Old); }
     UFUNCTION() void OnRep_CooldownReduction         (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, CooldownReduction, Old); }

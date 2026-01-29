@@ -10,6 +10,7 @@
 
 class UItemAffixDefinition;
 class UTexture2D;
+class UMaterialInterface;
 class UStaticMesh;
 class USkeletalMesh;
 class AAeyerjiWeaponActor;
@@ -57,6 +58,10 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	FText DisplayName;
+
+	/** Short flavor/functional description shown in UI tooltips. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item", meta = (MultiLine = "true"))
+	FText Description;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	EItemCategory ItemCategory = EItemCategory::Offense;
@@ -134,4 +139,7 @@ public:
 
 	/** Returns true if a synergy color exists for the given stack count and fills color + param. */
 	bool TryGetEquipSynergyColor(int32 StackCount, FLinearColor& OutColor, FName& OutColorParam) const;
+
+	/** Returns the hard-coded preview material to use for a given item rarity (fallback: null). */
+	static UMaterialInterface* ResolvePreviewMaterial(EItemRarity Rarity);
 };

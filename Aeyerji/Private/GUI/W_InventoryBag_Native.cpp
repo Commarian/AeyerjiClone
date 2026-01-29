@@ -9,6 +9,7 @@
 #include "GUI/W_ItemTile.h"
 #include "GUI/W_EquipmentSlot.h"
 #include "GUI/ItemTooltipData.h"
+#include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Logging/AeyerjiLog.h"
 #include "Player/PlayerParentNative.h"
 
@@ -94,6 +95,87 @@ void UW_InventoryBag_Native::SetCellPadding(FMargin NewPadding)
 void UW_InventoryBag_Native::RefreshInventory()
 {
 	DispatchRebuild();
+}
+
+bool UW_InventoryBag_Native::DropItemUnderCursor(float ForwardOffset)
+{
+	if (!Inventory.IsValid() || !GridPanel_Items)
+	{
+		return false;
+	}
+
+	APlayerController* PC = GetOwningPlayer();
+	if (!PC)
+	{
+		return false;
+	}
+
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	if (!PC->GetMousePosition(MouseX, MouseY))
+	{
+		return false;
+	}
+
+	const FGeometry GridGeometry = GridPanel_Items->GetCachedGeometry();
+	const FVector2D GridExtent = GridGeometry.GetLocalSize();
+	if (GridExtent.X <= 0.f || GridExtent.Y <= 0.f)
+	{
+		return false;
+	}
+
+	const FIntPoint GridSize = Inventory->GetGridSize();
+	if (GridSize.X <= 0 || GridSize.Y <= 0)
+	{
+		return false;
+	}
+
+	const FVector2D ScreenPos(MouseX, MouseY);
+	const FVector2D LocalPos = GridGeometry.AbsoluteToLocal(ScreenPos);
+	if (LocalPos.X < 0.f || LocalPos.Y < 0.f || LocalPos.X > GridExtent.X || LocalPos.Y > GridExtent.Y)
+	{
+		return false;
+	}
+
+	const float CellWidth = GridExtent.X / GridSize.X;
+	const float CellHeight = GridExtent.Y / GridSize.Y;
+	if (CellWidth <= 0.f || CellHeight <= 0.f)
+	{
+		return false;
+	}
+
+	const int32 CellX = FMath::Clamp(FMath::FloorToInt(LocalPos.X / CellWidth), 0, GridSize.X - 1);
+	const int32 CellY = FMath::Clamp(FMath::FloorToInt(LocalPos.Y / CellHeight), 0, GridSize.Y - 1);
+
+	TArray<FInventoryItemGridData> Placements;
+	Inventory->GetGridPlacements(Placements);
+	for (const FInventoryItemGridData& Placement : Placements)
+	{
+		if (!Placement.IsValid())
+		{
+			continue;
+		}
+
+		const int32 SizeX = FMath::Max(1, Placement.Size.X);
+		const int32 SizeY = FMath::Max(1, Placement.Size.Y);
+		if (CellX >= Placement.TopLeft.X && CellX < Placement.TopLeft.X + SizeX
+			&& CellY >= Placement.TopLeft.Y && CellY < Placement.TopLeft.Y + SizeY)
+		{
+			UAeyerjiItemInstance* Item = Placement.ItemInstance ? Placement.ItemInstance.Get() : nullptr;
+			if (!Item && Placement.ItemId.IsValid())
+			{
+				Item = Inventory->FindItemById(Placement.ItemId);
+			}
+
+			if (Item)
+			{
+				HideItemTooltip(nullptr);
+				return UAeyerjiInventoryBPFL::DropItemAtOwner(Inventory.Get(), Item, ForwardOffset);
+			}
+		}
+	}
+
+	return false;
 }
 
 void UW_InventoryBag_Native::RegisterEquipmentSlot(UW_EquipmentSlot* SlotWidget)
@@ -227,7 +309,7 @@ void UW_InventoryBag_Native::RefreshRegisteredEquipmentSlots()
 	{
 		if (SlotEntry.IsValid())
 		{
-			AJ_LOG(this, TEXT("RefreshRegisteredEquipmentSlots -> %s"), *GetNameSafe(SlotEntry.Get()));
+			//AJ_LOG(this, TEXT("RefreshRegisteredEquipmentSlots -> %s"), *GetNameSafe(SlotEntry.Get()));
 			SlotEntry->BindInventory(Inventory.Get());
 		}
 	}

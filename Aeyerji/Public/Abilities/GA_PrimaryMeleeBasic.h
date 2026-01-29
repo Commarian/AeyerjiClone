@@ -11,8 +11,8 @@
 
 class UAnimMontage;
 class UAbilityTask_PlayMontageAndWait;
-class UAbilityTask_WaitGameplayEvent;
 class UGameplayEffect;
+class AEnemyAIController;
 struct FTimerHandle;
 
 UENUM(BlueprintType)
@@ -28,7 +28,7 @@ enum class EPrimaryMeleePhase : uint8
 /**
  * Primary melee ability driven by AttackSpeed.
  * - Plays a montage at a rate derived from AttackSpeed / BaselineAttackSpeed
- * - Listens for melee trace windows via Gameplay Events (from AnimNotifyMeleeWindow)
+ * - Runs timed cone traces during the strike window (no animation notifies required)
  * - Processes hit results on the server and applies damage/cooldown
  */
 UCLASS()
@@ -64,9 +64,9 @@ protected:
                                const FGameplayAbilityActorInfo* ActorInfo,
                                const FGameplayAbilityActivationInfo ActivationInfo) const override;
 
-    /** Gameplay Event tag emitted by UAnimNotifyMeleeWindow each tick of the active window. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee")
-    FGameplayTag MeleeWindowEventTag;
+    virtual bool CheckCooldown(const FGameplayAbilitySpecHandle Handle,
+                               const FGameplayAbilityActorInfo* ActorInfo,
+                               FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
 
     /** Montage played for the swing. Prefer setting this in BP or via data assets. (Soft reference to avoid hard loads in constructor.) */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee")
@@ -80,7 +80,7 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Damage")
     TSoftClassPtr<UGameplayEffect> DamageEffectClass;
 
-    /** SetByCaller tag used when building the damage spec (e.g. Data.Damage). Optional. */
+    /** SetByCaller tag used when building the damage spec (e.g. SetByCaller.Damage.Instant). Optional. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Damage")
     FGameplayTag DamageSetByCallerTag;
 
@@ -116,7 +116,7 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|State", meta=(ClampMin="0.0"))
     float CancelWindowDuration = 0.12f;
 
-    /** Enable the cone-based fallback trace when the animation window provides unreliable results. */
+    /** Cone trace drives hit detection (kept editable for legacy assets even though it is always used). */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace")
     bool bUseConeTraceFallback = true;
 
@@ -132,14 +132,22 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace")
     TEnumAsByte<ECollisionChannel> ConeTraceChannel = ECC_Pawn;
 
+    /** Delay after the wind-up before the first cone sweep fires (unscaled seconds). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.0"))
+    float ConeStrikeDelay = 0.05f;
+
+    /** How long to keep sweeping the cone once the strike starts (unscaled seconds). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.0"))
+    float ConeStrikeDuration = 0.22f;
+
+    /** Interval between cone sweeps while the strike window is active (unscaled seconds). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.01"))
+    float ConeStrikeTickInterval = 0.05f;
+
 private:
     /** Active montage task for the current swing. */
     UPROPERTY()
     TObjectPtr<UAbilityTask_PlayMontageAndWait> MontageTask;
-
-    /** Gameplay event wait task. */
-    UPROPERTY()
-    TObjectPtr<UAbilityTask_WaitGameplayEvent> WindowEventTask;
 
     /** Actors already damaged during this activation. */
     TSet<TWeakObjectPtr<AActor>> DamagedActors;
@@ -197,11 +205,27 @@ private:
     /** Runtime list of montages resolved from the avatar/interface for this activation. */
     TArray<TWeakObjectPtr<UAnimMontage>> RuntimeComboMontages;
 
+    /** Timer driving repeated cone sweeps during the strike. */
+    FTimerHandle ConeTraceTimerHandle;
+
+    /** Cached play rate for the active montage so cone timings scale with speed. */
+    float CurrentMontagePlayRate = 1.f;
+
+    /** Accumulated time spent sweeping during the active strike window. */
+    float ActiveConeStrikeElapsed = 0.f;
+
+    /** Duration and interval for the current strike after play-rate scaling. */
+    float ActiveConeStrikeDuration = 0.f;
+    float ActiveConeStrikeInterval = 0.f;
+
     /** Optional: cached clicked target captured at activation to guarantee inclusion during the swing. */
     TWeakObjectPtr<AActor> StartupClickedTarget;
 
     /** Cached swing shape captured when the hit window first opens to avoid back-hits while turning. */
     FVector CachedHitOrigin;
+
+    // Debug throttling for cooldown checks.
+    mutable double LastCooldownDebugTime = -1.0;
     FVector CachedHitForward;
     bool bCachedHitShapeValid = false;
 
@@ -220,8 +244,6 @@ private:
     bool bCompletionBroadcasted;
 
     bool StartMontage(float AttackSpeed, UAnimMontage* MontageToPlay);
-    void StartWindowListener();
-    void CleanupWindowListener();
     void StopMontageTask();
 
     void HandleServerDamage(const FGameplayAbilityTargetDataHandle& TargetData);
@@ -244,9 +266,6 @@ private:
     void BindMontageDelegates(UAbilityTask_PlayMontageAndWait* Task);
 
     UFUNCTION()
-    void OnMeleeWindowGameplayEvent(FGameplayEventData Payload);
-
-    UFUNCTION()
     void OnMontageCompleted();
 
     UFUNCTION()
@@ -267,6 +286,12 @@ private:
     void ClearCancelWindowTimer();
     void SetMovementLock(bool bEnable);
 
+    void StartConeStrike();
+    void TickConeStrike();
+    void ExecuteConeTraceSweep();
+    void ClearConeTraceTimer();
+    float CalculateMontagePlayRate(float AttackSpeed) const;
+
 protected:
     /** Override in Blueprint to select a montage per activation (e.g. via interfaces on the avatar). */
     UFUNCTION(BlueprintNativeEvent, Category="Melee")
@@ -286,4 +311,8 @@ private:
     void RefreshComboMontagesFromAvatar(const FGameplayAbilityActorInfo* ActorInfo);
     int32 CompactRuntimeComboMontages();
     float ResolveAttackSpeed(const FGameplayAbilityActorInfo* ActorInfo) const;
+    /** Returns the enemy AI controller when the ability owner is AI-controlled. */
+    AEnemyAIController* ResolveEnemyAIController(const FGameplayAbilityActorInfo* ActorInfo) const;
+    /** Returns the current enemy target, filtered for friendly-fire rules. */
+    AActor* ResolveEnemyTargetActor(const FGameplayAbilityActorInfo* ActorInfo) const;
 };

@@ -4,14 +4,18 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Controller.h"
+#include "GameplayEffectTypes.h"
 #include "GameplayTagContainer.h"
 #include "Delegates/Delegate.h"
+#include "Enemy/EnemyScalingTable.h"
 #include "AeyerjiSpawnerGroup.generated.h"
 
 class UBoxComponent;
 class UPrimitiveComponent;
+class AAeyerjiLevelDirector;
 class UAeyerjiGameplayEventSubsystem;
 class AController;
+class APawn;
 class UAeyerjiEncounterDefinition;
 class UNiagaraSystem;
 class UGameplayEffect;
@@ -84,50 +88,62 @@ struct AEYERJI_API FEnemySet
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn")
 	bool bIsElite = false;
 
-	/** Escalates elite tuning/FX; useful for rare mini bosses. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite"))
+	/** Escalates elite tuning/FX; useful for rare mini bosses. (Note: only supported via RegisterExternalEnemy, not via wave data.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides))
 	bool bIsMiniBoss = false;
 
+	/** Marks this enemy set as a boss (stronger than mini boss); supported only for manual registration, not wave spawning. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides))
+	bool bIsBoss = false;
+
 	/** Optional signature abilities granted only to this mini boss set. Falls back to the spawner defaults. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsMiniBoss"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsMiniBoss", EditConditionHides, AdvancedDisplay))
 	TArray<TSubclassOf<UGameplayAbility>> MiniBossGrantedAbilities;
 
+	/** Optional signature abilities granted only to this boss set. Falls back to the spawner defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsBoss", EditConditionHides, AdvancedDisplay))
+	TArray<TSubclassOf<UGameplayAbility>> BossGrantedAbilities;
+
 	/** Force these affixes for this set (Diablo-style combo elites). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	TArray<FGameplayTag> ForcedEliteAffixes;
 
 	/** If provided, limits random rolls to this pool; otherwise uses the spawner pool. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	TArray<FGameplayTag> EliteAffixPoolOverride;
 
 	/** Minimum number of random affixes to roll (in addition to forced ones). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	int32 MinEliteAffixes = 0;
 
 	/** Maximum number of random affixes to roll (in addition to forced ones). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	int32 MaxEliteAffixes = 0;
 
 	/** Optional stat overrides per set; leave at 0 to use the spawner defaults. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteHealthMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteDamageMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteRangeMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteScaleMultiplierOverride = 0.f;
 
 	/** Optional per-set XP reward multiplier for elites. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteXPMultiplierOverride = 0.f;
 
 	/** Optional per-set XP reward multiplier for mini bosses (applied on top of the elite mult). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float MiniBossXPMultiplierOverride = 0.f;
+
+	/** Archetype tag used to look up scaling data in the shared EnemyScaling table. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn")
+	FGameplayTag EnemyArchetypeTag;
 };
 
 USTRUCT(BlueprintType)
@@ -135,8 +151,12 @@ struct AEYERJI_API FWaveDefinition
 {
 	GENERATED_BODY()
 
-	/** Multiple enemy sets compose a wave. */
+	/** Optional label to keep the wave list readable in the details panel. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wave")
+	FText WaveLabel;
+
+	/** Multiple enemy sets compose a wave. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Wave", meta=(TitleProperty="EnemyClass"))
 	TArray<FEnemySet> EnemySets;
 
 	/** Delay (seconds) after the wave is fully spawned before the next can begin. */
@@ -211,6 +231,27 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Spawner")
 	void ResetEncounter();
 
+	/**
+	 * Registers an externally spawned pawn with this encounter so LiveEnemies and completion flow stay accurate.
+	 * Useful when spawning bosses/mini-bosses via scripts or abilities instead of the built-in wave system.
+	 * Optional flags control elite/boss application, aggro handoff, and whether to auto-activate (with a guard to avoid wave-based spawns).
+	 * - bApplyEliteSettings: apply elite/mini/boss tags, abilities, stats, and XP bumps.
+	 * - bApplyAggro: push cached instigator/controller to the pawn (focus/move if enabled).
+	 * - bAutoActivate: arm the encounter so doors/events work.
+	 * - bAutoActivateOnlyIfNoWaves: when true, auto-activate only if there is no wave data, preventing accidental double-spawns.
+	 * - bSkipRandomEliteResolution: when true, skips random elite promotion and honors the template as-authored.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Spawner")
+	void RegisterExternalEnemy(APawn* SpawnedPawn,
+	                           const FEnemySet& EnemyTemplate,
+	                           bool bApplyEliteSettings = true,
+	                           bool bApplyAggro = true,
+	                           bool bAutoActivate = true,
+	                           bool bAutoActivateOnlyIfNoWaves = true,
+	                           AActor* ActivationInstigator = nullptr,
+	                           AController* ActivationController = nullptr,
+	                           bool bSkipRandomEliteResolution = false);
+
 	/** True once all waves are complete and no tracked enemies remain. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	bool IsCleared() const { return bCleared; }
@@ -226,8 +267,22 @@ public:
 	 * Optional gameplay event tag that will activate this encounter when broadcast through the gameplay event subsystem.
 	 * Useful for hooking pickups, scripted moments, or Level Director triggers directly to this spawner.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Activation")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Activation", meta=(AdvancedDisplay))
 	FGameplayTag ActivationEventTag;
+
+	/** When true, overlap activation is disabled and the volume is kept non-colliding. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Activation", meta=(AdvancedDisplay))
+	bool bDisableActivationVolume = false;
+
+	/** When true, the activation gameplay event will be ignored. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Activation", meta=(AdvancedDisplay))
+	bool bDisableActivationEvent = false;
+
+	/**
+	 * Allows ActivateEncounter to start even when no Waves/EncounterDefinition are provided; manual spawns must be registered via RegisterExternalEnemy.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Activation", meta=(AdvancedDisplay))
+	bool bAllowManualActivationWithoutWaves = true;
 
 	/** Optional delay before the first wave begins spawning once activated. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Activation", meta=(ClampMin="0.0"))
@@ -244,11 +299,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn")
 	EAeyerjiSpawnPointMode SpawnPointMode = EAeyerjiSpawnPointMode::Random;
 
+	/** Optional reusable encounter asset. If set, this overrides the inline Waves at activation time. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves", meta=(EditCondition="bPreferEncounterAsset", DisplayName="Encounter Definition Asset"))
+	TObjectPtr<UAeyerjiEncounterDefinition> EncounterDefinition = nullptr;
+
+	/** When true, prefer data from EncounterDefinition; otherwise fall back to inline Waves unless they are empty. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves", meta=(DisplayName="Use Encounter Definition Asset"))
+	bool bPreferEncounterAsset = true;
+
 	/**
 	 * Designer-authored wave data defining which enemy sets appear and in what order.
 	 * The runtime system keeps an internal copy so editing in PIE does not mutate these values.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves", meta=(EditCondition="!bPreferEncounterAsset", EditConditionHides, TitleProperty="WaveLabel"))
 	TArray<FWaveDefinition> Waves;
 
 	/**
@@ -265,6 +328,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Lockdown")
 	TArray<TObjectPtr<AActor>> DoorsToOpenOnClear;
 
+	/** When true, door open/close operations are skipped (useful for global spawn managers). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Lockdown", meta=(AdvancedDisplay))
+	bool bSuppressDoorControl = false;
+
 	/** Fired the moment ActivateEncounter transitions the room into combat (useful for audio or VFX). */
 	UPROPERTY(BlueprintAssignable, Category="Spawner|Events")
 	FSpawnerStartedSignature OnEncounterStarted;
@@ -278,16 +345,16 @@ public:
 	int32 GetLiveEnemyCount() const { return LiveEnemies; }
 
 	/** Aggro behavior applied to freshly spawned enemies. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Aggro", meta=(ShowOnlyInnerProperties))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Aggro", meta=(ShowOnlyInnerProperties, AdvancedDisplay))
 	FSpawnerAggroSettings AggroSettings;
 
-	/** Optional reusable encounter asset. If set, this overrides the inline Waves at activation time. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves")
-	TObjectPtr<UAeyerjiEncounterDefinition> EncounterDefinition = nullptr;
+	/** When true, non-elite spawns have a chance to be promoted to elites. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	bool bAllowRandomElites = false;
 
-	/** When true, prefer data from EncounterDefinition; otherwise fall back to inline Waves unless they are empty. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves")
-	bool bPreferEncounterAsset = true;
+	/** Chance (0..1) for a non-elite spawn to become an elite. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0", ClampMax="1.0", UIMin="0.0", UIMax="1.0", EditCondition="bAllowRandomElites"))
+	float RandomEliteChance = 0.1f;
 
 	/** Base stat bumps applied to any enemy sets flagged as elite (before affixes). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
@@ -308,11 +375,11 @@ public:
 	TObjectPtr<UNiagaraSystem> EliteVFXSystem = nullptr;
 
 	/** Socket to attach the elite FX to (leave None to use the root). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	FName EliteVFXSocket = NAME_None;
 
 	/** Local offset for elite FX when attached. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	FVector EliteVFXOffset = FVector::ZeroVector;
 
 	/** Replicate the elite FX component so a dedicated server still shows the aura to clients. */
@@ -320,51 +387,87 @@ public:
 	bool bReplicateEliteVFX = true;
 
 	/** Default min/max random affixes when a set asks for random rolls. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0", AdvancedDisplay))
 	int32 DefaultEliteAffixMin = 1;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0", AdvancedDisplay))
 	int32 DefaultEliteAffixMax = 3;
 
 	/** Global affix pool to pull Diablo-style modifiers from. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(TitleProperty="AffixTag", AdvancedDisplay))
 	TArray<FEliteAffixDefinition> EliteAffixPool;
 
 	/** Extra bumps applied when an elite is flagged as a mini boss. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
 	float MiniBossScaleMultiplier = 2.25f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
 	float MiniBossHealthMultiplier = 4.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
 	float MiniBossDamageMultiplier = 3.0f;
 
 	/** Signature abilities auto-granted to any mini boss when no per-set overrides are provided. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	TArray<TSubclassOf<UGameplayAbility>> DefaultMiniBossAbilities;
 
+	/** Extra bumps applied when an elite is flagged as a boss. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
+	float BossScaleMultiplier = 3.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
+	float BossHealthMultiplier = 8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
+	float BossDamageMultiplier = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1", AdvancedDisplay))
+	float BossRangeMultiplier = 2.0f;
+
+	/** Optional per-boss ability set when no per-set overrides are provided. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
+	TArray<TSubclassOf<UGameplayAbility>> DefaultBossAbilities;
+
 	/** XP reward multipliers for elites/mini bosses. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0", AdvancedDisplay))
 	float EliteXPMultiplier = 2.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0", AdvancedDisplay))
 	float MiniBossXPMultiplier = 2.0f;
 
+	/** XP reward multiplier for bosses (applied on top of elite mult). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0", AdvancedDisplay))
+	float BossXPMultiplier = 3.0f;
+
 	/** Tags to mark elites/mini-bosses on the ASC if present. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	FGameplayTag EliteGameplayTag;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	FGameplayTag MiniBossGameplayTag;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
+	FGameplayTag BossGameplayTag;
+
 	/** Actor tag added to spawned elites; configurable for StateTree queries. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	FName EliteActorTag = TEXT("Elite");
 
 	/** Actor tag added to spawned mini bosses; configurable for StateTree queries. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
 	FName MiniBossActorTag = TEXT("MiniBoss");
+
+	/** Actor tag added to spawned bosses; configurable for StateTree queries. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(AdvancedDisplay))
+	FName BossActorTag = TEXT("Boss");
+
+	/** Optional pointer back to the level director to read difficulty and player level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawner|Difficulty")
+	TObjectPtr<AAeyerjiLevelDirector> LevelDirector = nullptr;
+
+	/** Shared DataTable (JSON/CSV) that drives enemy attribute scaling by archetype tag. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Difficulty")
+	TSoftObjectPtr<UDataTable> EnemyScalingTable;
 
 protected:
 	UFUNCTION()
@@ -409,6 +512,9 @@ protected:
 	/** Applies elite presentation (scale/VFX) when the enemy set is flagged as elite. */
 	void ApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<const FEliteAffixDefinition*>& Affixes, bool bApplyScale = true);
 
+	/** Returns a copy of the enemy set with random elite promotion applied, if enabled. */
+	FEnemySet ResolveEliteSpawnSet(const FEnemySet& EnemySet) const;
+
 	/** Multicast cosmetic-only RPC so dedicated servers can still show elite FX on clients. */
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<FGameplayTag>& AffixTags);
@@ -422,6 +528,11 @@ protected:
 	const FEliteAffixDefinition* FindAffixDefinition(const FGameplayTag& Tag) const;
 	float ComputeEliteScale(const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes) const;
 	void ApplyAffixVFX(APawn* SpawnedPawn, const FEliteAffixDefinition& Affix);
+	void ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet& EnemySet);
+	void ApplyEnemyScaling(APawn* SpawnedPawn, const FEnemySet& EnemySet);
+	const FEnemyScalingRow* FindScalingRow(const FGameplayTag& ArchetypeTag) const;
+	int32 ResolvePlayerLevelForScaling() const;
+	FGameplayAttribute ResolveAttribute(const FName& AttributeName) const;
 
 protected:
 	/** Callback for gameplay events used to trigger encounter activation. */
@@ -444,6 +555,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category="Spawner|State")
 	int32 CurrentWaveIndex = INDEX_NONE;
+
+	UPROPERTY(VisibleAnywhere, Category="Spawner|State")
+	bool bAwaitingManualSpawns = false;
 
 	UPROPERTY(VisibleAnywhere, Category="Spawner|State")
 	int32 LiveEnemies = 0;

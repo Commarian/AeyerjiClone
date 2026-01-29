@@ -37,6 +37,10 @@ private:
     void                            SubscribeToPrimaries();
     void                            ReapplyDerivedEffect();
     void                            OnPrimaryChanged(const FOnAttributeChangeData& Data);
+    // Applies the regen effect once the ASC and attributes are ready.
+    void                            TryApplyRegen();
+    // Queues a short retry if the regen effect cannot be applied yet.
+    void                            QueueRegenRetry();
 
 private:
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Stats")
@@ -50,4 +54,5 @@ private:
     mutable TWeakObjectPtr<const UAeyerjiAttributeSet> CachedAttr;
     FActiveGameplayEffectHandle                        ActiveDerivedHandle;
     FActiveGameplayEffectHandle                        ActiveRegenHandle;
+    bool                                               bRegenRetryQueued = false;
 };

@@ -28,6 +28,17 @@ struct FAeyerjiPrimaryToDerivedTuning
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float StrengthToHPRegen     = 0.1f;   // +0.1 HP/sec per Strength
 };
 
+USTRUCT(BlueprintType)
+struct FAeyerjiArmorMitigationTuning
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Armor") float ArmorK         = 1000.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Armor") float ArmorSoftCap   = 1000.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Armor") float ArmorTailSlope = 0.00001f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Armor") float ArmorTailCap   = 0.52f;
+};
+
 /** Flat data object with multipliers: keep numbers in one place for easy tuning. */
 UCLASS(BlueprintType)
 class AEYERJI_API UAeyerjiAttributeTuning : public UDataAsset
@@ -36,6 +47,9 @@ class AEYERJI_API UAeyerjiAttributeTuning : public UDataAsset
 public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Tuning")
     FAeyerjiPrimaryToDerivedTuning Rules;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Tuning")
+    FAeyerjiArmorMitigationTuning ArmorMitigation;
 };
 
 /** Developer settings to pick the default tuning DataAsset */

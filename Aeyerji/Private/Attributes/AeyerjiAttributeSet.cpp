@@ -19,7 +19,7 @@ UAeyerjiAttributeSet::UAeyerjiAttributeSet()
     InitLevel(1.f);
 
     // Establish sensible combat defaults so dependent attributes behave.
-    // Convention: AttackSpeed = attacks per second; AttackCooldown = 1/AttackSpeed seconds
+    // Convention: AttackSpeed is a rating where 100 == 1 attack/sec; AttackCooldown = 100 / AttackSpeed seconds.
     InitAttackSpeed(1.f);
     InitAttackCooldown(1.f);
     InitAttackDamage(10.f);
@@ -33,6 +33,7 @@ UAeyerjiAttributeSet::UAeyerjiAttributeSet()
     InitCritChance(0.f);
     InitDodgeChance(0.f);
     InitSpellPower(0.f);
+    InitMagicAmp(0.f);
     InitManaRegen(0.f);
     InitHPRegen(0.f);
     InitCooldownReduction(0.f);
@@ -77,6 +78,7 @@ void UAeyerjiAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, CritChance                , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, DodgeChance               , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, SpellPower                , COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, MagicAmp                  , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, ManaRegen                 , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, HPRegen                   , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, CooldownReduction         , COND_None, REPNOTIFY_Always);
@@ -190,6 +192,10 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     {
         NewValue = FMath::Max(0.f, NewValue);
     }
+    else if (Attribute == GetMagicAmpAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, 1.f);
+    }
     else if (Attribute == GetManaRegenAttribute())
     {
         NewValue = FMath::Max(0.f, NewValue);
@@ -228,11 +234,16 @@ void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCal
 {
     Super::PostGameplayEffectExecute(Data);
 
-    // Keep cooldown derived from AttackSpeed whenever it is modified by a GE
-    if (Data.EvaluatedData.Attribute == GetAttackSpeedAttribute())
+    // Keep cooldown derived from AttackSpeed whenever AttackSpeed or AttackCooldown is modified by a GE.
+    if (Data.EvaluatedData.Attribute == GetAttackSpeedAttribute()
+        || Data.EvaluatedData.Attribute == GetAttackCooldownAttribute())
     {
         const float CurrentAS = FMath::Clamp(GetAttackSpeed(), 0.01f, 1000.f);
-        SetAttackCooldown(FMath::Clamp(100.f / CurrentAS, 0.01f, 5.f));
+        const float DerivedCooldown = FMath::Clamp(100.f / CurrentAS, 0.01f, 5.f);
+        if (!FMath::IsNearlyEqual(GetAttackCooldown(), DerivedCooldown))
+        {
+            SetAttackCooldown(DerivedCooldown);
+        }
     }
 
     if (Data.EvaluatedData.Attribute == GetHPAttribute())

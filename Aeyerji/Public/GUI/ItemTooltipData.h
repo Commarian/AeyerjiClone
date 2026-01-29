@@ -39,6 +39,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
 	FText DisplayName = FText::GetEmpty();
 
+	/** Optional description/flavor text sourced from the item definition. */
+	UPROPERTY(BlueprintReadOnly, Category = "Item")
+	FText Description = FText::GetEmpty();
+
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
 	FName DefinitionId = NAME_None;
 

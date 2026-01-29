@@ -18,6 +18,7 @@
 #include "GameplayEffect.h"
 #include "Kismet/GameplayStatics.h"
 #include "Logging/AeyerjiLog.h"
+#include "AeyerjiGameplayTags.h"
 #include "Perception/AIPerceptionStimuliSourceComponent.h"
 #include "TimerManager.h"
 
@@ -43,6 +44,12 @@ AAeyerjiCharacter::AAeyerjiCharacter(
       CreateDefaultSubobject<UAeyerjiStatEngineComponent>(TEXT("StatEngine"));
   PickupFXComponent =
       CreateDefaultSubobject<UAeyerjiPickupFXComponent>(TEXT("PickupFXComponent"));
+
+  // Default death ability (can be overridden in BP)
+  if (!DeathAbilityClass)
+  {
+    DeathAbilityClass = UGA_Death::StaticClass();
+  }
 }
 void AAeyerjiCharacter::BeginPlay() { Super::BeginPlay(); }
 /*void AAeyerjiCharacter::InitialiseAbilitySystem()
@@ -79,8 +86,11 @@ void AAeyerjiCharacter::AddStartupAbilities() {
     }
   }
   // Passive Death GA so every pawn can die/respawn
-  AbilitySystemAeyerji->GiveAbility(
-      FGameplayAbilitySpec(UGA_Death::StaticClass(), 1));
+  TSubclassOf<UGameplayAbility> DeathClass = DeathAbilityClass ? DeathAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Death::StaticClass());
+  if (DeathClass)
+  {
+    AbilitySystemAeyerji->GiveAbility(FGameplayAbilitySpec(DeathClass, 1));
+  }
 }
 /*
 void AAeyerjiCharacter::InitAttributes() const
@@ -139,6 +149,9 @@ void AAeyerjiCharacter::BindDeathEvent() {
             ASC->GetSet<UAeyerjiAttributeSet>()) {
       UAeyerjiAttributeSet *Stats =
           const_cast<UAeyerjiAttributeSet *>(StatsConst); // cast once
+      // Avoid duplicate binding across respawns/possessions.
+      Stats->OnOutOfHealth.RemoveDynamic(this,
+                                         &AAeyerjiCharacter::HandleOutOfHealth);
       Stats->OnOutOfHealth.AddDynamic(this,
                                       &AAeyerjiCharacter::HandleOutOfHealth);
     }
@@ -179,6 +192,11 @@ void AAeyerjiCharacter::ApplyDeathStateInternal(
       ASC->AddLooseGameplayTag(
           FGameplayTag::RequestGameplayTag(TEXT("State.Dead")));
     }
+
+    // Mirror the gameplay tag onto the actor Tag list so AI-side checks like
+    // Tags.Contains("State.Dead") work and replicate to clients.
+    const FGameplayTag DeadTag = AeyerjiTags::State_Dead;
+    Tags.AddUnique(DeadTag.GetTagName());
 
     if (UAIPerceptionStimuliSourceComponent *Stim =
             FindComponentByClass<UAIPerceptionStimuliSourceComponent>())
@@ -520,10 +538,25 @@ void AAeyerjiCharacter::HandleOutOfHealth(AActor *Victim, AActor *Killer, float 
   ApplyDeathState(DeathOptions);
   if (HasAuthority() && AbilitySystemAeyerji)
   {
-    const bool bActivated = AbilitySystemAeyerji->TryActivateAbilityByClass(UGA_Death::StaticClass());
-    if (!bActivated)
+    TSubclassOf<UGameplayAbility> DeathClass = DeathAbilityClass ? DeathAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Death::StaticClass());
+    if (FGameplayAbilitySpec* DeathSpec = AbilitySystemAeyerji->FindAbilitySpecFromClass(DeathClass))
     {
-      AJ_LOG(this, TEXT("HandleOutOfHealth: failed to activate GA_Death on server (already active or not granted)."));
+      if (!DeathSpec->IsActive())
+      {
+        const bool bActivated = AbilitySystemAeyerji->TryActivateAbility(DeathSpec->Handle);
+        if (!bActivated)
+        {
+          AJ_LOG(this, TEXT("HandleOutOfHealth: GA_Death spec found but activation failed."));
+        }
+      }
+      else
+      {
+        AJ_LOG(this, TEXT("HandleOutOfHealth: GA_Death already active, skipping manual activation."));
+      }
+    }
+    else
+    {
+      AJ_LOG(this, TEXT("HandleOutOfHealth: GA_Death spec missing on server."));
     }
   }
   if (HasAuthority()) {

@@ -10,11 +10,16 @@
 #include "NiagaraSystem.h"
 #include "Avoidance/AeyerjiAvoidanceProfile.h"
 #include "Abilities/AeyerjiAbilitySlot.h"
+#include "Abilities/AeyerjiTargetingManager.h"
 #include "Inventory/AeyerjiLootPickup.h"
 #include "MouseNavBlueprintLibrary.h"
 #include "AeyerjiPlayerController.generated.h"
 class APawn;
 class UAbilitySystemComponent;
+class UStaticMeshComponent;
+class UAeyerjiCameraOcclusionFadeComponent;
+class UAeyerjiViewDistanceCullComponent;
+struct FGameplayTagContainer;
 
 
 UENUM(BlueprintType)
@@ -24,11 +29,21 @@ enum class EAeyerjiMoveLoopMode : uint8
 	FollowOnly      UMETA(DisplayName="Follow Only") // friendly follow: keep looping, idle when close
 };
 
+USTRUCT(BlueprintType)
+struct FCursorFollowTurnRateBucket
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float MaxAngleDeg = 0.f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float TurnRateScalar = 1.f;
+};
+
 class AAeyerjiLootPickup;
 class AEnemyParentNative;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FAeyerjiMoveLoopArrivedSig, AActor*, Target);
-UENUM()
-enum class ECastFlow : uint8 { Normal, AwaitingGround, AwaitingEnemy, AwaitingFriend };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FAeyerjiFacingReadySig, AActor*, Target);
 
@@ -47,6 +62,8 @@ class AEYERJI_API AAeyerjiPlayerController : public APlayerController
 public:
     AAeyerjiPlayerController();
     virtual void Tick(float DeltaSeconds) override;
+	virtual void OnPossess(APawn* InPawn) override;
+	virtual void OnUnPossess() override;
 
 
 	UFUNCTION(Server, Reliable)
@@ -77,9 +94,11 @@ public:
 
 	// ── Assets ────────────────────────────────────────────────────────────
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputMappingContext> IMC_Default = nullptr;
+	UPROPERTY(Transient) TObjectPtr<UInputMappingContext> IMC_ShowLootFallback = nullptr;
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_Attack_Click = nullptr;
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_Move_Click = nullptr;
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_ShowLoot = nullptr; // LeftAlt (Hold)
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_DropItem = nullptr;
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|VFX") TObjectPtr<UNiagaraSystem> FX_Cursor = nullptr;
     UPROPERTY(EditAnywhere, Category="Aeyerji|Navigation")
     float MouseNavCacheRefreshInterval = 0.05f;
@@ -96,8 +115,13 @@ public:
 	UFUNCTION(Server, Reliable) void Server_ClearPickupIntent(FName LootActorName);
 	UFUNCTION(Server, Reliable) void Server_RequestPickup   (FName LootActorName);
 
+	// Accept a generic actor pointer to avoid hot-reload class mismatches; we validate and cast on the server.
+	UFUNCTION(Server, Reliable) void Server_RequestPickupActor(AActor* LootActor);
+
 	void BeginAbilityTargeting(const FAeyerjiAbilitySlot& Slot);
 	UFUNCTION(Server, Reliable) void Server_ActivateAbilityAtLocation(const FAeyerjiAbilitySlot& Slot, FVector_NetQuantize Target);
+	UFUNCTION(Server, Reliable) void Server_ActivateAbilityOnActor(const FAeyerjiAbilitySlot& Slot, AActor* TargetActor);
+	UFUNCTION(Server, Reliable) void Server_ActivateAbilityInstant(const FAeyerjiAbilitySlot& Slot);
 
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|HUD")
 	void ShowPopupMessage(const FText& Message, float Duration = 2.f);
@@ -134,9 +158,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|TODOPutInStats")
 	float PickupAcceptRadius = 22000.f;
 	
+	// Debug
+	UFUNCTION(Exec)
+	void RefreshLootScalingDebug();
+
+	UFUNCTION(Server, Reliable)
+	void ServerRefreshLootScalingDebug();
+	
 	/** Local BP “on click” hook. Return true to CONSUME the click (skip default move/attack). */
 	UFUNCTION(BlueprintNativeEvent, Category="Aeyerji|Input")
 	bool OnClick();
+
+	/** Blueprint hook: attempt to activate the primary attack ability (no hold logic). */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Attack")
+	bool ActivatePrimaryAttackAbility();
 
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Movement")
 	void StartMoveToActorLoop(AActor* Target,
@@ -180,11 +215,20 @@ public:
 	void TickFaceLoop();
 
 protected:
+	virtual void OnRep_Pawn() override;
 	AAeyerjiLootPickup* FindLootPickupByName(FName LootActorName) const;
 
 	// AActor
 	virtual void BeginPlay() override;
 	virtual void SetupInputComponent() override;
+
+	/** Local-only roof occlusion fade helper. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Camera", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<UAeyerjiCameraOcclusionFadeComponent> CameraOcclusionFade = nullptr;
+
+	/** Local-only view distance culling helper. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Camera", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<UAeyerjiViewDistanceCullComponent> ViewDistanceCull = nullptr;
 	
 	/** How close is “close enough” that we should not issue a move? (centimeters) */
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
@@ -192,10 +236,18 @@ protected:
 	
 	// Input
 	void OnAttackClickPressed (const FInputActionValue& Val);
+	void OnAttackClickHeld    (const FInputActionValue& Val);
+	void OnAttackClickReleased(const FInputActionValue& Val);
 
 	void OnMoveClickPressed (const FInputActionValue& Val);
+	void OnMoveClickHeld    (const FInputActionValue& Val);
+	void OnMoveClickReleased(const FInputActionValue& Val);
+	void OnDropItemPressed(const FInputActionValue& Val);
 
-	void HandleMoveCommand();
+	// Build the tag search container for the primary ability (leaf + parents).
+	bool BuildPrimaryAttackTagSearch(UAbilitySystemComponent* ASC, FGameplayTagContainer& OutTags) const;
+
+	void HandleMoveCommand(bool bSpawnCursorFX, bool bIsContinuous);
 
 	TWeakObjectPtr<class AAeyerjiLootPickup> HoveredLoot;
 	TWeakObjectPtr<class AEnemyParentNative> HoveredEnemy;
@@ -229,10 +281,18 @@ protected:
 	void ServerMoveToLocation(const FVector& Goal);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
 	void ServerMoveToActor   (AActor* Target, const float AcceptanceRadius = 15.f);
+	UFUNCTION(Server, Reliable)
+	void Server_UpdateCursorFollowGoal(const FVector& Goal);
+	UFUNCTION(Server, Reliable)
+	void Server_ResetCursorFollowTurnRate();
+	UFUNCTION(Server, Reliable)
+	void Server_ApplyCursorFollowTurnRate(const FVector& Goal);
 
 	// Helpers
 	void SpawnCursorFX(const FVector& Loc) const;
 	bool IsAttackableActor(const AActor* Other) const;
+	void RefreshLootScalingDebug_Internal();
+	bool AreCheatsAllowed() const;
 
 	// Cached targeting
 	UPROPERTY() FVector CachedGoal = FVector::ZeroVector;
@@ -244,17 +304,74 @@ protected:
 
 	// Click/hold semantics
 	float LastServerCmdTs = 0.0;
+	double LastClickMoveCommandTime = -1.0;
+	FVector LastClickMoveCommandGoal = FVector::ZeroVector;
+	bool bCursorFollowActive = false;
+	TWeakObjectPtr<AActor> CursorFollowActor;
+	TWeakObjectPtr<UStaticMeshComponent> CursorFollowDebugMesh;
+	FVector CursorFollowSmoothedGoal = FVector::ZeroVector;
+	bool bCursorFollowHasSmoothedGoal = false;
+	bool bCursorFollowTurnRateActive = false;
+	bool bCursorFollowBucketsSorted = false;
+	float SavedCursorFollowYawRate = 0.f;
+	double LastCursorFollowRepathTime = -1.0;
+	FVector LastCursorFollowRepathGoal = FVector::ZeroVector;
+	double CursorFollowHoldStartTime = -1.0;
+	FVector CursorFollowHoldStartGoal = FVector::ZeroVector;
+	bool bCursorFollowHoldPrimed = false;
+	bool bCursorFollowHoldActive = false;
+
+	// Attack input state (used for click/drag movement).
+	bool bAttackClickHeld = false;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	TArray<FCursorFollowTurnRateBucket> CursorFollowTurnRateBuckets;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowRepathDistance = 120.f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowRepathInterval = 0.08f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowHoldStartDelay = 0.06f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowHoldStartDistance = 40.f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement|Debug")
+	bool bDrawCursorFollowProxy = false;
 	
-	ECastFlow           CastFlow   = ECastFlow::Normal;
-	FAeyerjiAbilitySlot PendingSlot;
-	struct FAbilityRangePreview
-	{
-		bool bActive = false;
-		float Range = 0.f;
-		EAeyerjiTargetMode Mode = EAeyerjiTargetMode::Instant;
-	};
-	FAbilityRangePreview AbilityRangePreview;
-	FTimerHandle AbilityRangePreviewTimer;
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting")
+	FAeyerjiTargetingTunables TargetingTunables;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting")
+	bool bEnableTargetSnap = true;
+
+	/** Max cursor distance (pixels) for snapping to nearby enemies. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.0"))
+	float TargetSnapScreenRadiusPx = 50.f;
+
+	/** Max world-space distance (cm) from the click point for snapping. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.0", Units="cm"))
+	float TargetSnapWorldRadiusCm = 300.f;
+
+	/** Scale snap radius based on camera distance; clamped between min/max. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.1"))
+	float TargetSnapZoomScaleMin = 0.75f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.1"))
+	float TargetSnapZoomScaleMax = 1.25f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="1.0", Units="cm"))
+	float TargetSnapCameraDistanceRef = 1200.f;
+
+	/** If true, skip snap when loot is under the cursor. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting")
+	bool bTargetSnapRequiresNoLootUnderCursor = true;
+
+	UPROPERTY()
+	TObjectPtr<UAeyerjiTargetingManager> TargetingManager = nullptr;
 	
 	/** How often to recompute the goal (s) */
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
@@ -304,23 +421,17 @@ protected:
 	
 	// Tracing helpers
 	bool TraceCursor(ECollisionChannel Channel, FHitResult& OutHit, bool bTraceComplex = false) const;
+	bool ShouldIgnoreCursorActor(const AActor* Actor) const;
 	bool TryGetGroundHit(FHitResult& OutHit) const;
 	bool TryGetPawnHit(FHitResult& OutHit) const;
 	bool TryGetLootHit(FHitResult& OutHit) const;
+	bool TryDropItemUnderCursor();
 
 	// Flow helpers
-	/** Handles pending CastFlow like AwaitingGround; returns true if the click was fully consumed. */
-	bool HandleCastFlowClick();
+	FAeyerjiTargetingClickContext BuildTargetingClickContext() const;
 
 	/** Handles a clicked loot actor: pickup if in range, otherwise enqueue intent & move towards it. Returns true if consumed. */
 	bool HandleLootUnderCursor(AAeyerjiLootPickup* Loot, const FHitResult& LootHit);
-
-	/** Visual preview for ability range while awaiting second click (e.g., blink ground targeting). */
-	void StartAbilityRangePreview(const FAeyerjiAbilitySlot& Slot);
-	void StopAbilityRangePreview();
-	void TickAbilityRangePreview();
-	float ResolveAbilityPreviewRange(const FAeyerjiAbilitySlot& Slot) const;
-	void DrawAbilityRangePreview(float Range, EAeyerjiTargetMode Mode);
 
 	/** Broadcasts pawn-hit hooks and lets BP consume the click; returns true if BP consumed. */
 	bool TryConsumePawnHit(const FHitResult& PawnHit);
@@ -328,11 +439,20 @@ protected:
 	/** Clears any pending pickup intent (safe to call when none). */
 	void ClearPickupIntentIfAny();
 
-	/** Clears targeting state (CastFlow + PendingSlot). */
+	/** Clears targeting state (delegates to the targeting manager). */
 	void ClearTargeting();
+	void EnsureTargetingManagerInitialized();
 
-	/** Sets CachedGoal/Target from a surface hit and dispatches movement. */
-    void MoveToGroundFromHit(const FHitResult& SurfaceHit);
+    /** Sets CachedGoal/Target from a surface hit and dispatches movement. */
+    void MoveToGroundFromHit(const FHitResult& SurfaceHit, bool bSpawnCursorFX, bool bIsContinuous);
+	AActor* GetOrCreateCursorFollowActor();
+	void UpdateContinuousMoveGoal(const FVector& Goal);
+	void UpdateCursorFollowTurnRate(const FVector& DesiredGoal);
+	void ResetCursorFollowTurnRate();
+	void UpdateCursorFollowDebugProxy(AActor* FollowActor);
+	void BeginCursorFollowHold(const FVector& Goal);
+	void ResetCursorFollowHold();
+	bool ShouldRunCursorFollowHold(const FVector& Goal);
 
     /** Common reset at the start of both click handlers. */
     void ResetForClick();
@@ -340,6 +460,8 @@ protected:
 
     /** Returns the ability system component for the possessed pawn if any. */
     UAbilitySystemComponent* GetControlledAbilitySystem() const;
+    /** True when the controlled pawn is flagged dead (ASC or actor tag). */
+    bool IsControlledPawnDead() const;
 
     /** Cancels blocking abilities if allowed; returns true when movement should be suppressed. */
     bool HandleMovementBlockedByAbilities();
@@ -435,6 +557,9 @@ public:
     float AvoidanceMaxGoalDistanceFactor = 1.15f;
 
 private:
+    bool HasShowLootMapping(const UInputMappingContext* Context) const;
+    void EnsureShowLootBinding();
+
     void RefreshMouseNavContextCache();
     double LastMouseNavCacheUpdateTime = -1.0;
     struct FMouseNavServerCache
@@ -461,10 +586,14 @@ private:
     /** If set, we keep issuing the sidestep goal until time elapses. */
     bool   bAvoidanceActive = false;
     FVector ActiveAvoidanceGoal = FVector::ZeroVector;
-    double AvoidanceEndTime = 0.0;
-    double LastAvoidanceTriggerTime = 0.0;
+	double AvoidanceEndTime = 0.0;
+	double LastAvoidanceTriggerTime = 0.0;
 
 	/** Adjusts the move goal in-place if a pawn immediately blocks our path. */
 	bool AdjustGoalForShortAvoidance(FVector& InOutGoal);
-};
 
+	/** Ensures path following isn't ticking on an invalid or dead pawn. */
+	void UpdatePathFollowingForPawnState();
+	bool bPathFollowingTickSuppressed = false;
+	bool bShowLootFallbackAdded = false;
+};

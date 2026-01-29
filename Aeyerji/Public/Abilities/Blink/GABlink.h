@@ -1,7 +1,7 @@
 ﻿#pragma once
 
 #include "CoreMinimal.h"
-#include "Abilities/GameplayAbility.h"
+#include "Abilities/GA_AeyerjiBase.h"
 #include "GameplayTagContainer.h"
 #include "Abilities/Blink/DA_Blink.h"
 #include "GABlink.generated.h"
@@ -12,7 +12,7 @@
  *  - Consumes mana + starts cooldown via CommitAbility
  */
 UCLASS()
-class AEYERJI_API UGABlink : public UGameplayAbility
+class AEYERJI_API UGABlink : public UGA_AeyerjiBase
 {
 	GENERATED_BODY()
 

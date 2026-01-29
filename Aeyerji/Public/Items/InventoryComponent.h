@@ -17,6 +17,7 @@ class UActorChannel;
 class FOutBunch;
 struct FReplicationFlags;
 class AAeyerjiLootPickup;
+class UAeyerjiLootTable;
 
 USTRUCT()
 struct AEYERJI_API FItemActiveEffectSet
@@ -25,6 +26,9 @@ struct AEYERJI_API FItemActiveEffectSet
 
 	UPROPERTY()
 	FActiveGameplayEffectHandle StatsHandle;
+
+	UPROPERTY()
+	bool bAppliedItemStats = false;
 
 	UPROPERTY()
 	TArray<FActiveGameplayEffectHandle> AdditionalHandles;
@@ -178,7 +182,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnInventoryItemStateChanged, const 
 /**
  * Network-aware inventory component that tracks owned items and equipped slots.
  */
-UCLASS(ClassGroup = (Aeyerji), meta = (BlueprintSpawnableComponent))
+UCLASS(BlueprintType, Blueprintable, ClassGroup = (Aeyerji), meta = (BlueprintSpawnableComponent))
 class AEYERJI_API UAeyerjiInventoryComponent : public UActorComponent
 {
 	GENERATED_BODY()
@@ -216,6 +220,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Inventory|Loot")
 	TSubclassOf<AAeyerjiLootPickup> LootPickupClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory|GAS")
+	TSubclassOf<UGameplayEffect> ItemStatsEffectClass;
 
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	UAbilitySystemComponent* GetASC() const;
@@ -275,6 +282,14 @@ public:
 	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventory|Grid")
 	void Server_MoveItemInGrid(const FGuid& ItemId, FIntPoint NewTopLeft);
 
+	/** Swap two items in the grid if both fit in each other's positions. */
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventory|Grid")
+	void Server_SwapItemsInGrid(const FGuid& ItemIdA, const FGuid& ItemIdB);
+
+	/** Swap two equipped indices within the same slot category. */
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventory|Equipment")
+	void Server_SwapEquippedSlots(EEquipmentSlot Slot, int32 SlotIndexA, int32 SlotIndexB);
+
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Grid")
 	void SetGridDimensions(int32 Columns, int32 Rows);
 
@@ -307,8 +322,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Inventory")
 	void DropItemAtOwner(const FGuid& ItemId, float ForwardOffset = 100.f);
 
+	/** Debug-only: recomputes item stats using the current loot table (authority only). */
+	int32 DebugRefreshItemScaling(const UAeyerjiLootTable& LootTable);
+
 protected:
-	void ApplyItemGameplayEffect(UAeyerjiItemInstance* Item);
+	void ApplyItemGameplayEffect(UAeyerjiItemInstance* Item, float Multiplier = 1.f);
 	void RemoveItemGameplayEffect(const FGuid& ItemId);
 
 	bool TryAutoPlaceItem(UAeyerjiItemInstance* Item);
@@ -328,9 +346,6 @@ protected:
 	void OnRep_GridSize();
 
 	void OnRep_Items();
-
-	UPROPERTY(EditDefaultsOnly, Category = "Inventory|GAS")
-	TSubclassOf<UGameplayEffect> ItemStatsEffectClass;
 
 	void BroadcastItemStateChange(EInventoryItemStateChange Change, UAeyerjiItemInstance* Item, EEquipmentSlot Slot = EEquipmentSlot::Offense, int32 SlotIndex = INDEX_NONE);
 
@@ -359,4 +374,3 @@ protected:
 	bool UnequipSlotInternal(EEquipmentSlot Slot, int32 SlotIndex, const FIntPoint* PreferredTopLeft);
 	void PruneEmptyEquippedEntries();
 };
-

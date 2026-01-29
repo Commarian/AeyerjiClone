@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 
 #include "Abilities/GameplayAbility.h"
+#include "GameplayTagContainer.h"
 
 #include "GA_AeyerjiBase.generated.h"
 
@@ -99,6 +100,12 @@ protected:
   void EvaluateAbilityCostAndCooldown(const UAbilitySystemComponent* ASC, float& OutManaCost, float& OutCooldown) const;
   /** Attempts to set generic cost/cooldown SetByCaller magnitudes on the outgoing effect spec. */
   void ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& SpecHandle, float ManaCost, float Cooldown) const;
+  /** Adds a damage-type tag to the outgoing effect spec if valid. */
+  void ApplyDamageTypeTagToSpec(FGameplayEffectSpecHandle& SpecHandle, const FGameplayTag& DamageTypeTag) const;
+
+  /** Optional default damage-type tag to apply to outgoing damage specs. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Damage")
+  FGameplayTag DefaultDamageTypeTag;
 
   virtual bool CheckCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
   virtual void ApplyCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const override;

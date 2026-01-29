@@ -4,6 +4,7 @@
 
 #include "AeyerjiCharacter.h"
 
+#include "Attributes/AeyerjiAttributeSet.h"
 #include "AeyerjiGameplayTags.h"
 
 #include "Components/CapsuleComponent.h"
@@ -146,20 +147,60 @@ void UGA_AeyerjiBase::ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& S
   const FGameplayTag ManaTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Cost.Mana"));
   const FGameplayTag CooldownTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Cooldown.Seconds"));
 
-  if (ManaTag.IsValid() && ManaCost > 0.f)
+  if (ManaTag.IsValid())
   {
     Spec->SetSetByCallerMagnitude(ManaTag, ManaCost);
   }
 
-  if (CooldownTag.IsValid() && Cooldown > 0.f)
+  if (CooldownTag.IsValid())
   {
     Spec->SetSetByCallerMagnitude(CooldownTag, Cooldown);
   }
 }
 
+void UGA_AeyerjiBase::ApplyDamageTypeTagToSpec(FGameplayEffectSpecHandle& SpecHandle, const FGameplayTag& DamageTypeTag) const
+{
+  if (!DamageTypeTag.IsValid() || !SpecHandle.IsValid() || !SpecHandle.Data.IsValid())
+  {
+    return;
+  }
+
+  SpecHandle.Data->AddDynamicAssetTag(DamageTypeTag);
+}
+
 bool UGA_AeyerjiBase::CheckCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags) const
 {
-  // Let base implementation do gating
+  if (!ActorInfo || !ActorInfo->AbilitySystemComponent.IsValid())
+  {
+    return false;
+  }
+
+  UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
+
+  float ManaCost = 0.f;
+  float CooldownSeconds = 0.f;
+  EvaluateAbilityCostAndCooldown(ASC, ManaCost, CooldownSeconds);
+
+  // Simple mana gate to avoid SetByCaller warnings from GE-based checks.
+  if (ManaCost > 0.f)
+  {
+    const FGameplayAttribute ManaAttr = UAeyerjiAttributeSet::GetManaAttribute();
+    if (ASC->HasAttributeSetForAttribute(ManaAttr))
+    {
+      const float CurrentMana = ASC->GetNumericAttribute(ManaAttr);
+      if (CurrentMana + KINDA_SMALL_NUMBER < ManaCost)
+      {
+        return false;
+      }
+    }
+  }
+
+  // If a cost GE exists, skip Super::CheckCost to avoid evaluating it without SetByCaller.
+  if (GetCostGameplayEffect() != nullptr)
+  {
+    return true;
+  }
+
   return Super::CheckCost(Handle, ActorInfo, OptionalRelevantTags);
 }
 
@@ -186,7 +227,7 @@ void UGA_AeyerjiBase::ApplyCost(const FGameplayAbilitySpecHandle Handle, const F
   }
 }
 
-void UGA_AeyerjiBase::ApplyCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const
+void UGA_AeyerjiBase::ApplyCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const      FGameplayAbilityActivationInfo ActivationInfo) const
 {
   if (!ActorInfo || !ActorInfo->AbilitySystemComponent.IsValid())
   {
@@ -209,6 +250,7 @@ void UGA_AeyerjiBase::ApplyCooldown(const FGameplayAbilitySpecHandle Handle, con
     }
   }
 }
+
 bool UGA_AeyerjiBase::BP_TryCommitAbility(bool bEndAbilityOnFailure)
 
 {

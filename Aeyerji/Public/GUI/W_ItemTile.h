@@ -39,6 +39,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|UI")
 	UAeyerjiItemInstance* GetItemInstance() const { return Item; }
 
+	/** True when the mouse is over this tile or its icon. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|UI")
+	bool IsMouseOverItem() const;
+
+	/** UI helper so BP can drop the bound item to the ground (owner forward offset). */
+	UFUNCTION(BlueprintCallable, Category = "Aeyerji|UI")
+	bool DropItemToGround(float ForwardOffset = 100.f);
+
 	/** Injects the inventory component so the tile can request RPCs (equip/move). */
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|UI")
 	void BindInventory(UAeyerjiInventoryComponent* InInventory);
@@ -47,6 +55,7 @@ protected:
 	virtual void NativeOnInitialized() override;
 	virtual void NativeDestruct() override;
 	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
+	virtual FReply NativeOnMouseButtonDoubleClick(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 	virtual void NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent, UDragDropOperation*& OutOperation) override;
 	virtual void NativeOnMouseEnter(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 	virtual void NativeOnMouseLeave(const FPointerEvent& InMouseEvent) override;
@@ -87,7 +96,4 @@ protected:
 	void HandleObservedItemChanged();
 
 	void TryEquipFromTile();
-
-	/** Optional rarity tint on the border. */
-	FLinearColor RarityTint(EItemRarity Rarity) const;
 };

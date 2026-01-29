@@ -32,6 +32,7 @@ FAeyerjiItemTooltipData FAeyerjiItemTooltipData::FromItem(UAeyerjiItemInstance* 
 	{
 		Data.DefinitionId = Definition->ItemId;
 		Data.Icon = Definition->Icon;
+		Data.Description = Definition->Description;
 		Data.ItemCategory = Definition->ItemCategory;
 		Data.DefaultSlot = Definition->DefaultSlot;
 		Data.BaseModifiers = Definition->BaseModifiers;

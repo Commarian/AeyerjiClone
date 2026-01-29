@@ -9,6 +9,7 @@ namespace AeyerjiTags
     UE_DEFINE_GAMEPLAY_TAG(Ability_Primary, "Ability.Primary");
     UE_DEFINE_GAMEPLAY_TAG(Ability_Primary_Melee_Basic,  "Ability.Primary.Melee.Basic");
     UE_DEFINE_GAMEPLAY_TAG(Ability_Primary_Ranged_Basic, "Ability.Primary.Ranged.Basic");
+    UE_DEFINE_GAMEPLAY_TAG(DamageType_Physical, "Damage.Type.Physical");
     UE_DEFINE_GAMEPLAY_TAG(State_Ability_PrimaryMelee_WindUp,    "State.Ability.PrimaryMelee.WindUp");
     UE_DEFINE_GAMEPLAY_TAG(State_Ability_PrimaryMelee_HitWindow, "State.Ability.PrimaryMelee.HitWindow");
     UE_DEFINE_GAMEPLAY_TAG(State_Ability_PrimaryMelee_Recovery,  "State.Ability.PrimaryMelee.Recovery");

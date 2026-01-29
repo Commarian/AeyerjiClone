@@ -6,6 +6,7 @@
 #include "Aeyerji/AeyerjiSaveGame.h"
 #include "GameFramework/PlayerState.h"     // APlayerState
 #include "GameplayTagContainer.h"
+#include "Items/LootTypes.h"
 #include "CharacterStatsLibrary.generated.h"
 
 class UAbilitySystemComponent;
@@ -48,6 +49,7 @@ enum class EAeyerjiStat : uint8
     ProjectileSpeedRanged               UMETA(DisplayName = "Projectile Speed (Ranged)"),
     RunSpeed                            UMETA(DisplayName = "Run Speed"),
     SpellPower                          UMETA(DisplayName = "Spell Power"),
+    MagicAmp                            UMETA(DisplayName = "Magic Amp"),
     Strength                            UMETA(DisplayName = "Strength"),
     VisionRange                         UMETA(DisplayName = "Vision Range"),
     WalkSpeed                           UMETA(DisplayName = "Walk Speed"),
@@ -82,6 +84,18 @@ public:
 	                            const class AAeyerjiPlayerState* PS,
 	                            FString Slot);
 
+	/** Returns the saved difficulty slider (0..1000) and normalized scale (0..1) if one was set; false otherwise. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Difficulty", meta=(WorldContext="WorldContextObject"))
+	static bool GetSavedDifficulty(const UObject* WorldContextObject, float& OutSlider, float& OutScale);
+
+	/** Records a new best (lowest) completed run time for the given difficulty slider on this player's save slot. Server-authoritative (writes SaveGame on the server instance). */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Run|Persistence")
+	static bool RecordBestRunTimeSecondsForDifficulty(const class AAeyerjiPlayerState* PS, float RunTimeSeconds, float DifficultySlider);
+
+	/** Looks up the best (lowest) completed run time for the given difficulty slider on this player's save slot. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Run|Persistence")
+	static bool GetBestRunTimeSecondsForDifficulty(const class AAeyerjiPlayerState* PS, float DifficultySlider, float& OutBestRunTimeSeconds);
+
 	static int32 TagDepth(const FGameplayTag& Tag);
 
 	UFUNCTION(BlueprintCallable, Category="GAS|Tags")
@@ -101,6 +115,26 @@ public:
 	UFUNCTION(BlueprintPure, Category="GAS|Tags")
 	static UGameplayAbility* GetAbilityCDOForBranchTag(
 		const UAbilitySystemComponent* ASC, FGameplayTag BranchTag);
+
+	/** Finds a UPlayerStatsTrackingComponent on the actor or its PlayerState (if a pawn). */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Stats", meta=(DefaultToSelf="Actor"))
+	static class UPlayerStatsTrackingComponent* GetPlayerStatsTracking(const AActor* Actor);
+
+	/** Returns true if the player has ever picked up the given item id (lifetime, per current save). */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Stats", meta=(DefaultToSelf="Actor"))
+	static bool HasPlayerPickedUpItemId(const AActor* Actor, FName ItemId);
+
+	/** BP helper to resolve the loot service subsystem from any world context. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Service", meta=(WorldContext="WorldContextObject"))
+	static class ULootService* GetLootService(UObject* WorldContextObject);
+
+	/** Resolves an item definition from a loot result (ItemDefinition pointer or ItemId). */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Items")
+	static class UItemDefinition* GetDefinitionFromLootResult(const FLootDropResult& Result);
+
+	/** Resolves an item definition by item id using the asset manager. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Loot|Items", meta=(WorldContext="WorldContextObject"))
+	static class UItemDefinition* ResolveItemDefinitionById(UObject* WorldContextObject, FName ItemId);
     /** Blueprint helper that looks up a numeric Aeyerji stat on any actor that exposes an ASC. */
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Stats", meta=(DefaultToSelf="Actor", ExpandBoolAsExecs="ReturnValue", DisplayName="Get Aeyerji Stat From Actor"))
     static bool GetAeyerjiStatFromActor(const AActor* Actor, EAeyerjiStat Stat, float& OutValue);
@@ -142,9 +176,3 @@ public:
 		FRotator& OutNewRotation,
 		bool& bWithinTolerance);
 };
-
-
-
-
-
-

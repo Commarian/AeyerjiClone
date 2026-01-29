@@ -14,6 +14,7 @@
 
 struct FTimerHandle;
 class UAeyerjiPickupFXComponent;
+class UGameplayAbility;
 
 
 USTRUCT(BlueprintType)
@@ -149,6 +150,10 @@ protected:
 	/** List of abilities every instance of this class should start with like DEATH*/
 	UPROPERTY(EditDefaultsOnly, Category = "Aeyerji|GAS")
 	TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
+
+	/** Passive death ability (can be overridden per-BP, e.g. to use BP_GA_Death). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aeyerji|GAS")
+	TSubclassOf<UGameplayAbility> DeathAbilityClass;
 
 	/** Level used by attribute curves (override per-pawn if you want) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|GAS")

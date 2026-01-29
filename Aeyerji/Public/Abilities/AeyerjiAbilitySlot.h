@@ -5,7 +5,7 @@
 #include "AeyerjiAbilityTypes.h" 
 #include "AeyerjiAbilitySlot.generated.h"
 
-/** Fixed-size ability-bar record (6 per player) */
+/** Fixed-size ability-bar record (7 per player, including potion slot) */
 USTRUCT(BlueprintType)
 struct FAeyerjiAbilitySlot
 {

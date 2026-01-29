@@ -60,15 +60,74 @@ EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
 		return EMouseNavResult::None;
 	}
 
-	// Step 1: pawn-only object trace
-	static const TArray<TEnumAsByte<EObjectTypeQuery>> PawnObjects = {
-		UEngineTypes::ConvertToObjectType(ECC_Pawn)
+	UWorld* World = PlayerController->GetWorld();
+	if (!World)
+	{
+		return EMouseNavResult::None;
+	}
+
+	FVector WorldOrigin;
+	FVector WorldDir;
+	if (!PlayerController->DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
+	{
+		return EMouseNavResult::None;
+	}
+
+	auto ShouldIgnoreActor = [&](const AActor* Actor) -> bool
+	{
+		if (!Actor)
+		{
+			return false;
+		}
+
+		if (const APawn* Pawn = Cast<APawn>(Actor))
+		{
+			return Pawn->IsPlayerControlled();
+		}
+
+		const AActor* Owner = Actor->GetOwner();
+		while (Owner)
+		{
+			if (const APawn* OwnerPawn = Cast<APawn>(Owner))
+			{
+				if (OwnerPawn->IsPlayerControlled())
+				{
+					return true;
+				}
+			}
+			Owner = Owner->GetOwner();
+		}
+
+		return false;
 	};
 
-	FHitResult Hit;
-	if (PlayerController->GetHitResultUnderCursorForObjects(
-			PawnObjects, /*bTraceComplex=*/true, Hit))
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MouseNavCursor), /*bTraceComplex=*/true);
+	if (const APawn* MyPawn = PlayerController->GetPawn())
 	{
+		Params.AddIgnoredActor(MyPawn);
+	}
+
+	const FVector TraceStart = WorldOrigin;
+	const FVector TraceEnd = TraceStart + WorldDir * 100000.f;
+
+	// Step 1: pawn-only object trace
+	FCollisionObjectQueryParams PawnParams;
+	PawnParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	FHitResult Hit;
+	for (int32 Pass = 0; Pass < 4; ++Pass)
+	{
+		if (!World->LineTraceSingleByObjectType(Hit, TraceStart, TraceEnd, PawnParams, Params))
+		{
+			break;
+		}
+
+		if (ShouldIgnoreActor(Hit.GetActor()))
+		{
+			Params.AddIgnoredActor(Hit.GetActor());
+			continue;
+		}
+
 		if (APawn* HitPawn = Cast<APawn>(Hit.GetActor()))
 		{
 			OutNavLocation = HitPawn->GetActorLocation();
@@ -78,11 +137,12 @@ EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
 			ReportToServer(EMouseNavResult::ClickedPawn, OutNavLocation, OutCursorLocation, HitPawn);
 			return EMouseNavResult::ClickedPawn;
 		}
+
+		break;
 	}
 
 	// Step 2: fallback visibility trace for ground hits
-	if (!PlayerController->GetHitResultUnderCursorByChannel(
-			static_cast<ETraceTypeQuery>(ECC_Visibility), /*bTraceComplex=*/true, Hit))
+	if (!World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params))
 	{
 		return EMouseNavResult::None; // nothing under cursor at all
 	}
@@ -144,6 +204,10 @@ bool UMouseNavBlueprintLibrary::GetClosestNavigableLocationInRange(
 	}
 
 	const APawn* Pawn = PlayerController ? PlayerController->GetPawn() : nullptr;
+	if (!Pawn)
+	{
+		Pawn = Cast<APawn>(WorldContextObject);
+	}
 
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 	if (!NavSys) { return false; }
@@ -287,6 +351,44 @@ bool UMouseNavBlueprintLibrary::GetClosestNavigableLocationInRange(
 		OutTeleportLocation = OutNavLocation;
 	}
 
+	if (Pawn)
+	{
+		if (const UCapsuleComponent* Capsule = Pawn->FindComponentByClass<UCapsuleComponent>())
+		{
+			const float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+			const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+			if (CapsuleRadius > KINDA_SMALL_NUMBER && CapsuleHalfHeight > KINDA_SMALL_NUMBER)
+			{
+				if (UWorld* OverlapWorld = World)
+				{
+					const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight);
+					FCollisionQueryParams Params(SCENE_QUERY_STAT(BlinkSafeCheck), false, Pawn);
+					Params.AddIgnoredActor(Pawn);
+
+					FCollisionObjectQueryParams ObjectParams;
+					ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
+					ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+					ObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody);
+					ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+					const bool bOverlaps = OverlapWorld->OverlapAnyTestByObjectType(
+						OutTeleportLocation,
+						FQuat::Identity,
+						ObjectParams,
+						CapsuleShape,
+						Params);
+
+					if (bOverlaps)
+					{
+						OutNavLocation = FVector::ZeroVector;
+						OutTeleportLocation = FVector::ZeroVector;
+						return false;
+					}
+				}
+			}
+		}
+	}
+
 	return true;
 }
 bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
@@ -307,7 +409,6 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 
 	TraceHeight = FMath::Max(TraceHeight, 0.f);
 	TraceDepth = FMath::Max(TraceDepth, 0.f);
-	AdditionalOffset = FMath::Max(AdditionalOffset, 0.f);
 
 	float CapsuleRadius = 0.f;
 	float CapsuleHalfHeight = 0.f;
@@ -330,10 +431,15 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 
 	const bool bHasCapsule = CapsuleRadius > KINDA_SMALL_NUMBER && CapsuleHalfHeight > KINDA_SMALL_NUMBER;
 
+	// Default hover keeps capsule lifted above the surface to avoid post-teleport depenetration pushing downwards.
+	const float DefaultHover = bHasCapsule ? (CapsuleHalfHeight * 0.25f + 10.f) : 10.f;
+	AdditionalOffset = FMath::Max(AdditionalOffset, DefaultHover);
+
 	// Start the sweep high enough so the capsule is clear of the ground even on uneven surfaces.
 	const FVector UpVector = FVector::UpVector;
-	const float EffectiveTraceHeight = TraceHeight + (bHasCapsule ? CapsuleHalfHeight : 0.f);
-	const float EffectiveTraceDepth = TraceDepth + (bHasCapsule ? CapsuleHalfHeight : 0.f);
+	const float ExtraHeadroom = bHasCapsule ? CapsuleHalfHeight * 0.5f + AdditionalOffset : AdditionalOffset;
+	const float EffectiveTraceHeight = TraceHeight + (bHasCapsule ? CapsuleHalfHeight : 0.f) + ExtraHeadroom;
+	const float EffectiveTraceDepth = TraceDepth + (bHasCapsule ? CapsuleHalfHeight : 0.f) + AdditionalOffset;
 	const FVector TraceStart = NavLocation + UpVector * EffectiveTraceHeight;
 	const FVector TraceEnd = NavLocation - UpVector * EffectiveTraceDepth;
 
@@ -400,7 +506,7 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 	}
 	else if (bHasCapsule)
 	{
-		// Sweep hit gives the capsule centre at impact; lifting slightly avoids post-teleport penetration.
+		// Sweep hit gives the capsule centre at impact; lifting avoids post-teleport penetration and floor seams.
 		OutTeleportLocation = GroundHit.Location + UpVector * AdditionalOffset;
 	}
 	else

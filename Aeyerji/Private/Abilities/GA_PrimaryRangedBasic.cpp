@@ -8,6 +8,8 @@
 #include "AeyerjiGameplayTags.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Enemy/EnemyAIController.h"
+#include "Enemy/AeyerjiEnemyArchetypeComponent.h"
+#include "GAS/GE_DamagePhysical.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/Pawn.h"
@@ -36,6 +38,7 @@ UGA_PrimaryRangedBasic::UGA_PrimaryRangedBasic()
 {
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	bServerRespectsRemoteAbilityCancellation = true;
+	DefaultDamageTypeTag = AeyerjiTags::DamageType_Physical;
 
 	FGameplayTagContainer Tags = GetAssetTags();
 	Tags.AddTag(AeyerjiTags::Ability_Primary);
@@ -48,7 +51,7 @@ UGA_PrimaryRangedBasic::UGA_PrimaryRangedBasic()
 
 	if (!DamageSetByCallerTag.IsValid())
 	{
-		static const FName DamageTagName(TEXT("Data.Damage"));
+		static const FName DamageTagName(TEXT("SetByCaller.Damage.Instant"));
 		DamageSetByCallerTag = FGameplayTag::RequestGameplayTag(DamageTagName, /*ErrorIfNotFound=*/false);
 	}
 }
@@ -423,6 +426,12 @@ bool UGA_PrimaryRangedBasic::BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecH
 
 	if (!DamageClass)
 	{
+		DamageClass = UGE_DamagePhysical::StaticClass();
+		UE_LOG(LogPrimaryRangedGA, Verbose, TEXT("BuildDamageSpec: DamageEffectClass not set; using UGE_DamagePhysical."));
+	}
+
+	if (!DamageClass)
+	{
 		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("BuildDamageSpec: DamageEffectClass not set."));
 		return false;
 	}
@@ -433,6 +442,8 @@ bool UGA_PrimaryRangedBasic::BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecH
 		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("BuildDamageSpec: Failed to create outgoing spec."));
 		return false;
 	}
+
+	ApplyDamageTypeTagToSpec(OutSpecHandle, DefaultDamageTypeTag);
 
 	if (DamageSetByCallerTag.IsValid())
 	{
@@ -446,7 +457,7 @@ bool UGA_PrimaryRangedBasic::BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecH
 			AttackDamage = AttrSet->GetAttackDamage();
 		}
 
-		const float FinalDamage = -AttackDamage * DamageScalar;
+		const float FinalDamage = AttackDamage * DamageScalar;
 		OutSpecHandle.Data.Get()->SetSetByCallerMagnitude(DamageSetByCallerTag, FinalDamage);
 		UE_LOG(LogPrimaryRangedGA, Verbose, TEXT("BuildDamageSpec: AttackDamage=%.2f DamageScalar=%.2f FinalDamage=%.2f"),
 			AttackDamage,
@@ -497,11 +508,21 @@ float UGA_PrimaryRangedBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo
 		return BaselineAttackSpeed;
 	}
 
-	if (const UAeyerjiAttributeSet* Attr = ActorInfo->AbilitySystemComponent->GetSet<UAeyerjiAttributeSet>())
-	{
-		const float AttackSpeed = Attr->GetAttackCooldown();
-		return FMath::Max(AttackSpeed, KMinAttackSpeed);
-	}
+    if (const UAeyerjiAttributeSet* Attr = ActorInfo->AbilitySystemComponent->GetSet<UAeyerjiAttributeSet>())
+    {
+        const float AttributeAttackSpeed = Attr->GetAttackSpeed();
+        if (AttributeAttackSpeed > KINDA_SMALL_NUMBER)
+        {
+            // AttackSpeed is stored as a "rating" where 100 == 1 attack/sec. Convert to real APS.
+            return FMath::Max(AttributeAttackSpeed / 100.f, KMinAttackSpeed);
+        }
+
+        const float AttributeCooldownSeconds = Attr->GetAttackCooldown();
+        if (AttributeCooldownSeconds > KINDA_SMALL_NUMBER)
+        {
+            return FMath::Max(1.f / AttributeCooldownSeconds, KMinAttackSpeed);
+        }
+    }
 
 	return BaselineAttackSpeed;
 }
@@ -680,5 +701,16 @@ void UGA_PrimaryRangedBasic::HandleMontageFinished(bool bWasCancelled)
 
 UAnimMontage* UGA_PrimaryRangedBasic::SelectAttackMontage_Implementation(const FGameplayAbilityActorInfo& ActorInfo) const
 {
+	if (AActor* AvatarActor = ActorInfo.AvatarActor.Get())
+	{
+		if (UAeyerjiEnemyArchetypeComponent* ArchetypeComp = AvatarActor->FindComponentByClass<UAeyerjiEnemyArchetypeComponent>())
+		{
+			if (UAnimMontage* ArchetypeMontage = ArchetypeComp->GetAttackMontage())
+			{
+				return ArchetypeMontage;
+			}
+		}
+	}
+
 	return AttackMontage.IsValid() ? AttackMontage.Get() : nullptr;
 }

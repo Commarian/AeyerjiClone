@@ -11,15 +11,21 @@
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/MeshComponent.h"
+#include "Components/TextRenderComponent.h"
 #include "Components/WidgetComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
+#include "Materials/MaterialInterface.h"
 #include "Components/OutlineHighlightComponent.h"
 #include "Engine/ActorChannel.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineTypes.h"
 #include "Engine/World.h"
 #include "Items/InventoryComponent.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemGenerator.h"
+#include "Systems/LootTable.h"
 #include "Items/ItemInstance.h"
 #include "Net/Core/PushModel/PushModel.h"
 #include "Net/UnrealNetwork.h"
@@ -30,6 +36,8 @@
 #include "Animation/AnimationAsset.h"
 #include "Abilities/GameplayAbilityTypes.h"
 #include "Systems/AeyerjiGameplayEventSubsystem.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "PhysicalMaterials/PhysicalMaterial.h"
 
 namespace
 {
@@ -41,17 +49,21 @@ AAeyerjiLootPickup::AAeyerjiLootPickup()
 	bReplicates = true;
 	bAlwaysRelevant = true;
 	bReplicateUsingRegisteredSubObjectList = true;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.TickGroup = TG_PrePhysics; // update before physics for smoother motion
+	PrimaryActorTick.TickInterval = 0.f;        // run every frame
+	SetNetUpdateFrequency(60.f);                 // higher replication rate for smoother client motion
+	SetMinNetUpdateFrequency(30.f);
+	SetReplicateMovement(true);
 
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
 
 	PreviewMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PreviewMesh"));
 	PreviewMesh->SetupAttachment(Root);
-	PreviewMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	// Use the pickup volume for interaction traces; keep the mesh collision-free unless physics handoff is active.
+	PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
-	PreviewMesh->SetCollisionResponseToChannel(InteractTraceChannel, ECR_Block);
-	PreviewMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
-	PreviewMesh->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	PreviewMesh->SetGenerateOverlapEvents(false);
 	PreviewMesh->SetCanEverAffectNavigation(false);
 	PreviewMesh->SetIsReplicated(true);
@@ -63,12 +75,44 @@ AAeyerjiLootPickup::AAeyerjiLootPickup()
 	PickupSphere->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	PickupSphere->SetCollisionResponseToAllChannels(ECR_Ignore);
 	PickupSphere->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+	// Make cursor traces more forgiving: block interact/visibility/camera so hover + click can hit the sphere even if the mesh is small.
+	PickupSphere->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block); // interact
+	PickupSphere->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	PickupSphere->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	PickupSphere->OnComponentBeginOverlap.AddDynamic(this, &AAeyerjiLootPickup::HandlePickupSphereOverlap);
 
 	LootLabel = CreateDefaultSubobject<UWidgetComponent>(TEXT("LootLabel"));
 	LootLabel->SetupAttachment(Root);
 	LootLabel->SetDrawAtDesiredSize(true);
 	LootLabel->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	LootLabel->SetWidgetSpace(EWidgetSpace::Screen);
+	LootLabel->SetTwoSided(true);
+	LootLabel->SetPivot(FVector2D(0.5f, 0.f));
+	LootLabel->SetRelativeLocation(FVector(0.f, 0.f, LabelHeightOffset));
+	LootLabel->SetUsingAbsoluteRotation(true);
+	LootLabel->SetCanEverAffectNavigation(false);
+
+	LootLabelText = CreateDefaultSubobject<UTextRenderComponent>(TEXT("LootLabelText"));
+	LootLabelText->SetupAttachment(Root);
+	LootLabelText->SetHorizontalAlignment(EHorizTextAligment::EHTA_Center);
+	LootLabelText->SetVerticalAlignment(EVerticalTextAligment::EVRTA_TextCenter);
+	LootLabelText->SetTextRenderColor(FColor::White);
+	LootLabelText->SetWorldSize(24.f);
+	LootLabelText->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	LootLabelText->SetVisibility(false);
+	LootLabelText->SetHiddenInGame(true);
+	LootLabelText->SetCanEverAffectNavigation(false);
+
+	LootLabelOutline = CreateDefaultSubobject<UTextRenderComponent>(TEXT("LootLabelOutline"));
+	LootLabelOutline->SetupAttachment(Root);
+	LootLabelOutline->SetHorizontalAlignment(EHorizTextAligment::EHTA_Center);
+	LootLabelOutline->SetVerticalAlignment(EVerticalTextAligment::EVRTA_TextCenter);
+	LootLabelOutline->SetTextRenderColor(FColor::Black);
+	LootLabelOutline->SetWorldSize(25.f);
+	LootLabelOutline->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	LootLabelOutline->SetVisibility(false);
+	LootLabelOutline->SetHiddenInGame(true);
+	LootLabelOutline->SetCanEverAffectNavigation(false);
 
 	LootBeamFX = CreateDefaultSubobject<UNiagaraComponent>(TEXT("LootBeamFX"));
 	LootBeamFX->SetupAttachment(Root);
@@ -281,20 +325,35 @@ void AAeyerjiLootPickup::RequestPickupFromClient(AAeyerjiPlayerController* Contr
 	if (Controller->IsLocalController())
 	{
 		AJ_LOG(this, TEXT("RequestPickupFromClient - asking server via %s"), *GetNameSafe(Controller));
-		Controller->Server_RequestPickup(GetFName());
+		Controller->Server_RequestPickupActor(this);
 	}
 }
 
 FText AAeyerjiLootPickup::GetDisplayName() const
 {
+	FText DisplayName;
 	if (ItemInstance)
 	{
-		return ItemInstance->GetDisplayName();
+		DisplayName = ItemInstance->GetDisplayName();
+	}
+	else if (ItemDefinition)
+	{
+		DisplayName = ItemDefinition->DisplayName;
+	}
+
+	if (!DisplayName.IsEmpty())
+	{
+		return DisplayName;
 	}
 
 	if (ItemDefinition)
 	{
-		return ItemDefinition->DisplayName;
+		return FText::FromString(ItemDefinition->GetName());
+	}
+
+	if (ItemInstance)
+	{
+		return FText::FromString(ItemInstance->GetName());
 	}
 
 	return FText::FromString(TEXT("Loot"));
@@ -302,10 +361,8 @@ FText AAeyerjiLootPickup::GetDisplayName() const
 
 void AAeyerjiLootPickup::SetLabelVisible(bool bVisible)
 {
-	if (LootLabel)
-	{
-		LootLabel->SetVisibility(bVisible);
-	}
+	bForceLabelVisible = bVisible;
+	UpdateLabelVisibility();
 }
 
 void AAeyerjiLootPickup::SetHighlighted(bool bInHighlighted)
@@ -318,6 +375,22 @@ void AAeyerjiLootPickup::SetHighlighted(bool bInHighlighted)
 	bHighlighted = bInHighlighted;
 	AJ_LOG(this, TEXT("SetHighlighted %s -> %s"), *GetName(), bHighlighted ? TEXT("ON") : TEXT("OFF"));
 	ApplyHighlight(bHighlighted);
+	UpdateLabelVisibility();
+}
+
+int32 AAeyerjiLootPickup::DebugRefreshItemScaling(const UAeyerjiLootTable& LootTable)
+{
+	if (!HasAuthority() || !ItemInstance)
+	{
+		return 0;
+	}
+
+	ItemInstance->RebuildAggregation();
+	ItemInstance->ApplyLootStatScaling(&LootTable);
+	ItemInstance->ForceItemChangedForUI();
+	MARK_PROPERTY_DIRTY_FROM_NAME(AAeyerjiLootPickup, ItemInstance, this);
+
+	return 1;
 }
 
 void AAeyerjiLootPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -363,6 +436,10 @@ void AAeyerjiLootPickup::BeginPlay()
 
 	if (HasAuthority() && !ItemInstance && ItemDefinition)
 	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup BeginPlay rolling item - Def=%s Level=%d Rarity=%d"),
+			*GetNameSafe(ItemDefinition),
+			ItemLevel,
+			static_cast<int32>(ItemRarity));
 		ItemInstance = UItemGenerator::RollItemInstance(
 			this,
 			ItemDefinition,
@@ -381,6 +458,30 @@ void AAeyerjiLootPickup::BeginPlay()
 	SetLabelFromItem();
 	RefreshOutlineTargets();
 	RefreshRarityVisuals();
+
+	UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup BeginPlay init - Loc=%s Authority=%d NetMode=%d Replicates=%d EnableDrop=%d AutoDrop=%d"),
+		*GetActorLocation().ToString(),
+		HasAuthority() ? 1 : 0,
+		GetNetMode(),
+		GetIsReplicated() ? 1 : 0,
+		bEnableDropMotion ? 1 : 0,
+		bAutoStartDrop ? 1 : 0);
+
+	// Start drop on server if enabled
+	if (HasAuthority() && bEnableDropMotion && bAutoStartDrop)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup BeginPlay auto-starting drop - Enable=%d Auto=%d"),
+			bEnableDropMotion ? 1 : 0,
+			bAutoStartDrop ? 1 : 0);
+		StartDropToGround();
+	}
+	else
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup BeginPlay drop skipped - HasAuthority=%d Enable=%d Auto=%d"),
+			HasAuthority() ? 1 : 0,
+			bEnableDropMotion ? 1 : 0,
+			bAutoStartDrop ? 1 : 0);
+	}
 }
 
 void AAeyerjiLootPickup::NotifyActorBeginCursorOver()
@@ -388,6 +489,414 @@ void AAeyerjiLootPickup::NotifyActorBeginCursorOver()
 	Super::NotifyActorBeginCursorOver();
 	AJ_LOG(this, TEXT("NotifyActorBeginCursorOver"));
 	SetHighlighted(true);
+}
+
+void AAeyerjiLootPickup::StartDropToGround()
+{
+	if (!HasAuthority() || !bEnableDropMotion)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartDropToGround blocked - HasAuthority=%d Enable=%d"),
+			HasAuthority() ? 1 : 0,
+			bEnableDropMotion ? 1 : 0);
+		return;
+	}
+
+	// Ditch the tick-based arc/trace: immediately kick the mesh into physics with a small randomized toss.
+	bIsDropping = false;
+	bLoggedDropSkip = false;
+	bLoggedFirstTick = false;
+	bLoggedMidTick = false;
+	bPhysicsHandoffStarted = false;
+	bPhysicsHandoffAttempted = true;
+
+	const FVector SpawnLoc = GetActorLocation();
+	const float RandomYaw = FMath::FRandRange(-180.f, 180.f);
+	const FVector SideDir = FRotator(0.f, RandomYaw, 0.f).Vector();
+	const FVector LaunchStart = SpawnLoc + (SideDir * SideImpulseDistance) + FVector(0.f, 0.f, UpImpulseHeight);
+
+	SetActorLocation(LaunchStart, false, nullptr, ETeleportType::TeleportPhysics);
+	UpdateLootBeamAnchor();
+
+	UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartDropToGround physics-only - Start=%s"), *LaunchStart.ToString());
+
+	if (!StartPhysicsHandoff(/*bForceImmediate=*/false))
+	{
+		UE_LOG(LogAeyerji, Warning, TEXT("AeyerjiLootPickup StartDropToGround physics handoff failed - snapping to ground"));
+		FinalSnapToGround();
+	}
+}
+
+void AAeyerjiLootPickup::ComputeDropEndpoints()
+{
+	const FVector SpawnLoc = GetActorLocation();
+	UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup ComputeDropEndpoints spawn loc %s"), *SpawnLoc.ToString());
+
+	const float RandomYaw = FMath::FRandRange(-180.f, 180.f);
+	const FVector SideDir = FRotator(0.f, RandomYaw, 0.f).Vector();
+
+	const FVector SideOffset = SideDir * SideImpulseDistance;
+	const FVector UpOffset = FVector(0.f, 0.f, UpImpulseHeight);
+
+	DropStart = SpawnLoc + SideOffset + UpOffset;
+
+	SetActorLocation(DropStart, false, nullptr, ETeleportType::TeleportPhysics);
+
+	const float TraceUpOffset = 200.f;
+	const float TraceDownDistance = 100000.f;
+	const FVector TraceStart = DropStart + FVector(0.f, 0.f, TraceUpOffset);
+	const FVector TraceEnd = DropStart + FVector(0.f, 0.f, -TraceDownDistance);
+	UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup ComputeDropEndpoints trace Start=%s End=%s"), *TraceStart.ToString(), *TraceEnd.ToString());
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(LootDropTrace), false, this);
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
+	const bool bHit = GetWorld()->LineTraceSingleByObjectType(
+		Hit,
+		TraceStart,
+		TraceEnd,
+		ObjectParams,
+		Params);
+
+	if (bHit && Hit.bBlockingHit)
+	{
+		DropEnd = Hit.ImpactPoint + FVector(0.f, 0.f, 5.f);
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup ComputeDropEndpoints hit ground - Impact=%s Normal=%s"),
+			*Hit.ImpactPoint.ToString(),
+			*Hit.ImpactNormal.ToString());
+	}
+	else
+	{
+		DropEnd = DropStart + FVector(0.f, 0.f, -500.f);
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup ComputeDropEndpoints no ground hit - Using fallback End=%s (TraceDown=%.0f)"),
+			*DropEnd.ToString(),
+			TraceDownDistance);
+	}
+
+	if (DropEnd.Z > DropStart.Z + KINDA_SMALL_NUMBER)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup ComputeDropEndpoints upward path detected - StartZ=%.2f EndZ=%.2f (SpawnZ=%.2f)"),
+			DropStart.Z,
+			DropEnd.Z,
+			SpawnLoc.Z);
+	}
+}
+
+void AAeyerjiLootPickup::FinalSnapToGround()
+{
+	const FVector Loc = GetActorLocation();
+	const FVector TraceStart = Loc + FVector(0.f, 0.f, 20.f);
+	const FVector TraceEnd = Loc + FVector(0.f, 0.f, -50.f);
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(LootDropSnapTrace), false, this);
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
+	const bool bHit = GetWorld()->LineTraceSingleByObjectType(
+		Hit,
+		TraceStart,
+		TraceEnd,
+		ObjectParams,
+		Params);
+
+	if (bHit && Hit.bBlockingHit)
+	{
+		const FVector SnapLoc = Hit.ImpactPoint + FVector(0.f, 0.f, 2.f);
+		SetActorLocation(SnapLoc, false, nullptr, ETeleportType::TeleportPhysics);
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup FinalSnapToGround snapped to %s"), *SnapLoc.ToString());
+	}
+	else
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup FinalSnapToGround no hit from %s -> %s"), *TraceStart.ToString(), *TraceEnd.ToString());
+	}
+
+	UpdateLootBeamAnchor();
+}
+
+void AAeyerjiLootPickup::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	if ((LootLabelText && LootLabelText->IsVisible()) || (LootLabelOutline && LootLabelOutline->IsVisible()))
+	{
+		if (UWorld* World = GetWorld())
+		{
+			if (World->GetNetMode() != NM_DedicatedServer)
+			{
+				UpdateLootBeamAnchor();
+			}
+		}
+	}
+
+	// Server-only physics handoff: let the mesh simulate freely; only snap actor when physics ends.
+	if (HasAuthority() && bPhysicsHandoffStarted)
+	{
+		if (!PreviewMesh)
+		{
+			UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick physics sync aborted - PreviewMesh null"));
+			bPhysicsHandoffStarted = false;
+			return;
+		}
+
+		if (!PreviewMesh->IsSimulatingPhysics())
+		{
+			UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick physics sync aborted - PreviewMesh not simulating physics"));
+			bPhysicsHandoffStarted = false;
+			return;
+		}
+
+		// Keep the actor/collision aligned with the simulated mesh so clicks, labels, and outlines stay on the visible ball.
+		const FVector MeshLocation = PreviewMesh->GetComponentLocation();
+		if (!MeshLocation.Equals(GetActorLocation(), 0.5f))
+		{
+			SetActorLocation(MeshLocation);
+			UpdateLootBeamAnchor();
+		}
+
+		if (!PreviewMesh->IsAnyRigidBodyAwake())
+		{
+			FinalSnapToGround();
+
+			PreviewMesh->SetSimulatePhysics(false);
+			if (Root)
+			{
+				PreviewMesh->AttachToComponent(Root, FAttachmentTransformRules::KeepWorldTransform);
+			}
+			else
+			{
+			PreviewMesh->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
+		}
+			PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+			PreviewMesh->SetGenerateOverlapEvents(false);
+
+			UpdateLootBeamAnchor();
+
+			bPhysicsHandoffStarted = false;
+			UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick physics sync finished - FinalLoc=%s"), *GetActorLocation().ToString());
+		}
+
+		return;
+	}
+
+	if (!HasAuthority() || !bIsDropping || !bEnableDropMotion)
+	{
+		if (!bLoggedDropSkip)
+		{
+			UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick skip - HasAuthority=%d Enable=%d Dropping=%d"),
+				HasAuthority() ? 1 : 0,
+				bEnableDropMotion ? 1 : 0,
+				bIsDropping ? 1 : 0);
+			bLoggedDropSkip = true;
+		}
+		return;
+	}
+
+	if (DropDuration <= KINDA_SMALL_NUMBER)
+	{
+		ElapsedDropTime = DropDuration;
+	}
+	else
+	{
+		ElapsedDropTime += DeltaSeconds;
+	}
+
+	const float AlphaRaw = (DropDuration > KINDA_SMALL_NUMBER)
+		? (ElapsedDropTime / DropDuration)
+		: 1.f;
+
+	const float Alpha = FMath::Clamp(AlphaRaw, 0.f, 1.f);
+
+	const float AlphaAccel = Alpha * Alpha;
+	const FVector BaseLoc = FMath::Lerp(DropStart, DropEnd, AlphaAccel);
+
+	float ArcAlpha = Alpha * (1.f - Alpha) * 4.f;
+	ArcAlpha = FMath::Clamp(ArcAlpha, 0.f, 1.f);
+
+	const float HeightZ = ArcAlpha * ArcHeight;
+	const FVector NewLoc = BaseLoc + FVector(0.f, 0.f, HeightZ);
+
+	SetActorLocation(NewLoc, true);
+	UpdateLootBeamAnchor();
+
+	const float YawDelta = RandomSpinYawSpeed * DeltaSeconds;
+	AddActorLocalRotation(FRotator(0.f, YawDelta, 0.f));
+
+	if (bEnablePhysicsHandoff && !bPhysicsHandoffStarted && !bPhysicsHandoffAttempted && (Alpha >= PhysicsHandoffAlpha))
+	{
+		bPhysicsHandoffAttempted = true;
+		if (StartPhysicsHandoff())
+		{
+			return;
+		}
+	}
+
+	if (!bLoggedFirstTick)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick start - Alpha=%.2f Elapsed=%.2f NewZ=%.2f StartZ=%.2f EndZ=%.2f ArcAlpha=%.2f"),
+			Alpha,
+			ElapsedDropTime,
+			NewLoc.Z,
+			DropStart.Z,
+			DropEnd.Z,
+			ArcAlpha);
+		bLoggedFirstTick = true;
+	}
+	else if (!bLoggedMidTick && Alpha >= 0.5f)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick mid - Alpha=%.2f Elapsed=%.2f NewZ=%.2f StartZ=%.2f EndZ=%.2f ArcAlpha=%.2f"),
+			Alpha,
+			ElapsedDropTime,
+			NewLoc.Z,
+			DropStart.Z,
+			DropEnd.Z,
+			ArcAlpha);
+		bLoggedMidTick = true;
+	}
+
+	if (Alpha >= 1.f)
+	{
+		FinalSnapToGround();
+
+		bIsDropping = false;
+		SetActorTickEnabled(false);
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup Tick finished drop - FinalLoc=%s"), *GetActorLocation().ToString());
+	}
+}
+
+bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
+{
+	if (!HasAuthority() || bPhysicsHandoffStarted)
+	{
+		return false;
+	}
+
+	if (!PreviewMesh)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartPhysicsHandoff aborted - PreviewMesh null"));
+		return false;
+	}
+
+	if (!PreviewMesh->GetStaticMesh())
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartPhysicsHandoff aborted - PreviewMesh has no StaticMesh"));
+		return false;
+	}
+
+	if (UBodySetup* BodySetup = PreviewMesh->GetBodySetup())
+	{
+		if (BodySetup->CollisionTraceFlag == CTF_UseComplexAsSimple)
+		{
+			UE_LOG(LogAeyerji, Warning, TEXT("AeyerjiLootPickup StartPhysicsHandoff skipped - PreviewMesh uses ComplexAsSimple collision (physics not supported)."));
+			if (GEngine)
+			{
+				const FString Msg = FString::Printf(
+					TEXT("Loot physics drop skipped for '%s': mesh uses ComplexAsSimple collision. Enable simple collision on the mesh asset."),
+					*GetNameSafe(this));
+				GEngine->AddOnScreenDebugMessage(static_cast<int32>(GetUniqueID()), 10.f, FColor::Red, Msg, true);
+			}
+			return false;
+		}
+	}
+
+	// Store an upright rotation for the actor so attached components stay stable (mesh will detach and tumble independently).
+	PrePhysicsActorRotation = GetActorRotation();
+	PrePhysicsActorRotation.Pitch = 0.f;
+	PrePhysicsActorRotation.Roll = 0.f;
+	SetActorRotation(PrePhysicsActorRotation, ETeleportType::TeleportPhysics);
+
+	bPhysicsHandoffStarted = true;
+	bIsDropping = false;
+	SetActorTickEnabled(true);
+
+	PrePhysicsMeshRelative = PreviewMesh->GetRelativeTransform();
+
+	// Simulating physics on a child component detaches it; we sync actor transform to the detached mesh during sim.
+	PreviewMesh->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+
+	// Use full query+physics so we definitely collide with WorldStatic floors while simulating.
+	PreviewMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	PreviewMesh->SetCollisionObjectType(ECC_PhysicsBody);
+	PreviewMesh->BodyInstance.bUseCCD = true;
+	PreviewMesh->SetGenerateOverlapEvents(false);
+	PreviewMesh->SetMobility(EComponentMobility::Movable);
+	PreviewMesh->SetEnableGravity(true);
+	PreviewMesh->SetLinearDamping(PhysicsLinearDamping);
+	PreviewMesh->SetAngularDamping(PhysicsAngularDamping);
+
+	// Apply a high-friction runtime physical material to encourage fun rolling without sliding away forever.
+	if (!RuntimePhysicsMaterial)
+	{
+		RuntimePhysicsMaterial = NewObject<UPhysicalMaterial>(this);
+		RuntimePhysicsMaterial->Friction = PhysicsFriction;
+		RuntimePhysicsMaterial->Restitution = PhysicsRestitution;
+		RuntimePhysicsMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
+		// UE uses the same combine-mode enum for both friction and restitution.
+		RuntimePhysicsMaterial->RestitutionCombineMode = EFrictionCombineMode::Average;
+	}
+	PreviewMesh->SetPhysMaterialOverride(RuntimePhysicsMaterial);
+	PreviewMesh->SetSimulatePhysics(true);
+
+	if (!PreviewMesh->IsSimulatingPhysics())
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartPhysicsHandoff aborted - physics could not be enabled (no body setup?)"));
+		bPhysicsHandoffStarted = false;
+		bIsDropping = true;
+
+		if (Root)
+		{
+			PreviewMesh->AttachToComponent(Root, FAttachmentTransformRules::KeepWorldTransform);
+		}
+		else
+		{
+			PreviewMesh->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
+		}
+		PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+		PreviewMesh->SetGenerateOverlapEvents(false);
+
+		return false;
+	}
+
+	if (!bForceImmediate)
+	{
+		const FVector SideDir = FVector(FMath::FRandRange(-1.f, 1.f), FMath::FRandRange(-1.f, 1.f), 0.f).GetSafeNormal();
+		const float LinearSpeed = FMath::FRandRange(PhysicsLinearVelocityMin, PhysicsLinearVelocityMax);
+		const float DownSpeed = FMath::FRandRange(PhysicsDownwardVelocityMin, PhysicsDownwardVelocityMax);
+		const FVector LinearVel = (SideDir * LinearSpeed) + FVector(0.f, 0.f, -DownSpeed);
+		PreviewMesh->SetPhysicsLinearVelocity(LinearVel, false, NAME_None);
+
+		const float AngularSpeed = FMath::FRandRange(PhysicsAngularVelocityMin, PhysicsAngularVelocityMax);
+		const FVector AngularAxis = FVector(
+			FMath::FRandRange(-1.f, 1.f),
+			FMath::FRandRange(-1.f, 1.f),
+			FMath::FRandRange(-1.f, 1.f)).GetSafeNormal();
+		const FVector AngularVelDeg = AngularAxis * AngularSpeed;
+		PreviewMesh->SetPhysicsAngularVelocityInDegrees(AngularVelDeg, false, NAME_None);
+		PreviewMesh->WakeAllRigidBodies();
+
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartPhysicsHandoff started - LinVel=%s AngVelDeg=%s Loc=%s"),
+			*LinearVel.ToString(),
+			*AngularVelDeg.ToString(),
+			*GetActorLocation().ToString());
+	}
+	else
+	{
+		PreviewMesh->SetPhysicsLinearVelocity(FVector::ZeroVector, false, NAME_None);
+		PreviewMesh->SetPhysicsAngularVelocityInDegrees(FVector::ZeroVector, false, NAME_None);
+		PreviewMesh->WakeAllRigidBodies();
+
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup StartPhysicsHandoff started (simple gravity) Loc=%s"),
+			*GetActorLocation().ToString());
+	}
+
+	return true;
 }
 
 void AAeyerjiLootPickup::NotifyActorEndCursorOver()
@@ -424,34 +933,67 @@ void AAeyerjiLootPickup::ApplyDefinitionMesh()
 		return;
 	}
 
+	if (PreviewMesh->IsSimulatingPhysics() || bPhysicsHandoffStarted)
+	{
+		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup ApplyDefinitionMesh skipped - mesh is simulating physics"));
+		return;
+	}
+
 	// Only override when the definition provides a mesh; otherwise leave whatever the designer set in the BP.
 	if (ItemDefinition && ItemDefinition->WorldMesh)
 	{
-		PreviewMesh->SetStaticMesh(ItemDefinition->WorldMesh);
+		UStaticMesh* NewMesh = ItemDefinition->WorldMesh;
+		PreviewMesh->SetStaticMesh(NewMesh);
 		PreviewMesh->SetVisibility(true, true);
 		PreviewMesh->SetHiddenInGame(false);
-		PreviewMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
 
 		const bool bHasOffset = !ItemDefinition->WorldMeshOffset.IsNearlyZero();
 		const bool bHasRotation = !ItemDefinition->WorldMeshRotation.IsNearlyZero();
 		const bool bHasScale = !ItemDefinition->WorldMeshScale.Equals(FVector(1.f));
+
+		// Respect author-provided offsets; otherwise auto-ground the mesh so its bottom rests at the actor root.
+		FTransform MeshTransform;
 		if (bHasOffset || bHasRotation || bHasScale)
 		{
-			const FTransform MeshTransform(
+			MeshTransform = FTransform(
 				ItemDefinition->WorldMeshRotation,
 				ItemDefinition->WorldMeshOffset,
 				ItemDefinition->WorldMeshScale);
-			PreviewMesh->SetRelativeTransform(MeshTransform);
 		}
 		else
 		{
-			PreviewMesh->SetRelativeTransform(FTransform::Identity);
+			const FBoxSphereBounds Bounds = NewMesh->GetBounds();
+			const float MinZ = Bounds.Origin.Z - Bounds.BoxExtent.Z;
+			const FVector AutoOffset(0.f, 0.f, -MinZ);
+			MeshTransform = FTransform(FRotator::ZeroRotator, AutoOffset, FVector(1.f));
 		}
+
+		PreviewMesh->SetRelativeTransform(MeshTransform);
+
+		// Keep the pickup volume centered on the visible mesh so cursor traces don't require "pixel-perfect" hits on the sphere.
+		// We intentionally keep the mesh collision disabled so ComplexAsSimple meshes don't cause trace stutter.
+	if (PickupSphere && ActivePickupVolume == PickupSphere && NewMesh)
+	{
+		const FBoxSphereBounds MeshBounds = NewMesh->GetBounds();
+		const FVector CenterInRootSpace = MeshTransform.TransformPosition(MeshBounds.Origin);
+		PickupSphere->SetRelativeLocation(CenterInRootSpace);
+		PickupSphere->SetSphereRadius(FMath::Max(PickupRadius, MeshBounds.SphereRadius * 1.15f)); // slight padding over mesh size
+	}
 	}
 	else if (PreviewMesh)
 	{
 		PreviewMesh->SetRelativeTransform(FTransform::Identity);
 	}
+
+	// Apply rarity-based preview material (hard-coded lookup of glow materials).
+	if (UMaterialInterface* RarityMat = UItemDefinition::ResolvePreviewMaterial(ItemRarity))
+	{
+		PreviewMesh->SetMaterial(0, RarityMat);
+	}
+
+	UpdateLootBeamAnchor();
 }
 
 void AAeyerjiLootPickup::HandlePickupSphereOverlap(
@@ -584,37 +1126,158 @@ void AAeyerjiLootPickup::ConfigureOutlineComponent()
 
 void AAeyerjiLootPickup::RefreshRarityVisuals()
 {
-	if (!LootBeamFX)
+	UNiagaraSystem* SystemToUse = LootBeamSystem ? LootBeamSystem.Get() : (LootBeamFX ? LootBeamFX->GetAsset() : nullptr);
+
+	if (LootBeamFX)
+	{
+		if (SystemToUse)
+		{
+			if (LootBeamFX->GetAsset() != SystemToUse)
+			{
+				LootBeamFX->SetAsset(SystemToUse);
+			}
+
+			const FLinearColor BeamColor = ResolveBeamColor();
+
+			if (!BeamColorParameter.IsNone())
+			{
+				LootBeamFX->SetVariableLinearColor(BeamColorParameter, BeamColor);
+			}
+
+			LootBeamFX->SetVisibility(true);
+			LootBeamFX->SetHiddenInGame(false);
+
+			LootBeamFX->ActivateSystem();
+		}
+		else
+		{
+			LootBeamFX->DeactivateImmediate();
+			LootBeamFX->SetVisibility(false);
+			LootBeamFX->SetHiddenInGame(true);
+		}
+	}
+
+	UpdateLootBeamAnchor();
+}
+
+void AAeyerjiLootPickup::UpdateLootBeamAnchor()
+{
+	if (!PreviewMesh)
 	{
 		return;
 	}
 
-	UNiagaraSystem* SystemToUse = LootBeamSystem ? LootBeamSystem.Get() : LootBeamFX->GetAsset();
+	const FBoxSphereBounds Bounds = PreviewMesh->Bounds;
+	const float MeshTopZ = Bounds.GetBox().Max.Z;
 
-	if (SystemToUse)
+	const FVector Anchor(Bounds.Origin.X, Bounds.Origin.Y, MeshTopZ);
+
+	// Keep the beam centered in XY over the mesh, and place the beam origin at the top of the mesh (Z).
+	if (LootBeamFX)
 	{
-		if (LootBeamFX->GetAsset() != SystemToUse)
-		{
-			LootBeamFX->SetAsset(SystemToUse);
-		}
-
-		const FLinearColor BeamColor = ResolveBeamColor();
-
-		if (!BeamColorParameter.IsNone())
-		{
-			LootBeamFX->SetVariableLinearColor(BeamColorParameter, BeamColor);
-		}
-
-		LootBeamFX->SetVisibility(true);
-		LootBeamFX->SetHiddenInGame(false);
-
-		LootBeamFX->ActivateSystem();
+		LootBeamFX->SetWorldLocation(Anchor + FVector(0.f, 0.f, BeamBaseZOffset));
+		LootBeamFX->SetWorldRotation(FRotator::ZeroRotator);
 	}
-	else
+
+	// Float the label above the mesh so it's readable even when the pickup is resting on the ground.
+	if (LootLabel)
 	{
-		LootBeamFX->DeactivateImmediate();
-		LootBeamFX->SetVisibility(false);
-		LootBeamFX->SetHiddenInGame(true);
+		LootLabel->SetWorldLocation(Anchor + FVector(0.f, 0.f, LabelHeightOffset));
+		LootLabel->SetWorldRotation(FRotator::ZeroRotator);
+	}
+
+	if (LootLabelText)
+	{
+		const FVector LabelLocation = Anchor + FVector(0.f, 0.f, LabelHeightOffset);
+		LootLabelText->SetWorldLocation(LabelLocation);
+
+		if (LootLabelText->IsVisible())
+		{
+			APlayerController* PC = nullptr;
+			if (UWorld* World = GetWorld())
+			{
+				PC = World->GetFirstPlayerController();
+			}
+
+			if (PC)
+			{
+				FVector CamLoc;
+				FRotator CamRot;
+				PC->GetPlayerViewPoint(CamLoc, CamRot);
+				FRotator FaceRot = (CamLoc - LabelLocation).Rotation();
+				FaceRot.Roll = 0.f;
+				LootLabelText->SetWorldRotation(FaceRot);
+			}
+			else
+			{
+				LootLabelText->SetWorldRotation(FRotator::ZeroRotator);
+			}
+		}
+	}
+
+	if (LootLabelOutline)
+	{
+		const FVector LabelLocation = Anchor + FVector(0.f, 0.f, LabelHeightOffset);
+		FVector OutlineLocation = LabelLocation;
+
+		if (LootLabelText && LootLabelText->IsVisible())
+		{
+			APlayerController* PC = nullptr;
+			if (UWorld* World = GetWorld())
+			{
+				PC = World->GetFirstPlayerController();
+			}
+
+			if (PC)
+			{
+				FVector CamLoc;
+				FRotator CamRot;
+				PC->GetPlayerViewPoint(CamLoc, CamRot);
+				const FVector ToCam = (CamLoc - LabelLocation).GetSafeNormal();
+				OutlineLocation = LabelLocation - (ToCam * 0.6f);
+				FRotator FaceRot = (CamLoc - LabelLocation).Rotation();
+				FaceRot.Roll = 0.f;
+				LootLabelOutline->SetWorldRotation(FaceRot);
+			}
+			else
+			{
+				LootLabelOutline->SetWorldRotation(FRotator::ZeroRotator);
+			}
+		}
+
+		LootLabelOutline->SetWorldLocation(OutlineLocation);
+	}
+}
+
+void AAeyerjiLootPickup::UpdateLabelVisibility()
+{
+	const bool bShouldShow = bHighlighted || bForceLabelVisible;
+	bool bWidgetConfigured = false;
+
+	if (LootLabel)
+	{
+		LootLabel->SetVisibility(bShouldShow);
+		LootLabel->SetHiddenInGame(!bShouldShow);
+		bWidgetConfigured = (LootLabel->GetWidget() != nullptr);
+	}
+
+	if (LootLabelText)
+	{
+		const bool bShowFallback = bShouldShow && (bForceTextLabel || !bWidgetConfigured);
+		LootLabelText->SetVisibility(bShowFallback);
+		LootLabelText->SetHiddenInGame(!bShowFallback);
+	}
+
+	if (LootLabelOutline)
+	{
+		const bool bShowFallback = bShouldShow && (bForceTextLabel || !bWidgetConfigured);
+		LootLabelOutline->SetVisibility(bShowFallback);
+		LootLabelOutline->SetHiddenInGame(!bShowFallback);
+	}
+
+	if (bShouldShow)
+	{
+		UpdateLootBeamAnchor();
 	}
 }
 
@@ -673,10 +1336,13 @@ bool AAeyerjiLootPickup::CanPawnLoot(const AAeyerjiPlayerController* Controller)
 	}
 
 	const FVector PawnLocation = Pawn->GetActorLocation();
-	const float DistanceSq = FVector::DistSquared2D(PawnLocation, GetActorLocation());
-	const float AcceptRadius = Controller->PickupAcceptRadius;
+	const FVector PickupCenter = GetPickupNavCenter();
+	const float DistanceSq = FVector::DistSquared2D(PawnLocation, PickupCenter);
+	const float AcceptRadiusValue = Controller->PickupAcceptRadius;
+	const float AcceptRadiusSq = (AcceptRadiusValue > 5000.f) ? AcceptRadiusValue : FMath::Square(AcceptRadiusValue);
+	const float AcceptRadius = FMath::Sqrt(FMath::Max(0.f, AcceptRadiusSq));
 
-	const bool bWithinRadius = DistanceSq <= FMath::Square(AcceptRadius);
+	const bool bWithinRadius = DistanceSq <= AcceptRadiusSq;
 	const bool bInsideVolume = IsOverlappingPawn(const_cast<APawn*>(Pawn));
 
 	const bool bCanLoot = bWithinRadius || bInsideVolume || bAutoPickup;
@@ -922,6 +1588,9 @@ void AAeyerjiLootPickup::ConfigureVolumes()
 		ActivePickupVolume->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		ActivePickupVolume->SetCollisionResponseToAllChannels(ECR_Ignore);
 		ActivePickupVolume->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+		ActivePickupVolume->SetCollisionResponseToChannel(InteractTraceChannel, ECR_Block);
+		ActivePickupVolume->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+		ActivePickupVolume->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	}
 
 	if (ActivePickupVolume == PickupSphere)
@@ -946,8 +1615,20 @@ void AAeyerjiLootPickup::ConfigureVolumes()
 
 void AAeyerjiLootPickup::SetLabelFromItem()
 {
-	// Widgets typically bind directly to the pickup/instance, so nothing required here.
-	// This method exists to preserve API compatibility and future customization.
+	if (LootLabelText)
+	{
+		LootLabelText->SetText(GetDisplayName());
+		const FLinearColor LabelColor = UAeyerjiInventoryBPFL::GetRarityColor(ItemRarity);
+		LootLabelText->SetTextRenderColor(LabelColor.ToFColor(false));
+	}
+
+	if (LootLabelOutline)
+	{
+		LootLabelOutline->SetText(GetDisplayName());
+		LootLabelOutline->SetTextRenderColor(FColor::Black);
+	}
+
+	UpdateLootBeamAnchor();
 }
 
 void AAeyerjiLootPickup::DestroyIfEmpty()

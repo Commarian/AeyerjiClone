@@ -1,6 +1,7 @@
 // ItemDefinition.cpp
 
 #include "Items/ItemDefinition.h"
+#include "Materials/MaterialInterface.h"
 
 UItemDefinition::UItemDefinition()
 {
@@ -39,6 +40,28 @@ void UItemDefinition::PostLoad()
 	{
 		DefaultSlot = static_cast<EEquipmentSlot>(ItemCategory);
 	}
+}
+
+UMaterialInterface* UItemDefinition::ResolvePreviewMaterial(EItemRarity Rarity)
+{
+	// Hard-coded lookup: preview glow materials per rarity. New assets can be added to this list.
+	static const TMap<EItemRarity, TSoftObjectPtr<UMaterialInterface>> RarityToMaterial = {
+		{ EItemRarity::Common,            TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereCommon.MI_LootDropSphereCommon"))) },
+		{ EItemRarity::Uncommon,          TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereUncommon.MI_LootDropSphereUncommon"))) },
+		{ EItemRarity::Rare,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereRare.MI_LootDropSphereRare"))) },
+		{ EItemRarity::Epic,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereEpic.MI_LootDropSphereEpic"))) },
+		{ EItemRarity::Legendary,         TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereLegendary.MI_LootDropSphereLegendary"))) },
+		{ EItemRarity::Pure,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSpherePure.MI_LootDropSpherePure"))) },
+		{ EItemRarity::PerfectLegendary,  TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSpherePerfectLegendary.MI_LootDropSpherePerfectLegendary"))) },
+		{ EItemRarity::Celestial,         TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereCelestial.MI_LootDropSphereCelestial"))) }
+	};
+
+	if (const TSoftObjectPtr<UMaterialInterface>* Found = RarityToMaterial.Find(Rarity))
+	{
+		return Found->LoadSynchronous();
+	}
+
+	return nullptr;
 }
 
 void UItemDefinition::GetAffixCountRange(EItemRarity Rarity, int32& OutMin, int32& OutMax) const

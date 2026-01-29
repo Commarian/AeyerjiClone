@@ -10,10 +10,19 @@
 #include "Perception/AISenseConfig_Sight.h"
 #include "GenericTeamAgentInterface.h"
 #include "Kismet/KismetSystemLibrary.h"
+#include "AbilitySystemGlobals.h"
+#include "AbilitySystemComponent.h"
+#include "GameplayTagContainer.h"
 
 #include "Engine/World.h"
 #include "CollisionQueryParams.h"
 #include "Engine/EngineTypes.h"
+
+USTC_FindTargetInSight::USTC_FindTargetInSight(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+	InvalidTag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), /*ErrorIfNotFound=*/false);
+}
 
 static FORCEINLINE float DistSq2D(const FVector& A, const FVector& B)
 {
@@ -86,9 +95,6 @@ AActor* USTC_FindTargetInSight::FindByPerception(AAIController* AI, UAIPerceptio
 		if (!Candidate || Candidate == Self)
 			continue;
 
-		if (InvalidTag != NAME_None && Candidate->Tags.Contains(InvalidTag))
-			continue;
-
 		if (!IsAliveAndHostile(AI, Candidate))
 			continue;
 
@@ -118,7 +124,7 @@ AActor* USTC_FindTargetInSight::FindBySphere(AAIController* AI, APawn* Self, flo
 	const FVector Center = Self->GetActorLocation();
 	const float Radius = FMath::Sqrt(UseRadiusSq);
 
-	// We’ll query for Pawns (player & enemies). Add more object types if needed.
+	// We'll query for Pawns (player & enemies). Add more object types if needed.
 	TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes;
 	ObjectTypes.Add(UEngineTypes::ConvertToObjectType(ECC_Pawn));
 
@@ -142,9 +148,6 @@ AActor* USTC_FindTargetInSight::FindBySphere(AAIController* AI, APawn* Self, flo
 	for (AActor* Candidate : Hits)
 	{
 		if (!Candidate || Candidate == Self)
-			continue;
-
-		if (InvalidTag != NAME_None && Candidate->Tags.Contains(InvalidTag))
 			continue;
 
 		if (!IsAliveAndHostile(AI, Candidate))
@@ -188,8 +191,16 @@ bool USTC_FindTargetInSight::IsAliveAndHostile(AAIController* AI, const AActor* 
 {
 	if (!AI || !Candidate) return false;
 
-	if (InvalidTag != NAME_None && Candidate->Tags.Contains(InvalidTag))
-		return false;
+	if (InvalidTag.IsValid())
+	{
+		if (const UAbilitySystemComponent* CandidateASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Candidate, /*LookForComponent=*/true))
+		{
+			if (CandidateASC->HasMatchingGameplayTag(InvalidTag))
+			{
+				return false;
+			}
+		}
+	}
 
 	const ETeamAttitude::Type Att = AI->GetTeamAttitudeTowards(*Candidate);
 	return Att == ETeamAttitude::Hostile;

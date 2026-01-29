@@ -12,6 +12,7 @@
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
 #include "Kismet/GameplayStatics.h"
+#include "Enemy/EnemyParentNative.h"
 #include "GenericTeamAgentInterface.h"
 #include "EngineUtils.h"
 
@@ -144,13 +145,22 @@ float UAeyerjiXPLibrary::ComputeScaledXPReward(const UObject* WorldContextObject
 
 float UAeyerjiXPLibrary::GetScaledXPRewardForEnemy(const UObject* WorldContextObject,
                                                    const AActor* EnemyActor,
-                                                   float PerLevelScalar)
+                                                   float PerLevelScalar,
+                                                   float DifficultyScale,
+                                                   float DifficultyMinMultiplier,
+                                                   float DifficultyMaxMultiplier)
 {
     const float Base = GetBaseXPFromActor(EnemyActor);
     const int32 EnemyLevel = GetActorLevel_Safe(EnemyActor);
     const int32 Delta = FMath::Max(0, EnemyLevel - 1);
-    const float Factor = 1.f + (float)Delta * FMath::Max(0.f, PerLevelScalar);
-    return FMath::Max(0.f, Base * Factor);
+    const float LevelFactor = 1.f + (float)Delta * FMath::Max(0.f, PerLevelScalar);
+
+    const float ClampedDiff = FMath::Clamp(DifficultyScale, 0.f, 1.f);
+    const float DiffMin = FMath::Max(0.f, DifficultyMinMultiplier);
+    const float DiffMax = FMath::Max(0.f, DifficultyMaxMultiplier);
+    const float DifficultyFactor = (DiffMax > 0.f) ? FMath::Lerp(DiffMin, DiffMax, ClampedDiff) : 1.f;
+
+    return FMath::Max(0.f, Base * LevelFactor * DifficultyFactor);
 }
 
 void UAeyerjiXPLibrary::SetBaseXPOnActor(AActor* Actor, float BaseXP)
@@ -209,6 +219,22 @@ static bool Resolve_PerLevelScalar(const UAeyerjiRewardTuning* Tuning, float& Ou
     return false;
 }
 
+static bool Resolve_DifficultyMultiplierRange(const UAeyerjiRewardTuning* Tuning, float& OutMin, float& OutMax)
+{
+    const UAeyerjiRewardTuning* Cur = Tuning; int32 Guard = 64;
+    while (Cur && Guard-- > 0)
+    {
+        if (Cur->bOverride_DifficultyMultiplierRange)
+        {
+            OutMin = FMath::Max(0.f, Cur->DifficultyMinMultiplier);
+            OutMax = FMath::Max(0.f, Cur->DifficultyMaxMultiplier);
+            return true;
+        }
+        Cur = Cur->Parent;
+    }
+    return false;
+}
+
 static bool Resolve_KillerBonusPercent(const UAeyerjiRewardTuning* Tuning, float& OutPercent)
 {
     const UAeyerjiRewardTuning* Cur = Tuning; int32 Guard = 64;
@@ -250,11 +276,19 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
     // If a RewardTuning is bound to the enemy, prefer its scalars when set
     float EffectiveScalar = 0.5f;
     float EffectiveBonus  = 1.0f;
+    float EffectiveDiffMin = 1.0f;
+    float EffectiveDiffMax = 1.0f;
     if (const UAeyerjiRewardTuning* Tuning = GetRewardTuningFromActor(EnemyActor))
     {
         float V;
         if (Resolve_PerLevelScalar(Tuning, V))       EffectiveScalar = V;
         if (Resolve_KillerBonusPercent(Tuning, V))   EffectiveBonus  = V;
+        float MinV, MaxV;
+        if (Resolve_DifficultyMultiplierRange(Tuning, MinV, MaxV))
+        {
+            EffectiveDiffMin = MinV;
+            EffectiveDiffMax = MaxV;
+        }
     }
     else
     {
@@ -262,7 +296,13 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
         return;
     }
 
-    const float ScaledXP = GetScaledXPRewardForEnemy(WorldContextObject, EnemyActor, EffectiveScalar);
+    float DifficultyScale = 0.f;
+    if (const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyActor))
+    {
+        DifficultyScale = Enemy->GetScaledDifficulty();
+    }
+
+    const float ScaledXP = GetScaledXPRewardForEnemy(WorldContextObject, EnemyActor, EffectiveScalar, DifficultyScale, EffectiveDiffMin, EffectiveDiffMax);
     if (ScaledXP <= 0.f)
     {
         return;

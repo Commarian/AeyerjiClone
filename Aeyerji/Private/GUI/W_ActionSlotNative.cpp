@@ -2,6 +2,7 @@
 #include "GUI/W_ActionSlotNative.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"        // for DetectDragIfPressed
 #include "Components/ProgressBar.h"
+#include "GUI/W_ActionBar.h"
 #include "Input/Events.h"
 #include "Logging/AeyerjiLog.h"
 
@@ -76,8 +77,19 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonDown(
 		const FGeometry& InGeometry,
 		const FPointerEvent& InMouseEvent)
 {
-	AJ_LOG(this, TEXT("UW_ActionSlotNative::NativeOnMouseButtonDown"));
-	if (InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
+	
+	static const FGameplayTag PotionRootTag = FGameplayTag::RequestGameplayTag(FName("Ability.Potion"));
+	bool bIsPotionSlot = false;
+	for (const FGameplayTag& Tag : StoredSlotData.Tag)
+	{
+		if (Tag.IsValid() && Tag.MatchesTag(PotionRootTag))
+		{
+			bIsPotionSlot = true;
+			break;
+		}
+	}
+
+	if (!bIsPotionSlot && InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
 	{
 		OnSlotRightClicked.Broadcast(StoredSlotIndex);
 		return FReply::Handled();
@@ -92,4 +104,29 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonDown(
 	/* Optional: Detect drag with left mouse
 	   UWidgetBlueprintLibrary::DetectDragIfPressed(InMouseEvent, this, EKeys::LeftMouseButton); */
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
+}
+
+void UW_ActionSlotNative::NativeOnMouseEnter(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	Super::NativeOnMouseEnter(InGeometry, InMouseEvent);
+
+	if (StoredSlotData.Tag.IsEmpty())
+	{
+		return;
+	}
+
+	if (UW_ActionBar* OwningBar = GetTypedOuter<UW_ActionBar>())
+	{
+		OwningBar->ShowAbilityTooltip(StoredSlotData, InMouseEvent.GetScreenSpacePosition(), this);
+	}
+}
+
+void UW_ActionSlotNative::NativeOnMouseLeave(const FPointerEvent& InMouseEvent)
+{
+	if (UW_ActionBar* OwningBar = GetTypedOuter<UW_ActionBar>())
+	{
+		OwningBar->HideAbilityTooltip(this);
+	}
+
+	Super::NativeOnMouseLeave(InMouseEvent);
 }

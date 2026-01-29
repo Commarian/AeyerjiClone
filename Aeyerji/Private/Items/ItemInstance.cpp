@@ -6,6 +6,8 @@
 #include "Items/ItemDefinition.h"
 #include "Items/InventoryComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Systems/LootService.h"
+#include "Systems/LootTable.h"
 #include "UObject/CoreNet.h"
 
 UAeyerjiItemInstance::UAeyerjiItemInstance()
@@ -46,6 +48,21 @@ void UAeyerjiItemInstance::PostNetReceive()
 	NotifyItemChanged();
 }
 
+FLinearColor UAeyerjiItemInstance::RarityTint(EItemRarity RarityVariable) const
+{
+	switch (Rarity)
+	{
+	case EItemRarity::Uncommon:         return FLinearColor(0.25f, 1.f, 0.25f, 1.f);
+	case EItemRarity::Rare:             return FLinearColor(0.25f, 0.6f, 1.f, 1.f);
+	case EItemRarity::Epic:             return FLinearColor(0.5f, 0.25f, 1.f, 1.f);
+	case EItemRarity::Pure:             return FLinearColor(0.95f, 0.9f, 0.3f, 1.f);
+	case EItemRarity::Legendary:        return FLinearColor(1.f, 0.6f, 0.2f, 1.f);
+	case EItemRarity::PerfectLegendary: return FLinearColor(1.f, 0.23f, 0.11f, 1.f);
+	case EItemRarity::Celestial:        return FLinearColor(0.13f, 0.95f, 1.f, 1.f);
+	default:                            return FLinearColor(0.35f, 0.35f, 0.35f, 1.f);
+	}
+};
+
 void UAeyerjiItemInstance::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -66,7 +83,49 @@ void UAeyerjiItemInstance::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 
 FText UAeyerjiItemInstance::GetDisplayName() const
 {
-	return Definition ? Definition->DisplayName : FText::FromString(TEXT("Unknown Item"));
+	const FText BaseName = Definition ? Definition->DisplayName : FText::FromString(TEXT("Unknown Item"));
+
+	const UObject* OuterObj = GetOuter();
+	const UWorld* World = OuterObj ? OuterObj->GetWorld() : nullptr;
+	const UAeyerjiLootTable* Table = nullptr;
+	if (World)
+	{
+		if (const UGameInstance* GI = World->GetGameInstance())
+		{
+			if (const ULootService* LootService = GI->GetSubsystem<ULootService>())
+			{
+				Table = LootService->GetLootTable();
+			}
+		}
+	}
+
+	const FItemRarityNameFormat* NameFormat = Table ? Table->FindNameFormat(Rarity) : nullptr;
+	if (!NameFormat)
+	{
+		return BaseName;
+	}
+
+	const bool bHasPrefix = !NameFormat->Prefix.IsEmpty();
+	const bool bHasSuffix = !NameFormat->Suffix.IsEmpty();
+	if (!bHasPrefix && !bHasSuffix)
+	{
+		return BaseName;
+	}
+
+	FString Combined;
+	if (bHasPrefix)
+	{
+		Combined += NameFormat->Prefix.ToString();
+		Combined += TEXT(" ");
+	}
+	Combined += BaseName.ToString();
+	if (bHasSuffix)
+	{
+		Combined += TEXT(" ");
+		Combined += NameFormat->Suffix.ToString();
+	}
+
+	return FText::FromString(Combined);
 }
 
 FAeyerjiPickupVisualConfig UAeyerjiItemInstance::GetPickupVisualConfig() const
@@ -84,11 +143,42 @@ void UAeyerjiItemInstance::RebuildAggregation()
 	FinalAggregatedModifiers.Reset();
 	GrantedEffects.Reset();
 	GrantedAbilities.Reset();
+	const ULootService* LootService = nullptr;
+	const UAeyerjiLootTable* LootTable = nullptr;
+	if (const UObject* OuterObj = GetOuter())
+	{
+		if (const UWorld* World = OuterObj->GetWorld())
+		{
+			if (const UGameInstance* GI = World->GetGameInstance())
+			{
+				LootService = GI->GetSubsystem<ULootService>();
+				LootTable = LootService ? LootService->GetLootTable() : nullptr;
+			}
+		}
+	}
+
+	const FRarityScalingRow* RarityScaling = LootTable ? LootTable->FindRarityScaling(Rarity) : nullptr;
 
 	if (Definition)
 	{
-		FinalAggregatedModifiers.Append(Definition->BaseModifiers);
-		GrantedEffects.Append(Definition->GrantedEffects);
+		for (FItemStatModifier Mod : Definition->BaseModifiers)
+		{
+			if (RarityScaling)
+			{
+				Mod.Magnitude *= RarityScaling->BaseModifierMultiplier;
+			}
+			FinalAggregatedModifiers.Add(Mod);
+		}
+
+		for (FItemGrantedEffect Effect : Definition->GrantedEffects)
+		{
+			if (RarityScaling)
+			{
+				Effect.EffectLevel *= RarityScaling->GrantedEffectLevelMultiplier;
+			}
+			GrantedEffects.Add(Effect);
+		}
+
 		GrantedAbilities.Append(Definition->GrantedAbilities);
 		InventorySize = Definition->InventorySize;
 	}
@@ -99,12 +189,58 @@ void UAeyerjiItemInstance::RebuildAggregation()
 
 	for (const FRolledAffix& Rolled : RolledAffixes)
 	{
-		FinalAggregatedModifiers.Append(Rolled.FinalModifiers);
-		GrantedEffects.Append(Rolled.GrantedEffects);
+		TArray<FItemStatModifier> ScaledMods = Rolled.FinalModifiers;
+		if (RarityScaling)
+		{
+			for (FItemStatModifier& Mod : ScaledMods)
+			{
+				Mod.Magnitude *= RarityScaling->AffixModifierMultiplier;
+			}
+		}
+
+		TArray<FItemGrantedEffect> ScaledEffects = Rolled.GrantedEffects;
+		if (RarityScaling)
+		{
+			for (FItemGrantedEffect& Effect : ScaledEffects)
+			{
+				Effect.EffectLevel *= RarityScaling->GrantedEffectLevelMultiplier;
+			}
+		}
+
+		FinalAggregatedModifiers.Append(ScaledMods);
+		GrantedEffects.Append(ScaledEffects);
 		GrantedAbilities.Append(Rolled.GrantedAbilities);
 	}
 
 	NotifyItemChanged();
+}
+
+void UAeyerjiItemInstance::ApplyLootStatScaling(const UAeyerjiLootTable* LootTable)
+{
+	if (!LootTable)
+	{
+		return;
+	}
+
+	const int32 Level = FMath::Max(ItemLevel, 1);
+	const int32 LevelDelta = FMath::Max(Level - 1, 0);
+
+	if (LevelDelta <= 0 || FinalAggregatedModifiers.Num() == 0)
+	{
+		return;
+	}
+
+	for (FItemStatModifier& Mod : FinalAggregatedModifiers)
+	{
+		const FItemStatScalingRow* Scaling = LootTable->FindScalingForAttribute(Mod.Attribute);
+		if (!Scaling)
+		{
+			continue;
+		}
+
+		const float Mult = 1.f + Scaling->PerLevelMultiplier * LevelDelta;
+		Mod.Magnitude = (Mod.Magnitude * Mult) + (Scaling->PerLevelAdd * LevelDelta);
+	}
 }
 
 void UAeyerjiItemInstance::InitializeFromDefinition(

@@ -8,6 +8,7 @@
 #include "AeyerjiAbilityData.generated.h"
 
 class UAbilitySystemComponent;
+class UTexture2D;
 
 USTRUCT(BlueprintType)
 struct FAeyerjiAbilityCost
@@ -31,6 +32,18 @@ class AEYERJI_API UAeyerjiAbilityData : public UDataAsset
 	GENERATED_BODY()
 
 public:
+	/** UI-facing name for this ability (used by tooltips/selection widgets). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="UI")
+	FText DisplayName;
+
+	/** UI-facing description for this ability (used by tooltips/selection widgets). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="UI", meta=(MultiLine="true"))
+	FText Description;
+
+	/** Optional UI icon for this ability (used as a fallback when slots don't provide one). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="UI")
+	TObjectPtr<UTexture2D> Icon = nullptr;
+
 	/** Legacy baseline cost (not exposed in asset details). Override EvaluateCost in derived assets instead. */
 	UPROPERTY()
 	FAeyerjiAbilityCost Cost;

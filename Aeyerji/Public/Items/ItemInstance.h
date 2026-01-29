@@ -5,11 +5,12 @@
 #include "UObject/Object.h"
 #include "Items/ItemTypes.h"
 #include "Delegates/DelegateCombinations.h"
-
 #include "ItemInstance.generated.h"
+
 
 class UItemDefinition;
 class UItemAffixDefinition;
+class UAeyerjiLootTable;
 struct FAffixTier;
 
 DECLARE_MULTICAST_DELEGATE(FOnItemInstanceChanged);
@@ -72,6 +73,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Item")
 	void RebuildAggregation();
 
+	/** Applies loot-table-driven level scaling to already aggregated modifiers (no-op if Level <= 1). */
+	void ApplyLootStatScaling(const UAeyerjiLootTable* LootTable);
+
 	UFUNCTION(BlueprintPure, Category = "Item")
 	const TArray<FItemGrantedEffect>& GetGrantedEffects() const { return GrantedEffects; }
 	UFUNCTION(BlueprintPure, Category = "Item")
@@ -106,6 +110,10 @@ public:
 
 	// UObject
 	virtual void PostNetReceive() override;
+
+	// Use this struct to get rarity tint colors for UI borders etc.
+	UFUNCTION(BlueprintPure, Category = "Item")
+	FLinearColor RarityTint(EItemRarity RarityVariable) const;
 
 protected:
 	FOnItemInstanceChanged OnItemChanged;

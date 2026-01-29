@@ -9,6 +9,7 @@
 #include "Components/SizeBox.h"
 #include "GUI/AeyerjiItemDragOperation.h"
 #include "Items/InventoryComponent.h"
+#include "Inventory/AeyerjiInventoryBPFL.h"
 #include "GUI/W_InventoryBag_Native.h"
 #include "Items/ItemDefinition.h"
 #include "Logging/AeyerjiLog.h"
@@ -53,21 +54,6 @@ void UW_ItemTile::EnsureWidgetTree()
 
 	RootBorder->SetContent(IconImage);
 	WidgetTree->RootWidget = RootBorder;
-}
-
-FLinearColor UW_ItemTile::RarityTint(EItemRarity Rarity) const
-{
-	switch (Rarity)
-	{
-	case EItemRarity::Uncommon:         return FLinearColor(0.25f, 1.f, 0.25f, 1.f);
-	case EItemRarity::Rare:             return FLinearColor(0.25f, 0.6f, 1.f, 1.f);
-	case EItemRarity::Epic:             return FLinearColor(0.5f, 0.25f, 1.f, 1.f);
-	case EItemRarity::Pure:             return FLinearColor(0.95f, 0.9f, 0.3f, 1.f);
-	case EItemRarity::Legendary:        return FLinearColor(1.f, 0.6f, 0.2f, 1.f);
-	case EItemRarity::PerfectLegendary: return FLinearColor(1.f, 0.23f, 0.11f, 1.f);
-	case EItemRarity::Celestial:        return FLinearColor(0.13f, 0.95f, 1.f, 1.f);
-	default:                            return FLinearColor(0.35f, 0.35f, 0.35f, 1.f);
-	}
 }
 
 void UW_ItemTile::SetupFromItem_Implementation(UAeyerjiItemInstance* InItem)
@@ -122,6 +108,31 @@ void UW_ItemTile::BindInventory(UAeyerjiInventoryComponent* InInventory)
 	Inventory = InInventory;
 }
 
+bool UW_ItemTile::IsMouseOverItem() const
+{
+	if (bIsPlaceholder)
+	{
+		return false;
+	}
+
+	return IsHovered() || (IconImage && IconImage->IsHovered());
+}
+
+bool UW_ItemTile::DropItemToGround(float ForwardOffset)
+{
+	if (!Inventory.IsValid() || !Item || !ItemId.IsValid())
+	{
+		return false;
+	}
+
+	if (UW_InventoryBag_Native* OwningBag = GetTypedOuter<UW_InventoryBag_Native>())
+	{
+		OwningBag->HideItemTooltip(nullptr);
+	}
+
+	return UAeyerjiInventoryBPFL::DropItemAtOwner(Inventory.Get(), Item, ForwardOffset);
+}
+
 FReply UW_ItemTile::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
 	if (bIsPlaceholder)
@@ -144,8 +155,31 @@ FReply UW_ItemTile::NativeOnMouseButtonDown(const FGeometry& InGeometry, const F
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
 }
 
+FReply UW_ItemTile::NativeOnMouseButtonDoubleClick(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (bIsPlaceholder)
+	{
+		return FReply::Unhandled();
+	}
+
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		if (Inventory.IsValid() && Item)
+		{
+			if (UAeyerjiInventoryBPFL::ToggleEquipState(Inventory.Get(), Item))
+			{
+				return FReply::Handled();
+			}
+		}
+	}
+
+	return Super::NativeOnMouseButtonDoubleClick(InGeometry, InMouseEvent);
+}
+
 void UW_ItemTile::NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent, UDragDropOperation*& OutOperation)
 {
+	Super::NativeOnDragDetected(InGeometry, InMouseEvent, OutOperation);
+
 	if (bIsPlaceholder || !Inventory.IsValid() || !Item || !ItemId.IsValid())
 	{
 		return;
@@ -236,17 +270,19 @@ void UW_ItemTile::RefreshFromItem()
 
 	UTexture2D* Icon = nullptr;
 	EItemRarity Rarity = EItemRarity::Common;
+	FLinearColor RarityTint = FLinearColor::White;
 
 	if (Item && Item->Definition)
 	{
 		Icon = Item->Definition->Icon;
 		Rarity = Item->Rarity;
+		RarityTint = Item->RarityTint(Rarity);
 	}
 
 	IconImage->SetBrushFromTexture(Icon, false);
 	IconImage->SetDesiredSizeOverride(FVector2D::ZeroVector);
 	IconImage->SetColorAndOpacity(FLinearColor::White);
-	RootBorder->SetBrushColor(RarityTint(Rarity));
+	RootBorder->SetBrushColor(RarityTint);
 	if (!Icon)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ItemTile] %s missing icon data (Item=%s Definition=%s)"),

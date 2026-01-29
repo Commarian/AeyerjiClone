@@ -16,14 +16,13 @@ bool USTC_HasTargetCondition::TestCondition(FStateTreeExecutionContext& Context)
     if (AI->IsA<AEnemyAIController>())
     {
         Target = Cast<AEnemyAIController>(AI)->GetTargetActor();
-    }
+	}
 
-    bool bHas = Target != nullptr;
-    if (bHas && bRequireAliveTarget)
-    {
-        bHas = !Target->Tags.Contains("State.Dead");
-    }
+	bool bHas = Target != nullptr;
+	if (bHas && bRequireAliveTarget)
+	{
+		const bool bDeadTag = Target->Tags.Contains("State.Dead");
+	}
 
-    return bNegate ? !bHas : bHas;
+	return bNegate ? !bHas : bHas;
 }
-

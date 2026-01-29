@@ -4,12 +4,14 @@
 
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
+#include "Attributes/AeyerjiAttributeSet.h"
 #include "GAS/GE_ItemStats.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Inventory/AeyerjiLootPickup.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
 #include "Logging/AeyerjiLog.h"
+#include "Systems/LootTable.h"
 #include "CollisionQueryParams.h"
 #include "Engine/World.h"
 #include "Net/Core/PushModel/PushModel.h"
@@ -20,6 +22,7 @@
 #include "UObject/UnrealType.h"
 #include "TimerManager.h"
 #include "Containers/Set.h"
+#include "GameFramework/PlayerState.h"
 
 namespace
 {
@@ -84,6 +87,54 @@ namespace
 		}
 
 		return DesiredLocation;
+	}
+
+	int32 GetInventoryOwnerLevel(const UAeyerjiInventoryComponent* Inventory)
+	{
+		const AActor* Owner = Inventory ? Inventory->GetOwner() : nullptr;
+		if (!Owner)
+		{
+			return 1;
+		}
+
+		auto ReadLevelFromASC = [](const UAbilitySystemComponent* ASC) -> int32
+		{
+			if (!ASC)
+			{
+				return 1;
+			}
+
+			if (const UAeyerjiAttributeSet* Attr = ASC->GetSet<UAeyerjiAttributeSet>())
+			{
+				return FMath::Max(1, FMath::RoundToInt(Attr->GetLevel()));
+			}
+
+			return 1;
+		};
+
+		if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Owner))
+		{
+			if (UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent())
+			{
+				return ReadLevelFromASC(ASC);
+			}
+		}
+
+		if (const APawn* Pawn = Cast<APawn>(Owner))
+		{
+			if (const APlayerState* PS = Pawn->GetPlayerState())
+			{
+				if (const IAbilitySystemInterface* PSASI = Cast<IAbilitySystemInterface>(PS))
+				{
+					if (UAbilitySystemComponent* ASC = PSASI->GetAbilitySystemComponent())
+					{
+						return ReadLevelFromASC(ASC);
+					}
+				}
+			}
+		}
+
+		return 1;
 	}
 }
 
@@ -394,6 +445,17 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 		return;
 	}
 
+	const int32 OwnerLevel = GetInventoryOwnerLevel(this);
+	const int32 ItemLevel = FMath::Max(1, Item->ItemLevel);
+	if (ItemLevel > OwnerLevel)
+	{
+		AJ_LOG(this, TEXT("Server_EquipItem rejected: item level %d exceeds owner level %d (%s)"),
+			ItemLevel,
+			OwnerLevel,
+			*GetNameSafe(Item));
+		return;
+	}
+
 	if (!Items.Contains(Item))
 	{
 		if (!AddItemInstance(Item, true))
@@ -485,16 +547,34 @@ void UAeyerjiInventoryComponent::Server_UnequipSlotToGrid_Implementation(EEquipm
 	UnequipSlotInternal(Slot, SlotIndex, &PreferredTopLeft);
 }
 
-void UAeyerjiInventoryComponent::ApplyItemGameplayEffect(UAeyerjiItemInstance* Item)
+void UAeyerjiInventoryComponent::ApplyItemGameplayEffect(UAeyerjiItemInstance* Item, float Multiplier)
 {
 	if (!Item || !ItemStatsEffectClass)
 	{
+		AJ_LOG(this, TEXT("[ItemStatsDebug] ApplyItemGameplayEffect skipped Item=%s ItemStatsEffectClass=%s"),
+			*GetNameSafe(Item),
+			*GetNameSafe(ItemStatsEffectClass.Get()));
 		return;
 	}
 
 	if (UAbilitySystemComponent* ASC = GetASC())
 	{
-		RemoveItemGameplayEffect(Item->UniqueId);
+		const UGameplayEffect* StatsGECDO = ItemStatsEffectClass ? ItemStatsEffectClass->GetDefaultObject<UGameplayEffect>() : nullptr;
+		const int32 ExecCount = StatsGECDO ? StatsGECDO->Executions.Num() : 0;
+		const bool bTrackHandles = Multiplier > 0.f;
+		AJ_LOG(this, TEXT("[ItemStatsDebug] ApplyItemGameplayEffect begin Item=%s Def=%s Id=%s Mods=%d ASC=%s StatsGE=%s Execs=%d Mult=%.2f"),
+			*GetNameSafe(Item),
+			*GetNameSafe(Item->Definition.Get()),
+			Item->UniqueId.IsValid() ? *Item->UniqueId.ToString() : TEXT("Invalid"),
+			Item->GetFinalAggregatedModifiers().Num(),
+			*GetNameSafe(ASC),
+			*GetNameSafe(ItemStatsEffectClass.Get()),
+			ExecCount,
+			Multiplier);
+		if (bTrackHandles)
+		{
+			RemoveItemGameplayEffect(Item->UniqueId);
+		}
 
 		FItemActiveEffectSet HandleSet;
 		const bool bIsAuthority = GetOwner() && GetOwner()->HasAuthority();
@@ -503,48 +583,77 @@ void UAeyerjiInventoryComponent::ApplyItemGameplayEffect(UAeyerjiItemInstance* I
 		Context.AddSourceObject(Item);
 
 		constexpr float Level = 1.f;
+		const FName MultiplierName(TEXT("ItemStatsMultiplier"));
 
-		UGameplayEffect* DynamicEffect = NewObject<UGameplayEffect>(GetTransientPackage(), ItemStatsEffectClass);
-		if (DynamicEffect)
+		bool bHasValidModifier = false;
+		const TArray<FItemStatModifier>& Mods = Item->GetFinalAggregatedModifiers();
+		TArray<float> PreValues;
+		PreValues.Reserve(Mods.Num());
+		for (int32 Index = 0; Index < Mods.Num(); ++Index)
 		{
-			DynamicEffect->Modifiers.Reset();
-
-			auto ConvertOp = [](EItemModOp ItemOp)
+			const FItemStatModifier& Mod = Mods[Index];
+			const bool bAttrValid = Mod.Attribute.IsValid();
+			const bool bHasAttrSet = bAttrValid ? ASC->HasAttributeSetForAttribute(Mod.Attribute) : false;
+			const float PreValue = (bAttrValid && bHasAttrSet) ? ASC->GetNumericAttribute(Mod.Attribute) : 0.f;
+			PreValues.Add(PreValue);
+			AJ_LOG(this, TEXT("[ItemStatsDebug] Mod[%d] Attr=%s Valid=%d Op=%d Mag=%.3f"),
+				Index,
+				*Mod.Attribute.GetName(),
+				bAttrValid ? 1 : 0,
+				static_cast<int32>(Mod.Op),
+				Mod.Magnitude);
+			if (bAttrValid)
 			{
-				switch (ItemOp)
-				{
-				case EItemModOp::Multiplicative:
-					return EGameplayModOp::Multiplicitive;
-				case EItemModOp::Override:
-					return EGameplayModOp::Override;
-				case EItemModOp::Additive:
-				default:
-					return EGameplayModOp::Additive;
-				}
-			};
+				AJ_LOG(this, TEXT("[ItemStatsDebug] Mod[%d] Attr=%s HasAttrSet=%d Pre=%.3f"),
+					Index,
+					*Mod.Attribute.GetName(),
+					bHasAttrSet ? 1 : 0,
+					PreValue);
+			}
 
-			for (const FItemStatModifier& Mod : Item->GetFinalAggregatedModifiers())
+			if (bAttrValid)
 			{
+				bHasValidModifier = true;
+			}
+		}
+
+		if (bHasValidModifier)
+		{
+			// Use the class CDO so the GameplayEffect definition replicates cleanly to clients.
+			const FGameplayEffectSpecHandle StatSpecHandle = ASC->MakeOutgoingSpec(ItemStatsEffectClass, Level, Context);
+			if (StatSpecHandle.IsValid() && StatSpecHandle.Data.IsValid())
+			{
+				StatSpecHandle.Data->SetSetByCallerMagnitude(MultiplierName, Multiplier);
+				StatSpecHandle.Data->SetDuration(UGameplayEffect::INSTANT_APPLICATION, true);
+				ASC->ApplyGameplayEffectSpecToSelf(*StatSpecHandle.Data.Get());
+				HandleSet.bAppliedItemStats = bTrackHandles;
+			}
+
+			for (int32 Index = 0; Index < Mods.Num(); ++Index)
+			{
+				const FItemStatModifier& Mod = Mods[Index];
 				if (!Mod.Attribute.IsValid())
 				{
 					continue;
 				}
 
-				FGameplayModifierInfo& ModifierInfo = DynamicEffect->Modifiers.AddDefaulted_GetRef();
-				ModifierInfo.Attribute = Mod.Attribute;
-				ModifierInfo.ModifierOp = ConvertOp(Mod.Op);
-				ModifierInfo.ModifierMagnitude = FScalableFloat(Mod.Magnitude);
+				const bool bHasAttrSet = ASC->HasAttributeSetForAttribute(Mod.Attribute);
+				const float PostValue = bHasAttrSet ? ASC->GetNumericAttribute(Mod.Attribute) : 0.f;
+				const float PreValue = PreValues.IsValidIndex(Index) ? PreValues[Index] : 0.f;
+				AJ_LOG(this, TEXT("[ItemStatsDebug] Mod[%d] Attr=%s HasAttrSet=%d Pre=%.3f Post=%.3f Delta=%.3f"),
+					Index,
+					*Mod.Attribute.GetName(),
+					bHasAttrSet ? 1 : 0,
+					PreValue,
+					PostValue,
+					PostValue - PreValue);
 			}
-
-			if (DynamicEffect->Modifiers.Num() > 0)
-			{
-				FGameplayEffectSpec DynamicSpec(DynamicEffect, Context, Level);
-				FActiveGameplayEffectHandle ActiveHandle = ASC->ApplyGameplayEffectSpecToSelf(DynamicSpec);
-				if (ActiveHandle.IsValid())
-				{
-					HandleSet.StatsHandle = ActiveHandle;
-				}
-			}
+		}
+		else
+		{
+			AJ_LOG(this, TEXT("[ItemStatsDebug] No valid modifiers found for Item=%s (Definition=%s)"),
+				*GetNameSafe(Item),
+				*GetNameSafe(Item->Definition.Get()));
 		}
 
 		for (const FItemGrantedEffect& Granted : Item->GetGrantedEffects())
@@ -621,13 +730,29 @@ void UAeyerjiInventoryComponent::ApplyItemGameplayEffect(UAeyerjiItemInstance* I
 			}
 		}
 
-		if (HandleSet.StatsHandle.IsValid()
+		if (bTrackHandles && (HandleSet.StatsHandle.IsValid()
 			|| HandleSet.AdditionalHandles.Num() > 0
 			|| HandleSet.GrantedAbilityHandles.Num() > 0
-			|| HandleSet.AddedOwnedTags.Num() > 0)
+			|| HandleSet.AddedOwnedTags.Num() > 0
+			|| HandleSet.bAppliedItemStats))
 		{
 			ActiveEffectHandles.Add(Item->UniqueId, MoveTemp(HandleSet));
+			AJ_LOG(this, TEXT("[ItemStatsDebug] Applied handles Stats=%d Extra=%d Abilities=%d Tags=%d"),
+				HandleSet.StatsHandle.IsValid() ? 1 : 0,
+				HandleSet.AdditionalHandles.Num(),
+				HandleSet.GrantedAbilityHandles.Num(),
+				HandleSet.AddedOwnedTags.Num());
 		}
+		else
+		{
+			AJ_LOG(this, TEXT("[ItemStatsDebug] No handles created for Item=%s"), *GetNameSafe(Item));
+		}
+	}
+	else
+	{
+		AJ_LOG(this, TEXT("[ItemStatsDebug] ApplyItemGameplayEffect skipped: ASC missing for Item=%s Owner=%s"),
+			*GetNameSafe(Item),
+			*GetNameSafe(GetOwner()));
 	}
 }
 
@@ -642,6 +767,18 @@ void UAeyerjiInventoryComponent::RemoveItemGameplayEffect(const FGuid& ItemId)
 			if (HandleSet->StatsHandle.IsValid())
 			{
 				ASC->RemoveActiveGameplayEffect(HandleSet->StatsHandle);
+			}
+			else if (HandleSet->bAppliedItemStats)
+			{
+				if (UAeyerjiItemInstance* Item = FindItemById(ItemId))
+				{
+					ApplyItemGameplayEffect(Item, -1.f);
+				}
+				else
+				{
+					AJ_LOG(this, TEXT("[ItemStatsDebug] RemoveItemGameplayEffect could not find ItemId=%s for inverse apply"),
+						*ItemId.ToString());
+				}
 			}
 
 			for (FActiveGameplayEffectHandle& Extra : HandleSet->AdditionalHandles)
@@ -743,6 +880,122 @@ void UAeyerjiInventoryComponent::Server_MoveItemInGrid_Implementation(const FGui
 	*Existing = Candidate;
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
 	OnInventoryChanged.Broadcast();
+}
+
+void UAeyerjiInventoryComponent::Server_SwapItemsInGrid_Implementation(const FGuid& ItemIdA, const FGuid& ItemIdB)
+{
+	if (!ItemIdA.IsValid() || !ItemIdB.IsValid() || ItemIdA == ItemIdB)
+	{
+		return;
+	}
+
+	FInventoryItemGridData* PlacementA = GridPlacements.FindByPredicate(
+		[&ItemIdA](const FInventoryItemGridData& Entry)
+		{
+			return Entry.ItemId == ItemIdA;
+		});
+
+	FInventoryItemGridData* PlacementB = GridPlacements.FindByPredicate(
+		[&ItemIdB](const FInventoryItemGridData& Entry)
+		{
+			return Entry.ItemId == ItemIdB;
+		});
+
+	if (!PlacementA || !PlacementB)
+	{
+		return;
+	}
+
+	UAeyerjiItemInstance* ItemA = FindItemById(ItemIdA);
+	UAeyerjiItemInstance* ItemB = FindItemById(ItemIdB);
+	if (!ItemA || !ItemB)
+	{
+		return;
+	}
+
+	FInventoryItemGridData CandidateA = *PlacementA;
+	CandidateA.TopLeft = PlacementB->TopLeft;
+	CandidateA.Size = ItemA->InventorySize;
+	CandidateA.ItemInstance = ItemA;
+
+	FInventoryItemGridData CandidateB = *PlacementB;
+	CandidateB.TopLeft = PlacementA->TopLeft;
+	CandidateB.Size = ItemB->InventorySize;
+	CandidateB.ItemInstance = ItemB;
+
+	if (!CanPlaceAt(CandidateA, ItemIdB) || !CanPlaceAt(CandidateB, ItemIdA))
+	{
+		return;
+	}
+
+	*PlacementA = CandidateA;
+	*PlacementB = CandidateB;
+
+	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
+	OnInventoryChanged.Broadcast();
+}
+
+void UAeyerjiInventoryComponent::Server_SwapEquippedSlots_Implementation(EEquipmentSlot Slot, int32 SlotIndexA, int32 SlotIndexB)
+{
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return;
+	}
+
+	SlotIndexA = SanitizeSlotIndex(SlotIndexA);
+	SlotIndexB = SanitizeSlotIndex(SlotIndexB);
+
+	if (SlotIndexA == SlotIndexB)
+	{
+		return;
+	}
+
+	FEquippedItemEntry* EntryA = FindEquippedEntry(Slot, SlotIndexA);
+	FEquippedItemEntry* EntryB = FindEquippedEntry(Slot, SlotIndexB);
+
+	if (!EntryA && !EntryB)
+	{
+		return;
+	}
+
+	auto UpdateEntryMeta = [Slot](FEquippedItemEntry& Entry, int32 NewIndex)
+	{
+		Entry.Slot = Slot;
+		Entry.SlotIndex = NewIndex;
+		if (Entry.Item)
+		{
+			Entry.Item->EquippedSlot = Slot;
+			Entry.Item->EquippedSlotIndex = NewIndex;
+		}
+	};
+
+	if (EntryA && EntryB)
+	{
+		Swap(*EntryA, *EntryB);
+		UpdateEntryMeta(*EntryA, SlotIndexA);
+		UpdateEntryMeta(*EntryB, SlotIndexB);
+	}
+	else if (EntryA && !EntryB)
+	{
+		EntryA->SlotIndex = SlotIndexB;
+		if (EntryA->Item)
+		{
+			EntryA->Item->EquippedSlotIndex = SlotIndexB;
+		}
+	}
+	else if (!EntryA && EntryB)
+	{
+		EntryB->SlotIndex = SlotIndexA;
+		if (EntryB->Item)
+		{
+			EntryB->Item->EquippedSlotIndex = SlotIndexA;
+		}
+	}
+
+	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, EquippedItems, this);
+	OnEquippedItemChanged.Broadcast(Slot, SlotIndexA, GetEquipped(Slot, SlotIndexA));
+	OnEquippedItemChanged.Broadcast(Slot, SlotIndexB, GetEquipped(Slot, SlotIndexB));
+	RebuildItemSnapshots();
 }
 
 void UAeyerjiInventoryComponent::SetGridDimensions(int32 Columns, int32 Rows)
@@ -876,6 +1129,58 @@ void UAeyerjiInventoryComponent::DropItemAtOwner(const FGuid& ItemId, float Forw
 	const FVector DropLocation = OwnerActor->GetActorLocation() + OwnerActor->GetActorForwardVector() * FMath::Max(ForwardOffset, 0.f);
 	const FRotator DropRotation = OwnerActor->GetActorRotation();
 	DropItem(ItemId, DropLocation, DropRotation);
+}
+
+int32 UAeyerjiInventoryComponent::DebugRefreshItemScaling(const UAeyerjiLootTable& LootTable)
+{
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return 0;
+	}
+
+	TSet<UAeyerjiItemInstance*> ItemsToProcess;
+	for (UAeyerjiItemInstance* Item : Items)
+	{
+		ItemsToProcess.Add(Item);
+	}
+	for (const FEquippedItemEntry& Entry : EquippedItems)
+	{
+		ItemsToProcess.Add(Entry.Item);
+	}
+
+	int32 UpdatedCount = 0;
+	for (UAeyerjiItemInstance* Item : ItemsToProcess)
+	{
+		if (!Item)
+		{
+			continue;
+		}
+
+		Item->RebuildAggregation();
+		Item->ApplyLootStatScaling(&LootTable);
+
+		const bool bIsEquipped = EquippedItems.ContainsByPredicate(
+			[Item](const FEquippedItemEntry& Entry)
+			{
+				return Entry.Item == Item || Entry.ItemId == Item->UniqueId;
+			});
+
+		if (bIsEquipped)
+		{
+			ApplyItemGameplayEffect(Item);
+		}
+
+		Item->ForceItemChangedForUI();
+		++UpdatedCount;
+	}
+
+	if (UpdatedCount > 0)
+	{
+		RebuildItemSnapshots();
+	}
+
+	AJ_LOG(this, TEXT("DebugRefreshItemScaling updated %d items"), UpdatedCount);
+	return UpdatedCount;
 }
 
 void UAeyerjiInventoryComponent::OnRep_EquippedItems(const TArray<FEquippedItemEntry>& PreviousEquipped)
@@ -1099,6 +1404,16 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, EquippedItems, this);
 
 	RebuildItemSnapshots();
+
+	// Re-apply gameplay effects / abilities for equipped items after loading
+	for (FEquippedItemEntry& Entry : EquippedItems)
+	{
+		if (Entry.Item)
+		{
+			ApplyItemGameplayEffect(Entry.Item);
+			BroadcastItemStateChange(EInventoryItemStateChange::Equipped, Entry.Item, Entry.Slot, Entry.SlotIndex);
+		}
+	}
 
 	OnInventoryChanged.Broadcast();
 	for (const FEquippedItemEntry& Entry : EquippedItems)

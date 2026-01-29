@@ -34,11 +34,14 @@ public:
                                        float BaseXP,
                                        float PerLevelScalar = 0.5f);
 
-    /** Convenience: Reads BaseXP from Actor, then scales by that actor's current level. */
+    /** Convenience: Reads BaseXP from Actor, then scales by that actor's current level and optional difficulty multiplier. */
     UFUNCTION(BlueprintPure, Category="Aeyerji|XP", meta=(WorldContext="WorldContextObject"))
     static float GetScaledXPRewardForEnemy(const UObject* WorldContextObject,
                                            const AActor* EnemyActor,
-                                           float PerLevelScalar = 0.5f);
+                                           float PerLevelScalar = 0.5f,
+                                           float DifficultyScale = 0.f,
+                                           float DifficultyMinMultiplier = 1.f,
+                                           float DifficultyMaxMultiplier = 1.f);
 
     /** Set the Base XP value on an actor's Reward AttributeSet. */
     UFUNCTION(BlueprintCallable, Category="Aeyerji|XP")

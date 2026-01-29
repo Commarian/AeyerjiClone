@@ -33,6 +33,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|UI")
 	void RefreshInventory();
 
+	/** Drops the item under the cursor within the grid (if any). */
+	UFUNCTION(BlueprintCallable, Category = "Aeyerji|UI")
+	bool DropItemUnderCursor(float ForwardOffset = 100.f);
+
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|UI")
 	UAeyerjiInventoryComponent* GetInventoryComponent() const { return Inventory.Get(); }
 

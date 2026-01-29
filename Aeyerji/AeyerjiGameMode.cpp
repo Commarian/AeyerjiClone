@@ -2,6 +2,7 @@
 
 #include "AeyerjiGameMode.h"
 #include "AeyerjiPlayerController.h"
+#include "AeyerjiGameState.h"
 #include "GameFramework/PlayerController.h"
 #include "Player/PlayerParentNative.h"
 #include "UObject/ConstructorHelpers.h"
@@ -9,6 +10,17 @@
 
 AAeyerjiGameMode::AAeyerjiGameMode()
 {
+	// Prefer the BP override so designers can tweak defaults without recompiling.
+	static ConstructorHelpers::FClassFinder<AAeyerjiGameState> BP_GameState(TEXT("/Game/Systems/BP_AeyerjiGameState.BP_AeyerjiGameState_C"));
+	if (BP_GameState.Succeeded())
+	{
+		GameStateClass = BP_GameState.Class;
+	}
+	else
+	{
+		GameStateClass = AAeyerjiGameState::StaticClass();
+	}
+
 	// use our custom PlayerController class
 	PlayerControllerClass = AAeyerjiPlayerController::StaticClass();
 	// set default pawn class to our Blueprinted character

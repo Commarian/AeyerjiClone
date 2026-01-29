@@ -3,9 +3,20 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
 #include "AeyerjiLevelDirector.generated.h"
 
 class AAeyerjiSpawnerGroup;
+class AAeyerjiEncounterDirector;
+class UAeyerjiLevelingComponent;
+class UAeyerjiWorldSpawnProfile;
+
+UENUM(BlueprintType)
+enum class EAeyerjiLevelSpawnMode : uint8
+{
+	Sequence UMETA(DisplayName="Sequence"),
+	FixedWorldPopulation UMETA(DisplayName="Fixed World Population")
+};
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FShardsChangedSignature, int32, NewCount);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRunStateChangedSignature, bool, bIsRunning);
@@ -76,9 +87,61 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Director")
 	void OpenBossGate();
 
+	/** Handles fixed population cluster clears when using fixed world spawn mode. */
+	UFUNCTION()
+	void HandleFixedClusterCleared(int32 ClusterId, float DensityAlpha, bool bDenseCluster);
+
+	/** Handles fixed population completion when using fixed world spawn mode. */
+	UFUNCTION()
+	void HandleFixedPopulationCleared();
+
 	/** Returns the accumulated real-time seconds while the run has been active. */
 	UFUNCTION(BlueprintPure, Category="Director")
 	float GetRunTimeSeconds() const { return AccumulatedRunSeconds; }
+
+	/** Returns the current shard total for the run. */
+	UFUNCTION(BlueprintPure, Category="Director")
+	int32 GetShardCount() const { return ShardCount; }
+
+	/** Difficulty slider the UI drives (0..1000). */
+	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
+	float GetDifficultySlider() const { return DifficultySlider; }
+
+	/** Normalized difficulty scale (0..1). */
+	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
+	float GetDifficultyScale() const;
+
+	/** Curved difficulty using pow(scale, DifficultyExponent). */
+	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
+	float GetCurvedDifficulty() const;
+
+	/** Snapshot the current player level (reads Level attribute from player 0 if available). */
+	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
+	int32 GetCurrentPlayerLevel() const;
+
+	/** When true, enemies are forced to match the current player level during scaling. */
+	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
+	bool ShouldForceEnemyLevelToPlayerLevel() const { return bForceEnemyLevelToPlayerLevel; }
+
+	/** Updates all enemies in the world to the current player level. */
+	UFUNCTION(BlueprintCallable, Category="Director|Difficulty")
+	void RefreshEnemyLevelsToCurrentPlayer();
+
+	/**
+	 * Entry point for triggering a boss encounter. Blueprint override is expected to own the flow; native body can be toggled via bEnableNativeBossSpawn.
+	 * Returns the spawned pawn so Blueprint can customize/possess it if desired. When bEnableNativeBossSpawn is false (default) the native body does nothing.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category="Director|Boss")
+	APawn* SpawnBossEncounter(AAeyerjiEncounterDirector* EncounterDirector = nullptr);
+	virtual APawn* SpawnBossEncounter_Implementation(AAeyerjiEncounterDirector* EncounterDirector = nullptr);
+
+	/** Assigns/overrides the boss spawn marker at runtime (Blueprint-friendly). Useful when a level sequence or trigger chooses the spawn location dynamically. */
+	UFUNCTION(BlueprintCallable, Category="Director|Boss")
+	void SetBossSpawnMarker(AActor* NewMarker);
+
+	/** Responds to player level changes by resyncing enemy levels when enabled. */
+	UFUNCTION()
+	void HandlePlayerLevelUp(int32 OldLevel, int32 NewLevel);
 
 public:
 	/**
@@ -102,6 +165,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director")
 	TObjectPtr<AActor> BossGateActor = nullptr;
 
+	/** Optional marker to dictate where the boss pawn should appear. Falls back to BossSpawner transform. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Boss", meta=(EditCondition="bEnableNativeBossSpawn", EditConditionHides))
+	TObjectPtr<AActor> BossSpawnMarker = nullptr;
+
+	/** Pawn class to spawn for the boss encounter (must be a Pawn/AEnemyParentNative subclass). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Boss", meta=(EditCondition="bEnableNativeBossSpawn", EditConditionHides))
+	TSubclassOf<APawn> BossPawnClass;
+
+	/** Enables the native SpawnBossEncounter body; leave false to drive boss spawning entirely from Blueprint. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Boss", meta=(DisplayName="Use Native Boss Spawn"))
+	bool bEnableNativeBossSpawn = false;
+
 	/**
 	 * Number of shards the player must collect before the boss gate unlocks.
 	 * Shards are typically awarded by encounters via HandleSpawnerCleared or scripted rewards.
@@ -116,6 +191,42 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director")
 	bool bAutoStartFirstRoom = true;
 
+	/** Selects between the classic sequential spawner flow and fixed world population mode. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Spawning")
+	EAeyerjiLevelSpawnMode SpawnMode = EAeyerjiLevelSpawnMode::Sequence;
+
+	/** Spawn profile used when SpawnMode is FixedWorldPopulation. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Spawning", meta=(EditCondition="SpawnMode==EAeyerjiLevelSpawnMode::FixedWorldPopulation"))
+	TObjectPtr<UAeyerjiWorldSpawnProfile> WorldSpawnProfile = nullptr;
+
+	/** Optional spawner group used as the global spawn manager for fixed populations. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Spawning", meta=(EditCondition="SpawnMode==EAeyerjiLevelSpawnMode::FixedWorldPopulation"))
+	TObjectPtr<AAeyerjiSpawnerGroup> WorldPopulationSpawner = nullptr;
+
+	/** When true, the boss gate opens when the fixed population is fully cleared. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Director|Spawning", meta=(EditCondition="SpawnMode==EAeyerjiLevelSpawnMode::FixedWorldPopulation"))
+	bool bOpenBossGateOnFixedPopulationCleared = true;
+
+	/** Designer-driven slider (0..1000) used to derive DifficultyScale. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Director|Difficulty", meta=(ClampMin="0.0", ClampMax="1000.0", UIMin="0.0", UIMax="1000.0"))
+	float DifficultySlider = 0.f;
+
+	/** Exponent for pow(DifficultyScale, DifficultyExponent); >1 backloads difficulty. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Director|Difficulty", meta=(ClampMin="0.1", AdvancedDisplay))
+	float DifficultyExponent = 1.25f;
+
+	/** When true, all spawned enemies are forced to the current player level. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Director|Difficulty")
+	bool bForceEnemyLevelToPlayerLevel = true;
+
+	/** When true, existing enemies are resynced to the player level when a run starts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Director|Difficulty", meta=(EditCondition="bForceEnemyLevelToPlayerLevel"))
+	bool bResyncEnemyLevelsOnRunStart = true;
+
+	/** When true, enemy levels are updated whenever the player levels up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Director|Difficulty", meta=(EditCondition="bForceEnemyLevelToPlayerLevel"))
+	bool bResyncEnemyLevelsOnPlayerLevelUp = false;
+
 	/** Broadcast when the shard total changes; ideal for UI counters or audio stingers. */
 	UPROPERTY(BlueprintAssignable, Category="Director|Events")
 	FShardsChangedSignature OnShardsChanged;
@@ -126,6 +237,9 @@ public:
 
 protected:
 	void BindSpawner(AAeyerjiSpawnerGroup* Spawner);
+	void BindEncounterDirector(AAeyerjiEncounterDirector* Director);
+	/** Binds the player's leveling component so enemy level sync can react to level-ups. */
+	void BindPlayerLevelingComponent();
 	void TickRunTimer();
 
 protected:
@@ -143,6 +257,12 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category="Director|State")
 	float AccumulatedRunSeconds = 0.f;
+
+	UPROPERTY(VisibleAnywhere, Category="Director|State")
+	int32 FixedPopulationClustersCleared = 0;
+
+	TWeakObjectPtr<AAeyerjiEncounterDirector> CachedEncounterDirector;
+	TWeakObjectPtr<UAeyerjiLevelingComponent> CachedPlayerLeveling;
 
 	FTimerHandle RunTimerHandle;
 };

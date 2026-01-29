@@ -1,10 +1,15 @@
 #include "Environment/SweepingLightBarrier.h"
 
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
+#include "AeyerjiGameplayTags.h"
 #include "Components/SplineComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/RectLightComponent.h"
 #include "Engine/StaticMesh.h"
+#include "GAS/GE_DamagePhysical.h"
+#include "GameplayEffect.h"
 #include "Materials/MaterialInterface.h"
 #include "Kismet/GameplayStatics.h"
 #include "UObject/ConstructorHelpers.h"
@@ -58,6 +63,12 @@ ASweepingLightBarrier::ASweepingLightBarrier()
     bDamageContinuous = true;
     DamagePerSecond = 15.f;
     DamageTypeClass = UDamageType::StaticClass();
+    DamageEffectClass = UGE_DamagePhysical::StaticClass();
+    if (!DamageSetByCallerTag.IsValid())
+    {
+        DamageSetByCallerTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Damage.Instant"), /*ErrorIfNotFound=*/false);
+    }
+    DamageTypeTag = AeyerjiTags::DamageType_Physical;
 
     Alpha = 0.f;
     Direction = +1;
@@ -162,7 +173,7 @@ void ASweepingLightBarrier::Tick(float DeltaSeconds)
         {
             if (AActor* Other = It->Get())
             {
-                UGameplayStatics::ApplyDamage(Other, Damage, GetInstigatorController(), this, DamageTypeClass);
+                ApplyBarrierDamage(Other, Damage);
             }
         }
     }
@@ -182,6 +193,44 @@ void ASweepingLightBarrier::UpdateBarrierTransform()
     RectLight->SetRelativeRotation(FRotator::ZeroRotator);
 }
 
+void ASweepingLightBarrier::ApplyBarrierDamage(AActor* Other, float Damage)
+{
+    if (!IsValid(Other) || Damage <= 0.f)
+    {
+        return;
+    }
+
+    if (DamageEffectClass)
+    {
+        if (UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Other))
+        {
+            FGameplayEffectContextHandle ContextHandle = TargetASC->MakeEffectContext();
+            ContextHandle.AddSourceObject(this);
+
+            FGameplayEffectSpecHandle SpecHandle = TargetASC->MakeOutgoingSpec(DamageEffectClass, 1.f, ContextHandle);
+            if (SpecHandle.IsValid() && SpecHandle.Data.IsValid())
+            {
+                const FGameplayTag DamageTag = DamageSetByCallerTag.IsValid()
+                    ? DamageSetByCallerTag
+                    : FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Damage.Instant"), /*ErrorIfNotFound=*/false);
+                if (DamageTag.IsValid())
+                {
+                    SpecHandle.Data->SetSetByCallerMagnitude(DamageTag, Damage);
+                }
+                if (DamageTypeTag.IsValid())
+                {
+                    SpecHandle.Data->AddDynamicAssetTag(DamageTypeTag);
+                }
+
+                TargetASC->ApplyGameplayEffectSpecToSelf(*SpecHandle.Data.Get());
+                return;
+            }
+        }
+    }
+
+    UGameplayStatics::ApplyDamage(Other, Damage, GetInstigatorController(), this, DamageTypeClass);
+}
+
 void ASweepingLightBarrier::OnDamageOverlapBegin(UPrimitiveComponent* Overlapped, AActor* Other, UPrimitiveComponent* OtherComp, int32 BodyIndex, bool bFromSweep, const FHitResult& Hit)
 {
     if (!IsValid(Other) || Other == this)
@@ -192,7 +241,7 @@ void ASweepingLightBarrier::OnDamageOverlapBegin(UPrimitiveComponent* Overlapped
 
     if (!bDamageContinuous && DamagePerSecond > 0.f)
     {
-        UGameplayStatics::ApplyDamage(Other, DamagePerSecond, GetInstigatorController(), this, DamageTypeClass);
+        ApplyBarrierDamage(Other, DamagePerSecond);
     }
 }
 
@@ -200,4 +249,3 @@ void ASweepingLightBarrier::OnDamageOverlapEnd(UPrimitiveComponent* Overlapped, 
 {
     Overlapping.Remove(Other);
 }
-

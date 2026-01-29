@@ -5,6 +5,7 @@
 #include "Aeyerji/AeyerjiGameMode.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
 #include "Aeyerji/AeyerjiSaveGame.h"
+#include "../AeyerjiGameInstance.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/Controller.h"
@@ -25,6 +26,11 @@
 #include "GameplayTagContainer.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Items/InventoryComponent.h"
+#include "Items/ItemDefinition.h"
+#include "Player/PlayerStatsTrackingComponent.h"
+#include "Systems/LootService.h"
+#include "Engine/AssetManager.h"
+#include "Engine/World.h"
 
 //This works together with @EAeyerjiStat in CharacterStatsLibrary.h
 namespace
@@ -101,6 +107,9 @@ namespace
 
 		case EAeyerjiStat::SpellPower:
 			return UAeyerjiAttributeSet::GetSpellPowerAttribute();
+
+		case EAeyerjiStat::MagicAmp:
+			return UAeyerjiAttributeSet::GetMagicAmpAttribute();
 
 		case EAeyerjiStat::ManaRegen:
 			return UAeyerjiAttributeSet::GetManaRegenAttribute();
@@ -526,6 +535,28 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 		return;
 	}
 
+	// Restore persisted difficulty selection so UI sliders can reflect the saved choice.
+	if (PS->GetWorld())
+	{
+		if (UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(PS->GetWorld()->GetGameInstance()))
+		{
+			if (Data->bHasDifficultySelection)
+			{
+				GI->SetDifficultySlider(Data->DifficultySlider);
+			}
+		}
+	}
+
+	// Restore lifetime loot stats into the player state component if available.
+	if (UPlayerStatsTrackingComponent* StatsComp = PS->FindComponentByClass<UPlayerStatsTrackingComponent>())
+	{
+		StatsComp->LoadLootStats(Data->LootStats);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("LoadAeyerjiChar: PlayerState %s missing PlayerStatsTrackingComponent; skipping loot stats load"), *GetNameSafe(PS));
+	}
+
 	// Some older/new slots may not have been initialised with the fixed number of action bar entries.
 	// Pad the save data to match the current expected slot count so widgets and selections work.
 	const int32 ExpectedSlots = PS->ActionBar.Num();
@@ -567,7 +598,7 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 		if (Leveling)
 
 		{
-
+			UE_LOG(LogTemp, Display, TEXT("LoadAeyerjiChar: Setting level via UAeyerjiLevelingComponent to %d"), SavedLevel);
 			Leveling->SetLevel(SavedLevel);
 		}
 
@@ -657,6 +688,20 @@ void UCharacterStatsLibrary::SaveAeyerjiChar(
 		return;
 	}
 
+	// Capture the current difficulty slider for persistence.
+	Data->bHasDifficultySelection = false;
+	if (PS->GetWorld())
+	{
+		if (const UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(PS->GetWorld()->GetGameInstance()))
+		{
+			if (GI->HasDifficultySelection())
+			{
+				Data->DifficultySlider = GI->GetDifficultySlider();
+				Data->bHasDifficultySelection = true;
+			}
+		}
+	}
+
 	const APawn *Pawn = PS->GetPawn();
 
 	if (Pawn)
@@ -704,6 +749,15 @@ void UCharacterStatsLibrary::SaveAeyerjiChar(
 				}
 			}
 		}
+	}
+
+	if (const UPlayerStatsTrackingComponent* StatsComp = PS->FindComponentByClass<UPlayerStatsTrackingComponent>())
+	{
+		StatsComp->ExtractLootStats(Data->LootStats);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("SaveAeyerjiChar: PlayerState %s missing PlayerStatsTrackingComponent; skipping loot stats save"), *GetNameSafe(PS));
 	}
 
 	// Save action bar data
@@ -1061,6 +1115,141 @@ UGameplayAbility *UCharacterStatsLibrary::GetAbilityCDOForBranchTag(
 	return nullptr;
 }
 
+UPlayerStatsTrackingComponent* UCharacterStatsLibrary::GetPlayerStatsTracking(const AActor* Actor)
+{
+	if (!Actor)
+	{
+		return nullptr;
+	}
+
+	if (UPlayerStatsTrackingComponent* Direct = Actor->FindComponentByClass<UPlayerStatsTrackingComponent>())
+	{
+		return Direct;
+	}
+
+	if (const APawn* Pawn = Cast<APawn>(Actor))
+	{
+		if (APlayerState* PS = Pawn->GetPlayerState())
+		{
+			if (UPlayerStatsTrackingComponent* FromPS = PS->FindComponentByClass<UPlayerStatsTrackingComponent>())
+			{
+				return FromPS;
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+bool UCharacterStatsLibrary::HasPlayerPickedUpItemId(const AActor* Actor, FName ItemId)
+{
+	if (ItemId.IsNone())
+	{
+		return false;
+	}
+
+	if (UPlayerStatsTrackingComponent* Stats = GetPlayerStatsTracking(Actor))
+	{
+		return Stats->HasPickedUpItemId(ItemId);
+	}
+
+	return false;
+}
+
+ULootService* UCharacterStatsLibrary::GetLootService(UObject* WorldContextObject)
+{
+	if (!WorldContextObject)
+	{
+		return nullptr;
+	}
+
+	if (UGameInstance* GI = WorldContextObject->GetWorld() ? WorldContextObject->GetWorld()->GetGameInstance() : nullptr)
+	{
+		return GI->GetSubsystem<ULootService>();
+	}
+
+	return nullptr;
+}
+
+UItemDefinition* UCharacterStatsLibrary::GetDefinitionFromLootResult(const FLootDropResult& Result)
+{
+	if (Result.ItemDefinition)
+	{
+		return Result.ItemDefinition;
+	}
+
+	if (Result.ItemId != NAME_None)
+	{
+		return ResolveItemDefinitionById(nullptr, Result.ItemId);
+	}
+
+	return nullptr;
+}
+
+UItemDefinition* UCharacterStatsLibrary::ResolveItemDefinitionById(UObject* WorldContextObject, FName ItemId)
+{
+	if (ItemId.IsNone())
+	{
+		return nullptr;
+	}
+
+	UAssetManager& Manager = UAssetManager::Get();
+	const FPrimaryAssetType AssetType(UItemDefinition::StaticClass()->GetFName());
+
+	TArray<FPrimaryAssetId> AssetIds;
+	Manager.GetPrimaryAssetIdList(AssetType, AssetIds);
+
+	// First try asset name match (fast, avoids loads).
+	for (const FPrimaryAssetId& Id : AssetIds)
+	{
+		if (Id.PrimaryAssetName == ItemId)
+		{
+			if (UItemDefinition* Def = Cast<UItemDefinition>(Manager.GetPrimaryAssetObject(Id)))
+			{
+				return Def;
+			}
+
+			// Try a synchronous load if not resident yet.
+			const FSoftObjectPath Path = Manager.GetPrimaryAssetPath(Id);
+			if (Path.IsValid())
+			{
+				if (UItemDefinition* Loaded = Cast<UItemDefinition>(Manager.GetStreamableManager().LoadSynchronous(Path, false)))
+				{
+					return Loaded;
+				}
+			}
+		}
+	}
+
+	// Fallback: load candidates and compare their ItemId property.
+	for (const FPrimaryAssetId& Id : AssetIds)
+	{
+		if (UItemDefinition* Def = Cast<UItemDefinition>(Manager.GetPrimaryAssetObject(Id)))
+		{
+			if (Def->ItemId == ItemId)
+			{
+				return Def;
+			}
+		}
+		else
+		{
+			const FSoftObjectPath Path = Manager.GetPrimaryAssetPath(Id);
+			if (Path.IsValid())
+			{
+				if (UItemDefinition* Loaded = Cast<UItemDefinition>(Manager.GetStreamableManager().LoadSynchronous(Path, false)))
+				{
+					if (Loaded->ItemId == ItemId)
+					{
+						return Loaded;
+					}
+				}
+			}
+		}
+	}
+
+	return nullptr;
+}
+
 static UAbilitySystemComponent *GetAscFromActor(const AActor *Actor)
 
 {
@@ -1124,9 +1313,15 @@ float UCharacterStatsLibrary::GetAttackRangeFromActorASC(const AActor *Actor, fl
 	if (!Set)
 		return (FallbackRange > 0.f) ? FallbackRange : 0.f;
 
-	const float Range = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackRangeAttribute());
+	auto Attr = UAeyerjiAttributeSet::GetAttackRangeAttribute();
+	float Current = ASC->GetNumericAttribute(Attr);
+	if (Current > 0.f) 
+	{
+		return Current;
+	}
 
-	return (Range > 0.f) ? Range : ((FallbackRange > 0.f) ? FallbackRange : 0.f);
+	if (FallbackRange > 0.f) return FallbackRange;
+	return 0.f;
 }
 
 bool UCharacterStatsLibrary::ComputeAttackRangeDestination(const FVector &SelfLocation2D,
@@ -1216,7 +1411,7 @@ bool UCharacterStatsLibrary::ComputeAttackRangeDestination(const FVector &SelfLo
 bool UCharacterStatsLibrary::IsWithinAttackRange(const AActor *SelfActor,
 
 												 const AActor *TargetActor,
-
+												// Will get divided by 100
 												 float StopAtPercentOfRange,
 
 												 float FallbackRange)
@@ -1225,8 +1420,9 @@ bool UCharacterStatsLibrary::IsWithinAttackRange(const AActor *SelfActor,
 
 	if (!SelfActor || !TargetActor)
 		return false;
+	StopAtPercentOfRange *= 0.01;
 
-	const float Range = GetAttackRangeFromActorASC(SelfActor, FallbackRange) * FMath::Max(StopAtPercentOfRange, 0.f);
+	volatile float Range = GetAttackRangeFromActorASC(SelfActor, FallbackRange) * FMath::Max(StopAtPercentOfRange, 0.f);
 
 	if (Range <= 0.f)
 		return false;
@@ -1236,6 +1432,107 @@ bool UCharacterStatsLibrary::IsWithinAttackRange(const AActor *SelfActor,
 	const FVector B = TargetActor->GetActorLocation();
 
 	return FVector::DistSquared(A, B) <= FMath::Square(Range);
+}
+
+bool UCharacterStatsLibrary::GetSavedDifficulty(const UObject* WorldContextObject, float& OutSlider, float& OutScale)
+{
+	OutSlider = 0.f;
+	OutScale = 0.f;
+
+	if (!WorldContextObject)
+	{
+		return false;
+	}
+
+	UWorld* World = WorldContextObject->GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	if (const UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(World->GetGameInstance()))
+	{
+		if (GI->HasDifficultySelection())
+		{
+			OutSlider = GI->GetDifficultySlider();
+			OutScale = GI->GetDifficultyScale();
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool UCharacterStatsLibrary::RecordBestRunTimeSecondsForDifficulty(const AAeyerjiPlayerState* PS, float RunTimeSeconds, float DifficultySlider)
+{
+	if (!PS || !PS->GetWorld() || PS->GetWorld()->GetNetMode() == NM_Client)
+	{
+		return false;
+	}
+
+	if (RunTimeSeconds <= 0.f)
+	{
+		return false;
+	}
+
+	const FString Slot = MakeStableCharSlotName(PS);
+	if (Slot.IsEmpty())
+	{
+		return false;
+	}
+
+	bool bLoadedExisting = false;
+	UAeyerjiSaveGame* Data = LoadOrCreateAeyerjiSave(Slot, bLoadedExisting);
+	if (!Data)
+	{
+		return false;
+	}
+
+	const int32 DifficultyKey = FMath::Clamp(FMath::RoundToInt(DifficultySlider), 0, 1000);
+	const float ExistingBest = Data->BestRunTimeSecondsByDifficulty.FindRef(DifficultyKey);
+
+	const bool bHasExisting = Data->BestRunTimeSecondsByDifficulty.Contains(DifficultyKey) && ExistingBest > 0.f;
+	const bool bIsNewBest = !bHasExisting || RunTimeSeconds < ExistingBest;
+	if (!bIsNewBest)
+	{
+		return true;
+	}
+
+	Data->BestRunTimeSecondsByDifficulty.Add(DifficultyKey, RunTimeSeconds);
+	return UGameplayStatics::SaveGameToSlot(Data, Slot, 0);
+}
+
+bool UCharacterStatsLibrary::GetBestRunTimeSecondsForDifficulty(const AAeyerjiPlayerState* PS, float DifficultySlider, float& OutBestRunTimeSeconds)
+{
+	OutBestRunTimeSeconds = 0.f;
+
+	if (!PS)
+	{
+		return false;
+	}
+
+	const FString Slot = MakeStableCharSlotName(PS);
+	if (Slot.IsEmpty() || !UGameplayStatics::DoesSaveGameExist(Slot, 0))
+	{
+		return false;
+	}
+
+	USaveGame* RawSave = UGameplayStatics::LoadGameFromSlot(Slot, 0);
+	const UAeyerjiSaveGame* Data = Cast<UAeyerjiSaveGame>(RawSave);
+	if (!Data)
+	{
+		return false;
+	}
+
+	const int32 DifficultyKey = FMath::Clamp(FMath::RoundToInt(DifficultySlider), 0, 1000);
+	const float* Found = Data->BestRunTimeSecondsByDifficulty.Find(DifficultyKey);
+	if (!Found || *Found <= 0.f)
+	{
+		return false;
+	}
+
+	OutBestRunTimeSeconds = *Found;
+	return true;
 }
 
 void UCharacterStatsLibrary::SmoothFaceActorTowardTarget(AActor *Source, AActor *Target, float DeltaSeconds,

@@ -15,7 +15,15 @@
 UGA_Death::UGA_Death()
 {
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
-	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
+	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerInitiated;
+
+	// Identify this ability so AI tasks can ignore it when rotating abilities.
+	if (const FGameplayTag DeathTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Death"), /*ErrorIfNotFound=*/false); DeathTag.IsValid())
+	{
+		FGameplayTagContainer AssetTags = GetAssetTags();
+		AssetTags.AddTag(DeathTag);
+		SetAssetTags(AssetTags);
+	}
 
 	// Passive, non-cancelable
 	FAbilityTriggerData Trigger;
@@ -33,6 +41,8 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 	const FGameplayAbilityActivationInfo ActivationInfo,
 	const FGameplayEventData* /*TriggerEventData*/)
 {
+	bDeathFinalized = false;
+
 	// Authority only; clients may see the State.Dead tag but should not run this ability.
 	if (!ActorInfo || !ActorInfo->IsNetAuthority())
 	{
@@ -60,22 +70,26 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 
 		if (const bool bHasAnim = (DeathMontage && ActorInfo->AnimInstance.IsValid()))
 		{
-			// Play at normal speed
-			float PlayLen = ActorInfo->AnimInstance->Montage_Play(DeathMontage, /*PlayRate=*/1.f);
+			// Play via ASC so montage replication reaches clients
+			UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
+			float PlayLen = ASC ? ASC->PlayMontage(this, ActivationInfo, DeathMontage, /*Rate=*/1.f) : 0.f;
 			if (PlayLen <= 0.f)
 			{
-				// Fallback: no anim actually played → ragdoll now
+				// Fallback: no anim actually played -> ragdoll now
 				FAeyerjiRagdollHelpers::StartRagdoll(Char);
 				// give viewers time to see the fall
 				PlayLen = 1.25f;
 			}
-			// When montage ends, start ragdoll
-			FOnMontageEnded OnEnd;
-			OnEnd.BindLambda([this, Char](UAnimMontage*, bool /*bInterrupted*/)
+			else if (UAnimInstance* AnimInst = ActorInfo->GetAnimInstance())
 			{
-				FAeyerjiRagdollHelpers::StartRagdoll(Char);
-			});
-			ActorInfo->AnimInstance->Montage_SetEndDelegate(OnEnd, DeathMontage);
+				// When montage ends, start ragdoll
+				FOnMontageEnded OnEnd;
+				OnEnd.BindLambda([this, Char](UAnimMontage*, bool /*bInterrupted*/)
+				{
+					FAeyerjiRagdollHelpers::StartRagdoll(Char);
+				});
+				AnimInst->Montage_SetEndDelegate(OnEnd, DeathMontage);
+			}
 
 			// Schedule finish AFTER montage + a short ragdoll display
 			const float RagdollViewSeconds = FMath::Max(RespawnDelay, 0.f);
@@ -123,6 +137,15 @@ void UGA_Death::EndAbility(const FGameplayAbilitySpecHandle Handle,
 
 void UGA_Death::Server_FinishDeath()
 {
+	// Prevent double-finalization if multiple timers/events fire.
+	static const FName DeathFinalizeLogTag(TEXT("GA_Death"));
+	if (bDeathFinalized)
+	{
+		AJ_LOG(this, TEXT("GA_Death: Server_FinishDeath already finalized; skipping."));
+		return;
+	}
+	bDeathFinalized = true;
+
 	ACharacter* DeadChar = Cast<ACharacter>(GetAvatarActorFromActorInfo());
 	if (!DeadChar)
 	{
@@ -137,19 +160,72 @@ void UGA_Death::Server_FinishDeath()
 	// but keep it non-destructive as above.
 	Super::EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 
+	// Cancel any remaining abilities to avoid shutdown crashes during ASC destruction.
+	const FGameplayAbilityActorInfo* ActorInfo = GetCurrentActorInfo();
+	if (UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr)
+	{
+		ASC->CancelAllAbilities();
+	}
+
 	if (DeadChar->IsPlayerControlled())
 	{
 		if (AController* PC = DeadChar->GetController())
 		{
+			AJ_LOG(this, TEXT("Server_FinishDeath: restarting controller %s from pawn %s"),
+				*GetNameSafe(PC), *GetNameSafe(DeadChar));
+
 			DeadChar->SetLifeSpan(1.0f);
-			if (AGameModeBase* GM = DeadChar->GetWorld()->GetAuthGameMode<AGameModeBase>())
+			if (UWorld* World = DeadChar->GetWorld())
 			{
-				GM->RestartPlayer(PC);
+				AGameModeBase* GM = World->GetAuthGameMode<AGameModeBase>();
+				APawn* NewPawn = nullptr;
+
+				if (bUseCustomRespawn && GM)
+				{
+					AActor* StartSpot = nullptr;
+					if (!RespawnPlayerStartTag.IsNone())
+					{
+						StartSpot = GM->FindPlayerStart(PC, RespawnPlayerStartTag.ToString());
+					}
+					if (!StartSpot)
+					{
+						StartSpot = GM->ChoosePlayerStart(PC);
+					}
+
+					FTransform SpawnTM = StartSpot ? StartSpot->GetActorTransform() : DeadChar->GetActorTransform();
+					TSubclassOf<APawn> PawnClass = RespawnPawnClassOverride ? RespawnPawnClassOverride : TSubclassOf<APawn>(DeadChar->GetClass());
+
+					FActorSpawnParameters Params;
+					Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+					Params.Owner = PC;
+					Params.Instigator = DeadChar;
+
+					NewPawn = World->SpawnActor<APawn>(PawnClass, SpawnTM, Params);
+					if (NewPawn)
+					{
+						PC->Possess(NewPawn);
+					}
+					else
+					{
+						AJ_LOG(this, TEXT("Server_FinishDeath: custom respawn failed to spawn pawn of class %s"),
+							*GetNameSafe(PawnClass));
+					}
+				}
+
+				if (!NewPawn && GM)
+				{
+					GM->RestartPlayer(PC);
+					NewPawn = PC->GetPawn();
+				}
+
+				AJ_LOG(this, TEXT("Server_FinishDeath: controller %s now possesses %s"),
+					*GetNameSafe(PC), *GetNameSafe(NewPawn));
 			}
 		}
 	}
 	else
 	{
+		// Destroy after cancelling abilities to avoid ASC teardown during active callbacks.
 		DeadChar->Destroy();
 	}
 }

@@ -91,7 +91,7 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UAeyerjiLevelingComponent> CachedLevelingComponent = nullptr;
 
-	/** Optional: server-side default level to force at BeginPlay (>=1). */
+	/** Optional: default level for newly created save slots (>=1). */
 	UPROPERTY(EditAnywhere, Category = "Aeyerji|Leveling")
 	int32 StartLevelOnBeginPlay = 1;
 
@@ -138,8 +138,11 @@ private:
 
 	void HandleInventoryComponentResolved(UAeyerjiInventoryComponent* ResolvedComponent);
 	UAeyerjiInventoryComponent* ResolveInventoryComponent();
-	UAeyerjiInventoryComponent* CreateRuntimeInventoryComponent(const FName& ComponentName);
 	void BindInventoryDelegates();
+
+	/** Name of the manually-added inventory component to bind (can be overridden in BP defaults). */
+	UPROPERTY(EditDefaultsOnly, Category = "Aeyerji|Inventory", meta = (AllowPrivateAccess = "true"))
+	FName InventoryComponentName = TEXT("AeyerjiInventory");
 
 	UFUNCTION()
 	void HandleInventoryEquippedItemChanged(EEquipmentSlot Slot, int32 SlotIndex, UAeyerjiItemInstance* Item);
@@ -148,4 +151,7 @@ private:
 	bool bASCInitRetryQueued = false;
 	bool bInventoryBindingsInitialized = false;
 	TWeakObjectPtr<UAeyerjiInventoryComponent> LastBroadcastInventory;
+	// Guards against repeated load RPCs and duplicate server loads.
+	bool bSaveLoadRequested = false;
+	bool bSaveLoaded = false;
 };

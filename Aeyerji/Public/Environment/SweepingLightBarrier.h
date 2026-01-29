@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GameplayTagContainer.h"
 #include "SweepingLightBarrier.generated.h"
 
 class USplineComponent;
@@ -10,6 +11,7 @@ class URectLightComponent;
 class UBoxComponent;
 class UMaterialInterface;
 class UDamageType;
+class UGameplayEffect;
 
 UCLASS(BlueprintType)
 class AEYERJI_API ASweepingLightBarrier : public AActor
@@ -85,6 +87,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Barrier|Damage")
     TSubclassOf<UDamageType> DamageTypeClass;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Barrier|Damage")
+    TSubclassOf<UGameplayEffect> DamageEffectClass;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Barrier|Damage")
+    FGameplayTag DamageSetByCallerTag;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Barrier|Damage")
+    FGameplayTag DamageTypeTag;
+
 private:
     float SplineLen;
     float Alpha; // 0..1 along the path
@@ -94,6 +105,7 @@ private:
     TSet<TWeakObjectPtr<AActor>> Overlapping;
 
     void UpdateBarrierTransform();
+    void ApplyBarrierDamage(AActor* Other, float Damage);
 
     UFUNCTION()
     void OnDamageOverlapBegin(UPrimitiveComponent* Overlapped, AActor* Other, UPrimitiveComponent* OtherComp, int32 BodyIndex, bool bFromSweep, const FHitResult& Hit);
@@ -101,4 +113,3 @@ private:
     UFUNCTION()
     void OnDamageOverlapEnd(UPrimitiveComponent* Overlapped, AActor* Other, UPrimitiveComponent* OtherComp, int32 BodyIndex);
 };
-

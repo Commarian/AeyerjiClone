@@ -16,5 +16,7 @@ class AEYERJI_API UGE_ItemStats : public UGameplayEffect
 
 public:
 	UGE_ItemStats();
-};
 
+	virtual void PostInitProperties() override;
+	virtual void PostLoad() override;
+};

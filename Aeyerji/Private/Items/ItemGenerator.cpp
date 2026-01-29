@@ -5,6 +5,8 @@
 #include "Items/ItemAffixDefinition.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
+#include "Systems/LootService.h"
+#include "Systems/LootTable.h"
 #include "UObject/Package.h"
 
 UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
@@ -23,6 +25,31 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	int32 MinAffixes = 0;
 	int32 MaxAffixes = 0;
 	Definition->GetAffixCountRange(Rarity, MinAffixes, MaxAffixes);
+
+	const UAeyerjiLootTable* CachedTable = nullptr;
+	if (WorldContext)
+	{
+		if (UWorld* World = WorldContext->GetWorld())
+		{
+			if (UGameInstance* GI = World->GetGameInstance())
+			{
+				if (ULootService* LootService = GI->GetSubsystem<ULootService>())
+				{
+					CachedTable = LootService->GetLootTable();
+				}
+			}
+		}
+	}
+
+	if (CachedTable)
+	{
+		if (const FRarityScalingRow* RarityRow = CachedTable->FindRarityScaling(Rarity))
+		{
+			const int32 Bonus = FMath::Max(0, RarityRow->BonusAffixes);
+			MinAffixes = FMath::Max(0, MinAffixes + Bonus);
+			MaxAffixes = FMath::Max(MinAffixes, MaxAffixes + Bonus);
+		}
+	}
 
 	const int32 EffectiveSeed = (SeedOverride != 0) ? SeedOverride : FMath::Rand();
 	FRandomStream RNG(EffectiveSeed);
@@ -60,6 +87,13 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 		FinalSlot,
 		ChosenAffixes,
 		ChosenTiers);
+
+	// Apply stat scaling from the loot table if available.
+	if (CachedTable)
+	{
+		NewInstance->ApplyLootStatScaling(CachedTable);
+		NewInstance->ForceItemChangedForUI();
+	}
 
 	return NewInstance;
 }
@@ -102,8 +136,42 @@ void UItemGenerator::ChooseAffixes(
 		Pool.Add(Candidate);
 	}
 
+	FGameplayTagContainer ChosenAffixTags;
+	FGameplayTagContainer ChosenExclusionTags;
+	const auto IsCompatibleWithChosen = [&ChosenAffixTags, &ChosenExclusionTags](const UItemAffixDefinition* Candidate)
+	{
+		if (!Candidate)
+		{
+			return false;
+		}
+
+		// Candidate forbids tags that already exist on the item.
+		if (!Candidate->ExclusionTags.IsEmpty() && Candidate->ExclusionTags.HasAny(ChosenAffixTags))
+		{
+			return false;
+		}
+
+		// Already-chosen affixes forbid tags on the candidate.
+		if (!ChosenExclusionTags.IsEmpty() && !Candidate->AffixTags.IsEmpty() && ChosenExclusionTags.HasAny(Candidate->AffixTags))
+		{
+			return false;
+		}
+
+		return true;
+	};
+
 	for (int32 Index = 0; Index < AffixCount && Pool.Num() > 0; ++Index)
 	{
+		// Enforce mutual exclusivity using AffixTags/ExclusionTags as the list grows.
+		Pool.RemoveAllSwap([&IsCompatibleWithChosen](const UItemAffixDefinition* Candidate)
+		{
+			return !IsCompatibleWithChosen(Candidate);
+		});
+		if (Pool.Num() == 0)
+		{
+			break;
+		}
+
 		const int32 PickIdx = RNG.RandRange(0, Pool.Num() - 1);
 		UItemAffixDefinition* Pick = Pool[PickIdx];
 
@@ -112,6 +180,9 @@ void UItemGenerator::ChooseAffixes(
 		{
 			OutAffixes.Add(Pick);
 			OutTiers.Add(Tier);
+
+			ChosenAffixTags.AppendTags(Pick->AffixTags);
+			ChosenExclusionTags.AppendTags(Pick->ExclusionTags);
 		}
 
 		Pool.RemoveAtSwap(PickIdx);

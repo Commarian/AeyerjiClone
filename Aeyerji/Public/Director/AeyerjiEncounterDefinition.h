@@ -37,46 +37,46 @@ struct AEYERJI_API FEnemySetDef
 	bool bIsElite = false;
 
 	/** Escalates the elite tuning/FX to mini-boss levels. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides))
 	bool bIsMiniBoss = false;
 
 	/** Optional signature abilities granted only to this mini boss set. Falls back to spawner defaults. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsMiniBoss"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsMiniBoss", EditConditionHides, AdvancedDisplay))
 	TArray<TSubclassOf<UGameplayAbility>> MiniBossGrantedAbilities;
 
 	/** Force these affixes for this set. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	TArray<FGameplayTag> ForcedEliteAffixes;
 
 	/** Limits random rolls to these affixes; empty uses the spawner pool. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	TArray<FGameplayTag> EliteAffixPoolOverride;
 
 	/** Minimum random affixes to roll in addition to ForcedEliteAffixes. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	int32 MinEliteAffixes = 0;
 
 	/** Maximum random affixes to roll in addition to ForcedEliteAffixes. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	int32 MaxEliteAffixes = 0;
 
 	/** Optional per-set stat overrides; leave 0 to use spawner defaults. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteHealthMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteDamageMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteRangeMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteScaleMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float EliteXpMultiplierOverride = 0.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(ClampMin="0.0", EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	float MiniBossXpMultiplierOverride = 0.f;
 };
 
@@ -85,7 +85,11 @@ struct AEYERJI_API FWaveDefData
 {
 	GENERATED_BODY()
 
+	/** Optional label to keep the wave list readable in the details panel. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Wave")
+	FText WaveLabel;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Wave", meta=(TitleProperty="EnemyClass"))
 	TArray<FEnemySetDef> EnemySets;
 
 	/** Delay after the wave finishes emitting before the next begins. */
@@ -113,7 +117,7 @@ public:
 	FGameplayTagContainer Tags;
 
 	/** The authored waves for this encounter. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter", meta=(TitleProperty="WaveLabel"))
 	TArray<FWaveDefData> Waves;
 
 public:

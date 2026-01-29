@@ -9,6 +9,7 @@
 #include "Abilities/AeyerjiAbilitySlot.h"
 #include "Items/InventoryComponent.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "Player/PlayerLootStats.h"
 #include "AeyerjiSaveGame.generated.h"
 
 USTRUCT(BlueprintType)
@@ -47,4 +48,20 @@ public:
 	/** Currently selected passive choice (FName identifier) */
 	UPROPERTY(SaveGame)
 	FName SelectedPassiveId;
+
+	/** Lifetime loot stats (profile-level by default). */
+	UPROPERTY(SaveGame)
+	FPlayerLootStats LootStats;
+
+	/** UI-chosen difficulty slider (0..1000). */
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Difficulty")
+	float DifficultySlider = 0.f;
+
+	/** True when a difficulty slider value was explicitly chosen. */
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Difficulty")
+	bool bHasDifficultySelection = false;
+
+	/** Best (lowest) completed run time per difficulty slider key (0..1000, rounded). */
+	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Run")
+	TMap<int32, float> BestRunTimeSecondsByDifficulty;
 };

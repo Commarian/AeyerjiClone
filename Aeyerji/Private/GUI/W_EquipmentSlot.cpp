@@ -11,6 +11,7 @@
 #include "Items/ItemDefinition.h"
 #include "Items/InventoryComponent.h"
 #include "Items/ItemInstance.h"
+#include "Inventory/AeyerjiInventoryBPFL.h"
 #include "InputCoreTypes.h"
 #include "Logging/AeyerjiLog.h"
 
@@ -63,6 +64,31 @@ void UW_EquipmentSlot::BindInventory(UAeyerjiInventoryComponent* InInventory)
 	}
 
 	RefreshFromInventory();
+}
+
+bool UW_EquipmentSlot::IsMouseOverItem() const
+{
+	if (!CurrentItem.IsValid())
+	{
+		return false;
+	}
+
+	return IsHovered() || (ItemIcon && ItemIcon->IsHovered());
+}
+
+bool UW_EquipmentSlot::DropItemToGround(float ForwardOffset)
+{
+	if (!Inventory.IsValid() || !CurrentItem.IsValid())
+	{
+		return false;
+	}
+
+	if (UW_InventoryBag_Native* OwningBag = GetTypedOuter<UW_InventoryBag_Native>())
+	{
+		OwningBag->HideItemTooltip(nullptr);
+	}
+
+	return UAeyerjiInventoryBPFL::DropItemAtOwner(Inventory.Get(), CurrentItem.Get(), ForwardOffset);
 }
 
 void UW_EquipmentSlot::UnbindInventory()
@@ -161,7 +187,7 @@ void UW_EquipmentSlot::UpdateSlotVisuals()
 	{
 		const EItemRarity Rarity = bHasItem ? Item->Rarity : EItemRarity::Common;
 		const float RareMultiplier = 0.15f * static_cast<int32>(Rarity);
-		const FLinearColor BorderColor = bHasItem ? FLinearColor(0.3f + RareMultiplier, 0.35f + RareMultiplier, 0.4f + RareMultiplier, 1.f) : EmptyTint;
+		const FLinearColor BorderColor = bHasItem ? Item->RarityTint(Rarity): EmptyTint;
 		SlotBorder->SetBrushColor(BorderColor);
 	}
 }
@@ -180,6 +206,24 @@ FReply UW_EquipmentSlot::NativeOnMouseButtonDown(const FGeometry& InGeometry, co
 	}
 
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
+}
+
+FReply UW_EquipmentSlot::NativeOnMouseButtonDoubleClick(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (InMouseEvent.GetEffectingButton() != EKeys::LeftMouseButton)
+	{
+		return Super::NativeOnMouseButtonDoubleClick(InGeometry, InMouseEvent);
+	}
+
+	if (Inventory.IsValid() && CurrentItem.IsValid())
+	{
+		if (UAeyerjiInventoryBPFL::ToggleEquipState(Inventory.Get(), CurrentItem.Get()))
+		{
+			return FReply::Handled();
+		}
+	}
+
+	return Super::NativeOnMouseButtonDoubleClick(InGeometry, InMouseEvent);
 }
 
 void UW_EquipmentSlot::NativeOnDragDetected(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent, UDragDropOperation*& OutOperation)
@@ -255,11 +299,21 @@ bool UW_EquipmentSlot::NativeOnDrop(
     {
     case EAeyerjiItemDragSource::Bag:
     {
+        // If something is already here, try to place it back into the dragged item's original grid slot.
+        if (UAeyerjiItemInstance* Existing = Inventory->GetEquipped(GetEffectiveSlotType(), GetEffectiveSlotIndex()))
+        {
+            const bool bHasPreferred = DragOp->OriginalTopLeft.X >= 0 && DragOp->OriginalTopLeft.Y >= 0;
+            if (bHasPreferred && Inventory->CanPlaceItemAt(DragOp->OriginalTopLeft, Existing->InventorySize, DragOp->ItemId))
+            {
+                Inventory->Server_UnequipSlotToGrid(GetEffectiveSlotType(), GetEffectiveSlotIndex(), DragOp->OriginalTopLeft);
+            }
+        }
+
         // Bag → Equipment: equip into *this* slot
         Inventory->Server_EquipItem(
             DragOp->ItemInstance->UniqueId,
             GetEffectiveSlotType(),
-            INDEX_NONE);
+            GetEffectiveSlotIndex());
 
         return true;
     }
@@ -272,7 +326,11 @@ bool UW_EquipmentSlot::NativeOnDrop(
 
         if (SourceSlot == TargetSlot)
         {
-            return false;
+            if (DragOp->SourceEquipmentSlotIndex != GetEffectiveSlotIndex())
+            {
+                Inventory->Server_SwapEquippedSlots(TargetSlot, DragOp->SourceEquipmentSlotIndex, GetEffectiveSlotIndex());
+            }
+            return true;
         }
 
         // Minimal behaviour: just equip the dragged item into the new slot.
@@ -448,7 +506,6 @@ UWidget* UW_EquipmentSlot::CreateFallbackDragVisual() const
 	}
 	ImageWidget->SetBrushFromTexture(const_cast<UTexture2D*>(IconTexture), true);
 	ImageWidget->SetOpacity(0.9f);
-	ImageWidget->SetBrushSize(VisualSize);
 	ImageWidget->SetDesiredSizeOverride(VisualSize);
 
 	Wrapper->AddChild(ImageWidget);

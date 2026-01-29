@@ -4,6 +4,7 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
 #include "GameplayEffect.h"
+#include "TimerManager.h"
 
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Attributes/GE_SecondaryStatsFromPrimaries.h"
@@ -30,25 +31,59 @@ void UAeyerjiStatEngineComponent::BeginPlay()
 
     SubscribeToPrimaries();
     ReapplyDerivedEffect();
+    TryApplyRegen();
+}
 
-    // Apply regen once if configured (infinite periodic GE with AttributeBased magnitudes)
-    if (UAbilitySystemComponent* ASC = GetASC())
+void UAeyerjiStatEngineComponent::TryApplyRegen()
+{
+    bRegenRetryQueued = false;
+
+    if (!GetOwner() || !GetOwner()->HasAuthority())
     {
-        if (ActiveRegenHandle.IsValid())
-        {
-            ASC->RemoveActiveGameplayEffect(ActiveRegenHandle);
-            ActiveRegenHandle.Invalidate();
-        }
-        if (RegenEffectClass)
-        {
-            FGameplayEffectContextHandle Ctx = ASC->MakeEffectContext();
-            Ctx.AddSourceObject(GetOwner());
-            FGameplayEffectSpecHandle SH = ASC->MakeOutgoingSpec(RegenEffectClass, /*Level*/1.f, Ctx);
-            if (SH.IsValid())
-            {
-                ActiveRegenHandle = ASC->ApplyGameplayEffectSpecToSelf(*SH.Data.Get());
-            }
-        }
+        return;
+    }
+
+    if (!RegenEffectClass || ActiveRegenHandle.IsValid())
+    {
+        return;
+    }
+
+    UAbilitySystemComponent* ASC = GetASC();
+    if (!ASC)
+    {
+        QueueRegenRetry();
+        return;
+    }
+
+    if (!ASC->GetAvatarActor()
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPRegenAttribute())
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetManaRegenAttribute()))
+    {
+        QueueRegenRetry();
+        return;
+    }
+
+    FGameplayEffectContextHandle Ctx = ASC->MakeEffectContext();
+    Ctx.AddSourceObject(GetOwner());
+    FGameplayEffectSpecHandle SH = ASC->MakeOutgoingSpec(RegenEffectClass, /*Level*/1.f, Ctx);
+    if (SH.IsValid())
+    {
+        ActiveRegenHandle = ASC->ApplyGameplayEffectSpecToSelf(*SH.Data.Get());
+    }
+}
+
+void UAeyerjiStatEngineComponent::QueueRegenRetry()
+{
+    if (bRegenRetryQueued)
+    {
+        return;
+    }
+
+    if (UWorld* World = GetWorld())
+    {
+        bRegenRetryQueued = true;
+        FTimerHandle LocalHandle;
+        World->GetTimerManager().SetTimer(LocalHandle, this, &UAeyerjiStatEngineComponent::TryApplyRegen, 0.1f, false);
     }
 }
 

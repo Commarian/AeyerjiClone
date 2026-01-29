@@ -1,11 +1,22 @@
 // EnemyParentNative.cpp
 #include "Enemy/EnemyParentNative.h"
+#include "AIController.h"
 #include "AbilitySystemGlobals.h"
 #include "Logging/AeyerjiLog.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Attributes/AeyerjiRewardAttributeSet.h"
+#include "Enemy/AeyerjiEnemyArchetypeData.h"
+#include "Enemy/AeyerjiEnemyArchetypeComponent.h"
+#include "Enemy/AeyerjiEnemyTraitComponent.h"
+#include "Components/ActorComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/OutlineHighlightComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Engine/World.h"
+#include "GameplayEffect.h"
+#include "Net/UnrealNetwork.h"
+#include "Progression/AeyerjiLevelingComponent.h"
+#include "Progression/AeyerjiRewardConfigComponent.h"
 #if WITH_EDITOR
 #include "UObject/UnrealType.h"
 #endif
@@ -15,10 +26,33 @@ AEnemyParentNative::AEnemyParentNative()
 	/* Network */
 	bReplicates = true;
 
+	DefaultTeamTag = FGameplayTag::RequestGameplayTag(TEXT("Team.Enemy"));
+
 	OutlineHighlight = CreateDefaultSubobject<UOutlineHighlightComponent>(TEXT("OutlineHighlight"));
 	if (OutlineHighlight)
 	{
 		OutlineHighlight->bAffectAllPrimitivesIfNoExplicitTargets = false;
+	}
+
+	ClickTargetCapsule = CreateDefaultSubobject<UCapsuleComponent>(TEXT("ClickTargetCapsule"));
+	if (ClickTargetCapsule)
+	{
+		ClickTargetCapsule->SetupAttachment(GetCapsuleComponent());
+		ClickTargetCapsule->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		ClickTargetCapsule->SetCollisionObjectType(ECC_WorldDynamic);
+		ClickTargetCapsule->SetCollisionResponseToAllChannels(ECR_Ignore);
+		ClickTargetCapsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Block);
+		ClickTargetCapsule->SetGenerateOverlapEvents(false);
+		ClickTargetCapsule->SetCanEverAffectNavigation(false);
+	}
+
+	ArchetypeComponent = CreateDefaultSubobject<UAeyerjiEnemyArchetypeComponent>(TEXT("EnemyArchetypeComponent"));
+	LevelingComponent = CreateDefaultSubobject<UAeyerjiLevelingComponent>(TEXT("AeyerjiLeveling"));
+	RewardConfigComponent = CreateDefaultSubobject<UAeyerjiRewardConfigComponent>(TEXT("AeyerjiRewardConfig"));
+
+	if (AbilitySystemAeyerji)
+	{
+		AbilitySystemAeyerji->SetReplicationMode(EGameplayEffectReplicationMode::Full);
 	}
 
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
@@ -68,8 +102,32 @@ void AEnemyParentNative::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 void AEnemyParentNative::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
+	RefreshClickTargetCapsule();
+	if (ArchetypeComponent)
+	{
+		if (!ArchetypeComponent->HasArchetypeData() && ArchetypeData)
+		{
+			ArchetypeComponent->SetArchetypeData(ArchetypeData, /*bApplyImmediately=*/false);
+		}
+		ArchetypeComponent->ApplyArchetypeVisuals(/*bAllowInEditor=*/true, /*bForce=*/true);
+	}
 	RefreshEnemyHighlightTargets();
 	UpdateEnemyHighlightState();
+}
+
+void AEnemyParentNative::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	RefreshClickTargetCapsule();
+
+	if (ArchetypeComponent)
+	{
+		if (!ArchetypeComponent->HasArchetypeData() && ArchetypeData)
+		{
+			ArchetypeComponent->SetArchetypeData(ArchetypeData, /*bApplyImmediately=*/false);
+		}
+		ArchetypeComponent->ApplyArchetypeVisuals(/*bAllowInEditor=*/false, /*bForce=*/false);
+	}
 }
 
 void AEnemyParentNative::BeginPlay()
@@ -77,6 +135,18 @@ void AEnemyParentNative::BeginPlay()
 	Super::BeginPlay();
 	InitAbilityActorInfo();
 	GiveStartupAbilitiesAndEffects();
+	ApplyDefaultTeamTags();
+	if (ArchetypeComponent)
+	{
+		if (!bApplyArchetypeOnBeginPlay)
+		{
+			ArchetypeComponent->SetAutoApplyOnBeginPlay(false);
+		}
+		if (!ArchetypeComponent->HasArchetypeData() && ArchetypeData)
+		{
+			ArchetypeComponent->SetArchetypeData(ArchetypeData, /*bApplyImmediately=*/false);
+		}
+	}
 	RefreshEnemyHighlightTargets();
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
@@ -96,6 +166,14 @@ void AEnemyParentNative::BeginPlay()
 		}
 	}
 	UpdateEnemyHighlightState();
+
+	if (!HasAuthority() && ActiveTeamTag.IsValid())
+	{
+		ApplyActiveTeamTagToASC(LastAppliedTeamTag);
+		LastAppliedTeamTag = ActiveTeamTag;
+	}
+
+	ApplyCrowdPerformanceSettings();
 }
 
 void AEnemyParentNative::NotifyActorBeginCursorOver()
@@ -121,6 +199,56 @@ void AEnemyParentNative::OnDeath_Implementation()
 	OnEnemyDied.Broadcast(this);
 	DetachFromControllerPendingDestroy();
 	SetLifeSpan(5.0f);          // give replication time before GC
+}
+
+void AEnemyParentNative::ApplyCrowdPerformanceSettings()
+{
+	if (!bEnableCrowdPerformanceSettings || bIgnoreCrowdPerformanceSettings)
+	{
+		return;
+	}
+
+	if (GetNetMode() == NM_DedicatedServer)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	if (bEnableUpdateRateOptimizations)
+	{
+		MeshComp->bEnableUpdateRateOptimizations = true;
+	}
+
+	if (bOnlyTickPoseWhenRendered)
+	{
+		MeshComp->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+	}
+
+	if (CrowdMinLOD > 0)
+	{
+		MeshComp->SetMinLOD(CrowdMinLOD);
+	}
+
+	if (CrowdForcedLOD > 0)
+	{
+		MeshComp->SetForcedLOD(CrowdForcedLOD);
+	}
+
+	if (CrowdMaxDrawDistance > 0.f)
+	{
+		MeshComp->LDMaxDrawDistance = CrowdMaxDrawDistance;
+		MeshComp->bAllowCullDistanceVolume = true;
+	}
+
+	if (bDisableDynamicShadows)
+	{
+		MeshComp->SetCastShadow(false);
+	}
 }
 
 void AEnemyParentNative::InitAbilityActorInfo()
@@ -175,31 +303,289 @@ void AEnemyParentNative::GiveStartupAbilitiesAndEffects()
 		return;        // Only once, server side
 	}
 
-	/* ---------- Abilities ---------- */
-	for (const TSubclassOf<UGameplayAbility>& AbilityClass : StartupAbilities)
+	GrantAbilityList(StartupAbilities, 1);
+	ApplyEffectList(StartupEffects, 1.f);
+
+	bStartupGiven = true;
+}
+
+void AEnemyParentNative::ApplyDefaultTeamTags()
+{
+	if (!HasAuthority() || !DefaultTeamTag.IsValid())
 	{
-		if (AbilityClass)
-		{
-			AbilitySystemAeyerji->GiveAbility(FGameplayAbilitySpec(AbilityClass, /*Level=*/1, INDEX_NONE, this));
-		}
+		return;
 	}
 
-	/* ---------- Passive Effects ---------- */
-	for (const TSubclassOf<UGameplayEffect>& GEClass : StartupEffects)
+	if (!ActiveTeamTag.IsValid())
 	{
-		if (GEClass)
-		{
-			const FGameplayEffectContextHandle Ctx = AbilitySystemAeyerji->MakeEffectContext();
-			FGameplayEffectSpecHandle          Spec = AbilitySystemAeyerji->MakeOutgoingSpec(GEClass, /*Level=*/1.f, Ctx);
+		SetActiveTeamTag(DefaultTeamTag);
+		return;
+	}
 
-			if (Spec.IsValid())
+	ApplyActiveTeamTagToASC(ActiveTeamTag);
+}
+
+void AEnemyParentNative::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
+{
+	TagContainer.Reset();
+
+	if (const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(this, /*LookForComponent*/ true))
+	{
+		ASC->GetOwnedGameplayTags(TagContainer);
+	}
+
+	if (ActiveTeamTag.IsValid())
+	{
+		TagContainer.AddTag(ActiveTeamTag);
+	}
+}
+
+void AEnemyParentNative::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AEnemyParentNative, ActiveTeamTag);
+}
+
+void AEnemyParentNative::OnRep_ActiveTeamTag()
+{
+	ApplyActiveTeamTagToASC(LastAppliedTeamTag);
+	LastAppliedTeamTag = ActiveTeamTag;
+}
+
+void AEnemyParentNative::SetActiveTeamTag(const FGameplayTag& NewTag)
+{
+	if (!NewTag.IsValid())
+	{
+		return;
+	}
+
+	const FGameplayTag OldTag = ActiveTeamTag;
+	ActiveTeamTag = NewTag;
+	ApplyActiveTeamTagToASC(OldTag);
+	LastAppliedTeamTag = ActiveTeamTag;
+}
+
+void AEnemyParentNative::ApplyActiveTeamTagToASC(const FGameplayTag& OldTag)
+{
+	if (!AbilitySystemAeyerji)
+	{
+		return;
+	}
+
+	if (OldTag.IsValid() && OldTag != ActiveTeamTag)
+	{
+		AbilitySystemAeyerji->RemoveLooseGameplayTag(OldTag);
+	}
+
+	if (ActiveTeamTag.IsValid() && !AbilitySystemAeyerji->HasMatchingGameplayTag(ActiveTeamTag))
+	{
+		AbilitySystemAeyerji->AddLooseGameplayTag(ActiveTeamTag);
+	}
+}
+
+// Server-only: apply archetype data through the runtime component.
+void AEnemyParentNative::ApplyArchetypeData()
+{
+	if (ArchetypeComponent)
+	{
+		if (!ArchetypeComponent->HasArchetypeData() && ArchetypeData)
+		{
+			ArchetypeComponent->SetArchetypeData(ArchetypeData, /*bApplyImmediately=*/false);
+		}
+		ArchetypeComponent->ApplyArchetype();
+	}
+}
+
+bool AEnemyParentNative::IsAliveAndHostile(const AActor* Candidate, FGameplayTag InvalidTag) const
+{
+	const AAIController* AI = Cast<AAIController>(GetController());
+	if (!AI || !Candidate)
+	{
+		return false;
+	}
+
+	if (InvalidTag.IsValid())
+	{
+		if (const UAbilitySystemComponent* CandidateASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Candidate, /*LookForComponent=*/true))
+		{
+			if (CandidateASC->HasMatchingGameplayTag(InvalidTag))
 			{
-				AbilitySystemAeyerji->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
+				return false;
 			}
 		}
 	}
 
-	bStartupGiven = true;
+	const ETeamAttitude::Type Att = AI->GetTeamAttitudeTowards(*Candidate);
+	return Att == ETeamAttitude::Hostile;
+}
+
+bool AEnemyParentNative::IsAlive(FGameplayTag DeathTag) const
+{
+	if (!DeathTag.IsValid()) {
+		UE_LOG(LogTemp, Error, TEXT("DeathTag is invalid - investigate as this will break functionality"));
+		return false;
+	}
+
+	if (AbilitySystemAeyerji)
+	{
+		if (AbilitySystemAeyerji->HasMatchingGameplayTag(DeathTag))
+		{
+			return false;
+		}
+		return true;
+	}
+	UE_LOG(LogTemp, Error, TEXT("AbilitySystemAeyerji is invalid - investigate as this will break functionality in IsAlive()"));
+	return false;
+}
+
+void AEnemyParentNative::SetArchetypeAndApply(UAeyerjiEnemyArchetypeData* NewArchetypeData, bool bApplyImmediately)
+{
+	ArchetypeData = NewArchetypeData;
+
+	if (!ArchetypeComponent)
+	{
+		return;
+	}
+
+	ArchetypeComponent->SetArchetypeData(NewArchetypeData, bApplyImmediately);
+}
+
+// Adjusts a scaling value using archetype multipliers when the attribute matches a supported category.
+bool AEnemyParentNative::ApplyArchetypeStatMultipliers(const FName& AttributeName, float& InOutValue) const
+{
+	const FAeyerjiEnemyStatMultipliers* Mults = ArchetypeComponent ? ArchetypeComponent->GetStatMultipliers() : nullptr;
+	if (!Mults && ArchetypeData)
+	{
+		Mults = &ArchetypeData->StatMultipliers;
+	}
+	if (!Mults)
+	{
+		return false;
+	}
+	FString NameString = AttributeName.ToString();
+	int32 DotIndex = INDEX_NONE;
+	if (NameString.FindChar('.', DotIndex))
+	{
+		NameString = NameString.Mid(DotIndex + 1);
+	}
+
+	const FName StrippedName(*NameString);
+	if (StrippedName == TEXT("HP") || StrippedName == TEXT("HPMax"))
+	{
+		InOutValue *= Mults->HealthMultiplier;
+		return true;
+	}
+
+	if (StrippedName == TEXT("AttackDamage"))
+	{
+		InOutValue *= Mults->DamageMultiplier;
+		return true;
+	}
+
+	if (StrippedName == TEXT("RunSpeed") || StrippedName == TEXT("WalkSpeed"))
+	{
+		InOutValue *= Mults->MoveSpeedMultiplier;
+		return true;
+	}
+
+	if (StrippedName == TEXT("AttackSpeed"))
+	{
+		InOutValue *= Mults->AttackRateMultiplier;
+		return true;
+	}
+
+	if (StrippedName == TEXT("AttackCooldown"))
+	{
+		const float SafeRate = FMath::Max(0.01f, Mults->AttackRateMultiplier);
+		InOutValue /= SafeRate;
+		return true;
+	}
+
+	return false;
+}
+
+// Grants abilities if they are not already present on the ASC.
+void AEnemyParentNative::GrantAbilityList(const TArray<TSubclassOf<UGameplayAbility>>& Abilities, int32 AbilityLevel)
+{
+	if (!AbilitySystemAeyerji || Abilities.IsEmpty())
+	{
+		return;
+	}
+
+	const int32 ClampedLevel = FMath::Max(1, AbilityLevel);
+	for (const TSubclassOf<UGameplayAbility>& AbilityClass : Abilities)
+	{
+		if (!*AbilityClass)
+		{
+			continue;
+		}
+
+		if (AbilitySystemAeyerji->FindAbilitySpecFromClass(AbilityClass))
+		{
+			continue;
+		}
+
+		AbilitySystemAeyerji->GiveAbility(FGameplayAbilitySpec(AbilityClass, ClampedLevel, INDEX_NONE, this));
+	}
+}
+
+// Applies gameplay effects to self at a consistent level.
+void AEnemyParentNative::ApplyEffectList(const TArray<TSubclassOf<UGameplayEffect>>& Effects, float EffectLevel)
+{
+	if (!AbilitySystemAeyerji || Effects.IsEmpty())
+	{
+		return;
+	}
+
+	const float ClampedLevel = FMath::Max(0.01f, EffectLevel);
+	for (const TSubclassOf<UGameplayEffect>& GEClass : Effects)
+	{
+		if (!GEClass)
+		{
+			continue;
+		}
+
+		const FGameplayEffectContextHandle Ctx = AbilitySystemAeyerji->MakeEffectContext();
+		FGameplayEffectSpecHandle Spec = AbilitySystemAeyerji->MakeOutgoingSpec(GEClass, ClampedLevel, Ctx);
+
+		if (Spec.IsValid())
+		{
+			AbilitySystemAeyerji->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
+		}
+	}
+}
+
+// Attaches trait components by class if they are not already present.
+void AEnemyParentNative::AddTraitComponents(const TArray<TSubclassOf<UAeyerjiEnemyTraitComponent>>& TraitComponents)
+{
+	if (TraitComponents.IsEmpty())
+	{
+		return;
+	}
+
+	for (const TSubclassOf<UAeyerjiEnemyTraitComponent>& TraitClass : TraitComponents)
+	{
+		if (!*TraitClass)
+		{
+			continue;
+		}
+
+		if (GetComponentByClass(TraitClass))
+		{
+			continue;
+		}
+
+		UAeyerjiEnemyTraitComponent* NewTrait = NewObject<UAeyerjiEnemyTraitComponent>(this, TraitClass);
+		if (!NewTrait)
+		{
+			continue;
+		}
+
+		AddInstanceComponent(NewTrait);
+		NewTrait->OnComponentCreated();
+		NewTrait->RegisterComponent();
+	}
 }
 
 void AEnemyParentNative::SetEnemyHighlighted(bool bInHighlighted)
@@ -323,10 +709,38 @@ void AEnemyParentNative::HandleMeshEndCursorOver(UPrimitiveComponent* TouchedCom
 	UpdateEnemyHighlightState();
 }
 
+void AEnemyParentNative::RefreshClickTargetCapsule()
+{
+	if (!ClickTargetCapsule || !bAutoSizeClickTargetCapsule)
+	{
+		return;
+	}
+
+	const UCapsuleComponent* RootCapsule = GetCapsuleComponent();
+	if (!RootCapsule)
+	{
+		return;
+	}
+
+	const float RadiusScale = FMath::Max(1.f, ClickTargetRadiusScale);
+	const float HeightScale = FMath::Max(1.f, ClickTargetHalfHeightScale);
+
+	ClickTargetCapsule->SetCapsuleSize(
+		RootCapsule->GetUnscaledCapsuleRadius() * RadiusScale,
+		RootCapsule->GetUnscaledCapsuleHalfHeight() * HeightScale);
+}
+
 void AEnemyParentNative::ConfigureEnemyOutlineComponent()
 {
 	if (!OutlineHighlight)
 	{
 		return;
 	}
+}
+
+void AEnemyParentNative::SetScalingSnapshot(int32 InLevel, float InDifficultyScale, const FGameplayTag& InSourceTag)
+{
+	CachedScaledLevel = FMath::Max(1, InLevel);
+	CachedDifficultyScale = FMath::Clamp(InDifficultyScale, 0.f, 1.f);
+	CachedScalingSourceTag = InSourceTag;
 }

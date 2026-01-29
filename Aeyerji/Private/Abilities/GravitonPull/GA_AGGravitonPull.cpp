@@ -4,26 +4,56 @@
 
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "AeyerjiGameplayTags.h"
+#include "GAS/GE_DamagePhysical.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/PlayerController.h"
 #include "GameplayEffect.h"
 #include "GameplayTagContainer.h"
+#include "Abilities/GameplayAbilityTargetTypes.h"
+#include "Abilities/GameplayAbilityTypes.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "DrawDebugHelpers.h"
+#include "Logging/AeyerjiLog.h"
 
 #include "NiagaraSystem.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
 
+namespace GravitonTags
+{
+	const FGameplayTag AbilityTag  = FGameplayTag::RequestGameplayTag(TEXT("Ability.AG.GravitonPull"));
+	const FGameplayTag CooldownTag = FGameplayTag::RequestGameplayTag(TEXT("Cooldown.Graviton"));
+	const FGameplayTag EventTag    = FGameplayTag::RequestGameplayTag(TEXT("Event.Ability.AG.GravitonPull"));
+}
+
 UGA_AGGravitonPull::UGA_AGGravitonPull()
 {
-	// If your base class sets these, you don't need to; otherwise this is safe.
-	// InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
-	// NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
+	// Set the ability's asset tag so TryActivateAbilitiesByTag can find it.
+	{
+		FGameplayTagContainer AssetTags;
+		AssetTags.AddTag(GravitonTags::AbilityTag);
+		SetAssetTags(AssetTags);
+	}
+	{
+		FAbilityTriggerData Trigger;
+		Trigger.TriggerTag    = GravitonTags::EventTag;
+		Trigger.TriggerSource = EGameplayAbilityTriggerSource::GameplayEvent;
+		AbilityTriggers.Add(Trigger);
+	}
+
+	InstancingPolicy   = EGameplayAbilityInstancingPolicy::InstancedPerActor;
+	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
+	DefaultDamageTypeTag = AeyerjiTags::DamageType_Physical;
+
+	if (!DamageSetByCallerTag.IsValid())
+	{
+		DamageSetByCallerTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Damage.Instant"), /*ErrorIfNotFound=*/false);
+	}
 }
 
 void UGA_AGGravitonPull::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
@@ -46,28 +76,104 @@ void UGA_AGGravitonPull::ActivateAbility(const FGameplayAbilitySpecHandle Handle
 	// Commit cost & cooldown first (Diablo-style: miss still consumes resource).
 	if (!CommitAbility(Handle, ActorInfo, ActivationInfo))
 	{
+		AJ_LOG(this, TEXT("GravitonPull: CommitAbility failed (cost/cd)"));
 		EndAbility(Handle, ActorInfo, ActivationInfo, false, true);
 		return;
 	}
 
 	FVector HitLocation = FVector::ZeroVector;
 	FVector HitNormal   = FVector::UpVector;
-	AActor* Target = FindTargetForPull(ActorInfo, HitLocation, HitNormal);
+	AActor* Target = nullptr;
+
+	// Prefer any target data passed in from the controller.
+	if (TriggerEventData && TriggerEventData->TargetData.Num() > 0)
+	{
+		if (const FGameplayAbilityTargetData* TD = TriggerEventData->TargetData.Get(0))
+		{
+			const TArray<TWeakObjectPtr<AActor>> Actors = TD->GetActors();
+			if (Actors.Num() > 0 && Actors[0].IsValid())
+			{
+				Target = Actors[0].Get();
+			}
+
+			if (const FHitResult* HR = TD->GetHitResult())
+			{
+				HitLocation = HR->ImpactPoint;
+				HitNormal   = HR->ImpactNormal;
+			}
+			else if (const FGameplayAbilityTargetData_LocationInfo* LocData = static_cast<const FGameplayAbilityTargetData_LocationInfo*>(TD))
+			{
+				HitLocation = LocData->GetEndPoint();
+				HitNormal   = FVector::UpVector;
+			}
+		}
+	}
+
+	// Fall back to a line trace if nothing was provided.
 	if (!Target)
 	{
-		// No valid target in front – just end.
+		Target = FindTargetForPull(*ActorInfo, HitLocation, HitNormal);
+	}
+
+	if (!Target)
+	{
+		AJ_LOG(this, TEXT("GravitonPull: no valid target found (MaxRange=%.1f)"),
+		       GravitonConfig ? GravitonConfig->Tunables.MaxRange : 0.f);
 		EndAbility(Handle, ActorInfo, ActivationInfo, false, false);
 		return;
 	}
 
+	// Range-check provided targets to keep behavior consistent with the preview circle.
+	if (ActorInfo && ActorInfo->AvatarActor.IsValid())
+	{
+		const float Dist = FVector::Dist(ActorInfo->AvatarActor->GetActorLocation(), Target->GetActorLocation());
+		const float MaxRange = GravitonConfig ? GravitonConfig->Tunables.MaxRange : 0.f;
+		if (MaxRange > 0.f && Dist > MaxRange + KINDA_SMALL_NUMBER)
+		{
+			AJ_LOG(this, TEXT("GravitonPull: target %s rejected (dist=%.1f > MaxRange=%.1f)"),
+			       *GetNameSafe(Target), Dist, MaxRange);
+			EndAbility(Handle, ActorInfo, ActivationInfo, false, false);
+			return;
+		}
+	}
+
+	if (HitLocation.IsNearlyZero() && Target)
+	{
+		HitLocation = Target->GetActorLocation();
+		HitNormal   = FVector::UpVector;
+	}
+
+	if (ActorInfo && ActorInfo->AvatarActor.IsValid())
+	{
+		if (Target == ActorInfo->AvatarActor.Get())
+		{
+			AJ_LOG(this, TEXT("GravitonPull: ignoring self target"));
+			EndAbility(Handle, ActorInfo, ActivationInfo, false, false);
+			return;
+		}
+	}
+
+	// Only operate on pawns/characters.
+	if (!Target->IsA(APawn::StaticClass()))
+	{
+		AJ_LOG(this, TEXT("GravitonPull: target %s rejected (not a Pawn)"), *GetNameSafe(Target));
+		EndAbility(Handle, ActorInfo, ActivationInfo, false, false);
+		return;
+	}
+
+	AJ_LOG(this, TEXT("GravitonPull: target %s at %s normal=%s"),
+	       *GetNameSafe(Target),
+	       *HitLocation.ToCompactString(),
+	       *HitNormal.ToCompactString());
+
 	// Visuals first (so damage/pull don't run without VFX if something goes wrong visually).
-	PlayPullVisuals(Target, HitLocation, HitNormal, ActorInfo);
+	PlayPullVisuals(Target, HitLocation, HitNormal, *ActorInfo);
 
 	// Apply gameplay effects.
-	ApplyEffectsToTarget(Target, ActorInfo);
+	ApplyEffectsToTarget(Target, *ActorInfo);
 
 	// Teleport target toward the Astral Guardian.
-	PullTarget(Target, HitLocation, ActorInfo);
+	PullTarget(Target, HitLocation, *ActorInfo);
 
 	// Ability is immediate; no montage / wait states here.
 	EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
@@ -82,19 +188,19 @@ void UGA_AGGravitonPull::EndAbility(const FGameplayAbilitySpecHandle Handle,
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 }
 
-AActor* UGA_AGGravitonPull::FindTargetForPull(const FGameplayAbilityActorInfo* ActorInfo,
-                                              FVector& OutHitLocation,
-                                              FVector& OutHitNormal) const
+AActor* UGA_AGGravitonPull::FindTargetForPull_Implementation(const FGameplayAbilityActorInfo& ActorInfo,
+                                                             FVector& OutHitLocation,
+                                                             FVector& OutHitNormal) const
 {
 	OutHitLocation = FVector::ZeroVector;
 	OutHitNormal   = FVector::UpVector;
 
-	if (!ActorInfo || !ActorInfo->AvatarActor.IsValid())
+	if (!ActorInfo.AvatarActor.IsValid())
 	{
 		return nullptr;
 	}
 
-	AActor* Avatar = ActorInfo->AvatarActor.Get();
+	AActor* Avatar = ActorInfo.AvatarActor.Get();
 	if (!Avatar)
 	{
 		return nullptr;
@@ -153,6 +259,8 @@ AActor* UGA_AGGravitonPull::FindTargetForPull(const FGameplayAbilityActorInfo* A
 	// Very simple filter: we only pull Pawns/Characters.
 	if (!HitActor->IsA(APawn::StaticClass()))
 	{
+		AJ_LOG(this, TEXT("GravitonPull: hit %s but rejected (not a Pawn)"),
+		       *GetNameSafe(HitActor));
 		return nullptr;
 	}
 
@@ -161,16 +269,16 @@ AActor* UGA_AGGravitonPull::FindTargetForPull(const FGameplayAbilityActorInfo* A
 	return HitActor;
 }
 
-void UGA_AGGravitonPull::PullTarget(AActor* Target,
-                                    const FVector& HitLocation,
-                                    const FGameplayAbilityActorInfo* ActorInfo) const
+void UGA_AGGravitonPull::PullTarget_Implementation(AActor* Target,
+                                                   const FVector& HitLocation,
+                                                   const FGameplayAbilityActorInfo& ActorInfo) const
 {
-	if (!Target || !ActorInfo || !ActorInfo->AvatarActor.IsValid() || !GravitonConfig)
+	if (!Target || !ActorInfo.AvatarActor.IsValid() || !GravitonConfig)
 	{
 		return;
 	}
 
-	AActor* Avatar = ActorInfo->AvatarActor.Get();
+	AActor* Avatar = ActorInfo.AvatarActor.Get();
 	if (!Avatar)
 	{
 		return;
@@ -197,7 +305,7 @@ void UGA_AGGravitonPull::PullTarget(AActor* Target,
 
 	const float EffectivePull = FMath::Max(0.0f, DesiredPullDistance * PullScale);
 
-	// Do not overshoot the Avatar – leave a small buffer (e.g., 150 units).
+	// Do not overshoot the Avatar; leave a small buffer (e.g., 150 units).
 	const float DistanceToAvatar = FVector::Dist(TargetLocation, AvatarLocation);
 	const float MaxAllowedPull = FMath::Max(0.0f, DistanceToAvatar - 150.f);
 	const float FinalPullDistance = FMath::Min(EffectivePull, MaxAllowedPull);
@@ -211,17 +319,22 @@ void UGA_AGGravitonPull::PullTarget(AActor* Target,
 
 	// Teleport the target; sweep to avoid sticking in walls.
 	Target->SetActorLocation(NewLocation, true);
+	AJ_LOG(this, TEXT("GravitonPull: pulled %s from %s -> %s (dist=%.1f)"),
+	       *GetNameSafe(Target),
+	       *TargetLocation.ToCompactString(),
+	       *NewLocation.ToCompactString(),
+	       FinalPullDistance);
 }
 
-void UGA_AGGravitonPull::ApplyEffectsToTarget(AActor* Target,
-                                              const FGameplayAbilityActorInfo* ActorInfo) const
+void UGA_AGGravitonPull::ApplyEffectsToTarget_Implementation(AActor* Target,
+                                                             const FGameplayAbilityActorInfo& ActorInfo) const
 {
-	if (!Target || !ActorInfo || !ActorInfo->AvatarActor.IsValid())
+	if (!Target || !ActorInfo.AvatarActor.IsValid())
 	{
 		return;
 	}
 
-	UAbilitySystemComponent* SourceASC = ActorInfo->AbilitySystemComponent.Get();
+	UAbilitySystemComponent* SourceASC = ActorInfo.AbilitySystemComponent.Get();
 	if (!SourceASC)
 	{
 		return;
@@ -247,19 +360,34 @@ void UGA_AGGravitonPull::ApplyEffectsToTarget(AActor* Target,
 	const int32 AilmentStacks = GravitonConfig ? GravitonConfig->Tunables.AilmentStacks : 0;
 
 	// Damage
-	if (DamageEffectClass && HitDamage > 0.f)
+	if (HitDamage > 0.f)
 	{
+		TSubclassOf<UGameplayEffect> ResolvedDamageClass = DamageEffectClass;
+		if (!ResolvedDamageClass)
+		{
+			ResolvedDamageClass = UGE_DamagePhysical::StaticClass();
+		}
+		if (!ResolvedDamageClass)
+		{
+			return;
+		}
+
 		FGameplayEffectContextHandle ContextHandle = SourceASC->MakeEffectContext();
 		ContextHandle.AddSourceObject(this);
 
 		FGameplayEffectSpecHandle SpecHandle =
-			SourceASC->MakeOutgoingSpec(DamageEffectClass, GetAbilityLevel(), ContextHandle);
+			SourceASC->MakeOutgoingSpec(ResolvedDamageClass, GetAbilityLevel(), ContextHandle);
 
-		if (SpecHandle.IsValid())
+		if (SpecHandle.IsValid() && SpecHandle.Data.IsValid())
 		{
-			if (DamageSetByCallerTag.IsValid())
+			ApplyDamageTypeTagToSpec(SpecHandle, DefaultDamageTypeTag);
+
+			const FGameplayTag DamageTag = DamageSetByCallerTag.IsValid()
+				? DamageSetByCallerTag
+				: FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Damage.Instant"), /*ErrorIfNotFound=*/false);
+			if (DamageTag.IsValid())
 			{
-				SpecHandle.Data->SetSetByCallerMagnitude(DamageSetByCallerTag, HitDamage);
+				SpecHandle.Data->SetSetByCallerMagnitude(DamageTag, HitDamage);
 			}
 
 			TargetASC->ApplyGameplayEffectSpecToSelf(*SpecHandle.Data.Get());
@@ -307,17 +435,17 @@ void UGA_AGGravitonPull::ApplyEffectsToTarget(AActor* Target,
 	}
 }
 
-void UGA_AGGravitonPull::PlayPullVisuals(AActor* Target,
-                                         const FVector& HitLocation,
-                                         const FVector& HitNormal,
-                                         const FGameplayAbilityActorInfo* ActorInfo) const
+void UGA_AGGravitonPull::PlayPullVisuals_Implementation(AActor* Target,
+                                                        const FVector& HitLocation,
+                                                        const FVector& HitNormal,
+                                                        const FGameplayAbilityActorInfo& ActorInfo) const
 {
-	if (!ActorInfo || !ActorInfo->AvatarActor.IsValid())
+	if (!ActorInfo.AvatarActor.IsValid())
 	{
 		return;
 	}
 
-	AActor* Avatar = ActorInfo->AvatarActor.Get();
+	AActor* Avatar = ActorInfo.AvatarActor.Get();
 	if (!Avatar)
 	{
 		return;

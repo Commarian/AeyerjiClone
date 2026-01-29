@@ -8,6 +8,7 @@
 #include "AeyerjiPlayerState.generated.h"
 
 class UGameplayAbility;
+class UPlayerStatsTrackingComponent;
 
 /**
  * 
@@ -18,7 +19,11 @@ class AEYERJI_API AAeyerjiPlayerState : public APlayerState
 	GENERATED_BODY()
 
 public:
-	/** 8–12 slots – replicated and saved. */
+	/** Lifetime loot stats holder for this player. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|Stats")
+	TObjectPtr<UPlayerStatsTrackingComponent> PlayerStatsTracking = nullptr;
+
+	/** 7 slots (including potion slot) - replicated and saved. */
 	UPROPERTY(ReplicatedUsing = OnRep_ActionBar, SaveGame, BlueprintReadWrite)
 	TArray<FAeyerjiAbilitySlot> ActionBar;
 	
@@ -69,6 +74,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|SaveGame")
 	const FString& GetSaveSlotOverride() const { return SaveSlotOverride; }
 
+	/** Accessor for the loot stats component. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Stats")
+	UPlayerStatsTrackingComponent* GetPlayerStatsTrackingComponent() const { return PlayerStatsTracking; }
+
 	/* ---------- Passives ---------- */
 	/** Passive options the character can choose from (IDs used in save/replication). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Passives")
@@ -92,6 +101,31 @@ public:
 
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Passives")
 	FName GetSelectedPassiveId() const { return SelectedPassiveId; }
+
+	/* ---------- Run Flow ---------- */
+	/** Client-callable: requests the server to transition PreRun -> InRun and start the level run. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Run")
+	void RequestStartRun();
+
+	/** Server RPC for RequestStartRun(). */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestStartRun();
+
+	/** Client-callable: requests the server to transition to RunComplete and snapshot results (useful for a "Quit Run" button). */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Run")
+	void RequestEndRun();
+
+	/** Server RPC for RequestEndRun(). */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestEndRun();
+
+	/** Client-callable: requests the server to transition RunComplete -> ReturnToMenu. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Run")
+	void RequestReturnToMenu();
+
+	/** Server RPC for RequestReturnToMenu(). */
+	UFUNCTION(Server, Reliable)
+	void Server_RequestReturnToMenu();
 
 protected:
 

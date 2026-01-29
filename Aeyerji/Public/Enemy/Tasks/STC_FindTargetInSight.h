@@ -3,37 +3,39 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/StateTreeConditionBlueprintBase.h"
+#include "GameplayTagContainer.h"
 #include "STC_FindTargetInSight.generated.h"
 
 /**
  * StateTree Condition (UE 5.6):
  * - Mode A (default): read AI Perception (Sight) and pick nearest hostile.
- * - Mode B (360°): sphere-overlap in world, ignore FOV, pick nearest hostile.
+ * - Mode B (360 deg): sphere-overlap in world, ignore FOV, pick nearest hostile.
  * - If a target is found, calls AEnemyAIController::SetTargetActor(Target).
  */
-UCLASS(Blueprintable, meta=(DisplayName="Find Target (Sight or 360° Radius)"))
+UCLASS(Blueprintable, meta=(DisplayName="Find Target (Sight or 360 deg Radius)"))
 class AEYERJI_API USTC_FindTargetInSight : public UStateTreeConditionBlueprintBase
 {
 	GENERATED_BODY()
 
 public:
-	/** Use a 360° sphere search (ignores FOV) instead of Perception.Sight. */
+	USTC_FindTargetInSight(const FObjectInitializer& ObjectInitializer);
+	/** Use a 360 deg sphere search (ignores FOV) instead of Perception.Sight. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Mode")
 	bool bUse360Search = true;
 
-	/** Radius for the 360° sphere search. If 0, falls back to Sight radius. */
+	/** Radius for the 360 deg sphere search. If 0, falls back to Sight radius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Mode", meta=(ClampMin="0.0"))
 	float SearchRadius = 1200.f;
 
-	/** Actors with this tag are ignored (e.g. "State.Dead"). Empty = ignore none. */
+	/** Actors with this gameplay tag (GAS/ASC) are ignored (e.g. "State.Dead"). Empty = ignore none. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Filter")
-	FName InvalidTag = FName(TEXT("State.Dead"));
+	FGameplayTag InvalidTag;
 
 	/** Extra trace-based LOS check (perception already implies sight). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Filter")
 	bool bRequireLineOfSightTrace = false;
 
-	/** Optional clamp for either mode. 0 = use mode’s native radius. */
+	/** Optional clamp for either mode. 0 = use mode's native radius. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Filter", meta=(ClampMin="0.0"))
 	float MaxDistance = 0.f;
 
