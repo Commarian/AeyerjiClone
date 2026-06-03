@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 
 #include "Abilities/GameplayAbility.h"
+#include "Abilities/AeyerjiAbilityTuning.h"
 #include "GameplayTagContainer.h"
 
 #include "GA_AeyerjiBase.generated.h"
@@ -12,7 +13,7 @@
 class AAeyerjiCharacter;
 
 class UAbilitySystemComponent;
-class UAeyerjiAbilityData;
+class UTexture2D;
 
 /* Aeyerji's top level ability class for all
 
@@ -32,6 +33,38 @@ class AEYERJI_API UGA_AeyerjiBase : public UGameplayAbility
 
 public:
   UGA_AeyerjiBase();
+
+  /** Explicit row key in the global ability tuning table. Falls back to the most specific Ability.* asset tag. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability")
+  FGameplayTag AbilityTag;
+
+  /** Deprecated fallback only. Runtime cost should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|Cost", meta=(DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  float ManaCost = 0.f;
+
+  /** Deprecated fallback only. Runtime cooldown should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|Cost", meta=(DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  float CooldownSeconds = 0.f;
+
+  /** Deprecated fallback only. Runtime UI should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|UI", meta=(DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  FText DisplayName;
+
+  /** Deprecated fallback only. Runtime UI should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|UI", meta=(MultiLine="true", DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  FText Description;
+
+  /** Deprecated fallback only. Runtime UI should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|UI", meta=(DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  TObjectPtr<UTexture2D> Icon = nullptr;
+
+  /** Deprecated fallback only. Runtime progression should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|Progression", meta=(DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  int32 RequiredLevel = 1;
+
+  /** Deprecated fallback only. Runtime progression should come from the global ability table. */
+  UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Ability|Progression", meta=(DeprecatedProperty, DeprecationMessage="Use the global ability tuning table."))
+  bool bUnlockedByDefault = false;
 
   UFUNCTION(BlueprintPure, Category = "Aeyerji|Ability")
 
@@ -96,10 +129,14 @@ protected:
       FVector &OutFinalLocation) const;
 
   /* ---------- Ability SetByCaller helpers (optional) ---------- */
-  /** Returns mana cost / cooldown seconds from the first UAeyerjiAbilityData* property found on the ability CDO. */
+  /** Returns the base mana and cooldown values configured on this ability. */
   void EvaluateAbilityCostAndCooldown(const UAbilitySystemComponent* ASC, float& OutManaCost, float& OutCooldown) const;
+  /** Resolves this ability's global DataTable row from AbilityTag or asset tags. */
+  const FAeyerjiAbilityTableRow* GetAbilityTuningRow(const UAbilitySystemComponent* ASC = nullptr) const;
+  /** Finds the explicit or most-specific Ability.* asset tag used as the table row key. */
+  FGameplayTag ResolveAbilityTag() const;
   /** Attempts to set generic cost/cooldown SetByCaller magnitudes on the outgoing effect spec. */
-  void ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& SpecHandle, float ManaCost, float Cooldown) const;
+  void ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& SpecHandle, float InManaCost, float InCooldown) const;
   /** Adds a damage-type tag to the outgoing effect spec if valid. */
   void ApplyDamageTypeTagToSpec(FGameplayEffectSpecHandle& SpecHandle, const FGameplayTag& DamageTypeTag) const;
 
@@ -108,6 +145,11 @@ protected:
   FGameplayTag DefaultDamageTypeTag;
 
   virtual bool CheckCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
+  virtual bool CheckCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
   virtual void ApplyCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const override;
   virtual void ApplyCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const override;
+  virtual const FGameplayTagContainer* GetCooldownTags() const override;
+
+private:
+  mutable FGameplayTagContainer RuntimeCooldownTags;
 };

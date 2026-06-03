@@ -5,15 +5,21 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "CharacterStatsLibrary.h"
 #include "GAS/GE_ItemStats.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Inventory/AeyerjiLootPickup.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
 #include "Logging/AeyerjiLog.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
+#include "Systems/AeyerjiSaveManagerSubsystem.h"
+#include "Systems/LootService.h"
 #include "Systems/LootTable.h"
 #include "CollisionQueryParams.h"
+#include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 #include "Net/Core/PushModel/PushModel.h"
 #include "Net/Core/PushModel/PushModelMacros.h"
 #include "Net/UnrealNetwork.h"
@@ -26,9 +32,15 @@
 
 namespace
 {
-	static_assert(static_cast<int32>(EEquipmentSlot::Offense) == static_cast<int32>(EItemCategory::Offense)
-		&& static_cast<int32>(EEquipmentSlot::Defense) == static_cast<int32>(EItemCategory::Defense)
-		&& static_cast<int32>(EEquipmentSlot::Magic) == static_cast<int32>(EItemCategory::Magic),
+	constexpr int32 NormalSlotUnlockInterval = 10;
+	constexpr int32 MinimumNormalSlotCount = 5;
+	constexpr int32 CorruptionUnlockLevel = 50;
+	constexpr int32 CorruptionSlotCount = 2;
+
+	static_assert(static_cast<int32>(EEquipmentSlot::Assault) == static_cast<int32>(EItemCategory::Assault)
+		&& static_cast<int32>(EEquipmentSlot::Guard) == static_cast<int32>(EItemCategory::Guard)
+		&& static_cast<int32>(EEquipmentSlot::Flow) == static_cast<int32>(EItemCategory::Flow)
+		&& static_cast<int32>(EEquipmentSlot::Corruption) == static_cast<int32>(EItemCategory::Corruption),
 		"Equipment slot and item category enums must stay aligned.");
 
 	bool IsValidEquipmentSlot(EEquipmentSlot Slot)
@@ -40,14 +52,30 @@ namespace
 		return false;
 	}
 
+	bool IsNormalEquipmentSlot(EEquipmentSlot Slot)
+	{
+		return Slot == EEquipmentSlot::Assault
+			|| Slot == EEquipmentSlot::Guard
+			|| Slot == EEquipmentSlot::Flow;
+	}
+
+	bool IsNormalItemCategory(EItemCategory Category)
+	{
+		return Category == EItemCategory::Assault
+			|| Category == EItemCategory::Guard
+			|| Category == EItemCategory::Flow;
+	}
+
 	bool IsSlotCompatibleWithDefinition(EEquipmentSlot Slot, const UItemDefinition* Definition)
 	{
 		if (!Definition)
 		{
-			return true;
+			return IsNormalEquipmentSlot(Slot);
 		}
 
-		return static_cast<EItemCategory>(Slot) == Definition->ItemCategory;
+		return Definition->IsCorruptionItem()
+			? Slot == EEquipmentSlot::Corruption
+			: IsNormalItemCategory(Definition->ItemCategory) && IsNormalEquipmentSlot(Slot);
 	}
 
 	EEquipmentSlot ResolveEquipmentSlot(EEquipmentSlot DesiredSlot, const UItemDefinition* Definition)
@@ -65,10 +93,66 @@ namespace
 				return DefaultSlot;
 			}
 
-			return static_cast<EEquipmentSlot>(Definition->ItemCategory);
+			const EEquipmentSlot CategorySlot = static_cast<EEquipmentSlot>(Definition->ItemCategory);
+			if (IsValidEquipmentSlot(CategorySlot) && IsSlotCompatibleWithDefinition(CategorySlot, Definition))
+			{
+				return CategorySlot;
+			}
 		}
 
-		return EEquipmentSlot::Offense;
+		return EEquipmentSlot::Assault;
+	}
+
+	UItemDefinition* ResolveSnapshotDefinition(const FInventoryItemSnapshot& Snapshot, UObject* WorldContextObject)
+	{
+		if (!Snapshot.DefinitionKey.IsNone())
+		{
+			if (UItemDefinition* Resolved = UCharacterStatsLibrary::ResolveItemDefinitionByKey(WorldContextObject, Snapshot.DefinitionKey))
+			{
+				UE_LOG(LogTemp, Display, TEXT("[InventorySave] Resolved snapshot ItemId=%s DefinitionKey=%s -> %s"),
+					Snapshot.ItemId.IsValid() ? *Snapshot.ItemId.ToString() : TEXT("Invalid"),
+					*Snapshot.DefinitionKey.ToString(),
+					*GetNameSafe(Resolved));
+				return Resolved;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("[InventorySave] Could not resolve snapshot ItemId=%s DefinitionKey=%s; trying legacy Definition=%s"),
+				Snapshot.ItemId.IsValid() ? *Snapshot.ItemId.ToString() : TEXT("Invalid"),
+				*Snapshot.DefinitionKey.ToString(),
+				*GetNameSafe(Snapshot.Definition));
+		}
+
+		if (Snapshot.Definition)
+		{
+			UE_LOG(LogTemp, Display, TEXT("[InventorySave] Using legacy snapshot Definition for ItemId=%s Definition=%s DerivedKey=%s"),
+				Snapshot.ItemId.IsValid() ? *Snapshot.ItemId.ToString() : TEXT("Invalid"),
+				*GetNameSafe(Snapshot.Definition),
+				*Snapshot.Definition->GetDefinitionKey().ToString());
+			return Snapshot.Definition.Get();
+		}
+
+		return nullptr;
+	}
+
+	const UAeyerjiLootTable* ResolveLootTableForInventory(const UAeyerjiInventoryComponent* Inventory)
+	{
+		const UWorld* World = Inventory ? Inventory->GetWorld() : nullptr;
+		const UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+		const ULootService* LootService = GameInstance ? GameInstance->GetSubsystem<ULootService>() : nullptr;
+		return LootService ? LootService->GetLootTable() : nullptr;
+	}
+
+	bool ShouldRebuildEmptySnapshotAggregation(const UAeyerjiItemInstance* Item)
+	{
+		if (!Item || !Item->Definition || Item->FinalAggregatedModifiers.Num() > 0)
+		{
+			return false;
+		}
+
+		return Item->Definition->BaseModifiers.Num() > 0
+			|| Item->RolledAffixes.Num() > 0
+			|| Item->Definition->GrantedEffects.Num() > 0
+			|| Item->Definition->GrantedAbilities.Num() > 0;
 	}
 
 	FVector FindGroundedDropLocation(UWorld& World, const FVector& DesiredLocation)
@@ -106,7 +190,7 @@ namespace
 
 			if (const UAeyerjiAttributeSet* Attr = ASC->GetSet<UAeyerjiAttributeSet>())
 			{
-				return FMath::Max(1, FMath::RoundToInt(Attr->GetLevel()));
+				return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
 			}
 
 			return 1;
@@ -149,6 +233,9 @@ void UAeyerjiInventoryComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	TryBindOwnerLevelChange();
+	BroadcastEquipmentSlotUnlocksIfChanged(true);
+
 	if (GetOwnerRole() == ROLE_Authority)
 	{
 		for (UAeyerjiItemInstance* Item : Items)
@@ -157,6 +244,13 @@ void UAeyerjiInventoryComponent::BeginPlay()
 		}
 		RebuildItemSnapshots();
 	}
+}
+
+void UAeyerjiInventoryComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	UnbindOwnerLevelChange();
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void UAeyerjiInventoryComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -174,7 +268,21 @@ UAbilitySystemComponent* UAeyerjiInventoryComponent::GetASC() const
 {
 	if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(GetOwner()))
 	{
-		return ASI->GetAbilitySystemComponent();
+		if (UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent())
+		{
+			return ASC;
+		}
+	}
+
+	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
+	{
+		if (APlayerState* PS = Pawn->GetPlayerState())
+		{
+			if (const IAbilitySystemInterface* PSASI = Cast<IAbilitySystemInterface>(PS))
+			{
+				return PSASI->GetAbilitySystemComponent();
+			}
+		}
 	}
 
 	return nullptr;
@@ -184,19 +292,27 @@ bool UAeyerjiInventoryComponent::AddItemInstance(UAeyerjiItemInstance* Item, boo
 {
 	if (GetOwnerRole() != ROLE_Authority)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] AddItemInstance rejected: owner %s is not authority (Role=%d)"),
+			*GetNameSafe(GetOwner()),
+			static_cast<int32>(GetOwnerRole()));
 		return false;
 	}
 
 	if (!Item)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] AddItemInstance rejected: null item on inventory %s"), *GetNameSafe(this));
 		return false;
 	}
 
-	UE_LOG(LogTemp, Display, TEXT("[Inventory][Server] AddItemInstance %s Outer=%s UniqueId=%s bSkipAutoPlacement=%d"),
+	UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] AddItemInstance Item=%s Def=%s Outer=%s UniqueId=%s SkipAutoPlace=%d Items=%d Equipped=%d Grid=%d"),
 		*GetNameSafe(Item),
+		*GetNameSafe(Item->Definition.Get()),
 		*GetNameSafe(Item->GetOuter()),
 		Item->UniqueId.IsValid() ? *Item->UniqueId.ToString() : TEXT("Invalid"),
-		bSkipAutoPlacement ? 1 : 0);
+		bSkipAutoPlacement ? 1 : 0,
+		Items.Num(),
+		EquippedItems.Num(),
+		GridPlacements.Num());
 
 	const bool bAlreadyOwned = Items.Contains(Item);
 	UObject* PreviousOuter = nullptr;
@@ -206,11 +322,21 @@ bool UAeyerjiInventoryComponent::AddItemInstance(UAeyerjiItemInstance* Item, boo
 		Item->UniqueId = FGuid::NewGuid();
 	}
 
+	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Item->ItemLevel);
+	if (Item->ItemLevel != ClampedItemLevel)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[ItemLevelClamp] AddItemInstance clamped %s ItemLevel %d -> %d"),
+			*GetNameSafe(Item),
+			Item->ItemLevel,
+			ClampedItemLevel);
+		Item->ItemLevel = ClampedItemLevel;
+	}
+
 	if (!bAlreadyOwned)
 	{
 		if (Item->GetOuter() != this)
 		{
-			UE_LOG(LogTemp, Display, TEXT("[Inventory][Server] Renaming %s from %s to %s"),
+			UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] Renaming item %s from %s to inventory %s"),
 				*GetNameSafe(Item),
 				*GetNameSafe(Item->GetOuter()),
 				*GetNameSafe(this));
@@ -220,7 +346,7 @@ bool UAeyerjiInventoryComponent::AddItemInstance(UAeyerjiItemInstance* Item, boo
 		Item->SetNetAddressable();
 		Items.Add(Item);
 		BindItemInstanceDelegates(Item);
-		UE_LOG(LogTemp, Display, TEXT("[Inventory][Server] Added %s Outer=%s UniqueId=%s Items=%d"),
+		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] Added item %s Outer=%s UniqueId=%s Items=%d"),
 			*GetNameSafe(Item),
 			*GetNameSafe(Item->GetOuter()),
 			Item->UniqueId.IsValid() ? *Item->UniqueId.ToString() : TEXT("Invalid"),
@@ -237,8 +363,16 @@ bool UAeyerjiInventoryComponent::AddItemInstance(UAeyerjiItemInstance* Item, boo
 
 	if (TryAutoPlaceItem(Item))
 	{
+		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] AddItemInstance placed item %s in bag grid."), *Item->UniqueId.ToString());
 		return true;
 	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] AddItemInstance rejected: no bag placement for item %s Size=(%d,%d) Grid=(%d,%d)"),
+		*Item->UniqueId.ToString(),
+		Item->InventorySize.X,
+		Item->InventorySize.Y,
+		GridColumns,
+		GridRows);
 
 	if (!bAlreadyOwned)
 	{
@@ -259,6 +393,104 @@ bool UAeyerjiInventoryComponent::AddItemInstance(UAeyerjiItemInstance* Item, boo
 void UAeyerjiInventoryComponent::Server_AddItem_Implementation(UAeyerjiItemInstance* Item)
 {
 	AddItemInstance(Item);
+}
+
+int32 UAeyerjiInventoryComponent::GetOwnerLevelForInventoryRules() const
+{
+#if WITH_DEV_AUTOMATION_TESTS
+	if (AutomationOwnerLevelOverride > 0)
+	{
+		return AutomationOwnerLevelOverride;
+	}
+#endif
+	return GetInventoryOwnerLevel(this);
+}
+
+int32 UAeyerjiInventoryComponent::GetNormalEquipmentSlotCountForLevel(int32 PlayerLevel, int32 MaxNormalSlots)
+{
+	const int32 ClampedLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(PlayerLevel);
+	const int32 ClampedMaxSlots = FMath::Max(MinimumNormalSlotCount, MaxNormalSlots);
+	const int32 UnlocksAfterLevelOne = FMath::Clamp(ClampedLevel / NormalSlotUnlockInterval, 0, ClampedMaxSlots - 1);
+	return 1 + UnlocksAfterLevelOne;
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void UAeyerjiInventoryComponent::SetAutomationOwnerLevelForInventoryRules(int32 InLevel)
+{
+	AutomationOwnerLevelOverride = InLevel > 0 ? UAeyerjiDifficultySettings::ClampGameplayLevel(InLevel) : 0;
+	BroadcastEquipmentSlotUnlocksIfChanged(true);
+}
+#endif
+
+int32 UAeyerjiInventoryComponent::GetVisibleEquipmentSlotCount(EEquipmentSlot Slot) const
+{
+	if (!IsValidEquipmentSlot(Slot))
+	{
+		return 0;
+	}
+
+	if (Slot == EEquipmentSlot::Corruption)
+	{
+		return GetUnlockedEquipmentSlotCount(Slot);
+	}
+
+	return IsNormalEquipmentSlot(Slot) ? FMath::Max(MinimumNormalSlotCount, SlotsPerEquipmentCategory) : 0;
+}
+
+int32 UAeyerjiInventoryComponent::GetUnlockedEquipmentSlotCount(EEquipmentSlot Slot) const
+{
+	if (!IsValidEquipmentSlot(Slot))
+	{
+		return 0;
+	}
+
+	if (Slot == EEquipmentSlot::Corruption)
+	{
+		return GetOwnerLevelForInventoryRules() >= CorruptionUnlockLevel ? CorruptionSlotCount : 0;
+	}
+
+	return IsNormalEquipmentSlot(Slot)
+		? GetNormalEquipmentSlotCountForLevel(GetOwnerLevelForInventoryRules(), FMath::Max(MinimumNormalSlotCount, SlotsPerEquipmentCategory))
+		: 0;
+}
+
+bool UAeyerjiInventoryComponent::IsEquipmentSlotUnlocked(EEquipmentSlot Slot, int32 SlotIndex) const
+{
+	if (SlotIndex == INDEX_NONE)
+	{
+		return GetUnlockedEquipmentSlotCount(Slot) > 0;
+	}
+
+	return SlotIndex >= 0 && SlotIndex < GetUnlockedEquipmentSlotCount(Slot);
+}
+
+bool UAeyerjiInventoryComponent::CanEquipItemInSlot(const UAeyerjiItemInstance* Item, EEquipmentSlot Slot, int32 SlotIndex) const
+{
+	if (!Item || !Item->Definition)
+	{
+		return false;
+	}
+
+	if (!IsSlotCompatibleWithDefinition(Slot, Item->Definition.Get()))
+	{
+		return false;
+	}
+
+	if (!IsEquipmentSlotUnlocked(Slot, SlotIndex))
+	{
+		return false;
+	}
+
+	const int32 OwnerLevel = GetOwnerLevelForInventoryRules();
+	const int32 ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Item->ItemLevel);
+	const int32 RequiredLevel = Item->Definition->GetEffectiveRequiredLevel();
+	return OwnerLevel >= FMath::Max(ItemLevel, RequiredLevel);
+}
+
+void UAeyerjiInventoryComponent::RefreshEquipmentSlotUnlockState()
+{
+	TryBindOwnerLevelChange();
+	BroadcastEquipmentSlotUnlocksIfChanged(true);
 }
 
 void UAeyerjiInventoryComponent::Server_RemoveItemById_Implementation(const FGuid& ItemId)
@@ -422,37 +654,50 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 
 	UAeyerjiItemInstance* Item = FindItemById(ItemId);
 	const UItemDefinition* ItemDefinition = Item ? Item->Definition.Get() : nullptr;
-	const EEquipmentSlot ResolvedSlot = ResolveEquipmentSlot(Slot, ItemDefinition);
+	const EEquipmentSlot ResolvedSlot = IsValidEquipmentSlot(Slot)
+		? Slot
+		: ResolveEquipmentSlot(Slot, ItemDefinition);
 	const bool bSanitizedSlot = ResolvedSlot != Slot;
 
-	AJ_LOG(this, TEXT("Server_EquipItem ItemId=%s Slot=%d Index=%d%s"),
+	AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem ItemId=%s Slot=%d Index=%d%s OwnerLevel=%d"),
 		ItemId.IsValid() ? *ItemId.ToString() : TEXT("Invalid"),
 		static_cast<int32>(ResolvedSlot),
 		SlotIndex,
-		bSanitizedSlot ? TEXT(" (sanitized)") : TEXT(""));
-
-	if (bSanitizedSlot && ItemDefinition && ItemDefinition->DefaultSlot != ResolvedSlot)
-	{
-		AJ_LOG(this, TEXT("Server_EquipItem sanitized slot request (Requested=%d Default=%d Category=%d). Verify ItemCategory/DefaultSlot match."),
-			static_cast<int32>(Slot),
-			static_cast<int32>(ItemDefinition->DefaultSlot),
-			static_cast<int32>(ItemDefinition->ItemCategory));
-	}
+		bSanitizedSlot ? TEXT(" (sanitized)") : TEXT(""),
+		GetOwnerLevelForInventoryRules());
 
 	if (!Item || !Item->Definition)
 	{
-		AJ_LOG(this, TEXT("Server_EquipItem aborted: missing item or definition"));
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem aborted: missing item or definition (Item=%s Definition=%s)"),
+			*GetNameSafe(Item),
+			Item ? *GetNameSafe(Item->Definition.Get()) : TEXT("NULL"));
 		return;
 	}
 
-	const int32 OwnerLevel = GetInventoryOwnerLevel(this);
-	const int32 ItemLevel = FMath::Max(1, Item->ItemLevel);
-	if (ItemLevel > OwnerLevel)
+	const int32 OwnerLevel = GetOwnerLevelForInventoryRules();
+	const int32 ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Item->ItemLevel);
+	const int32 RequiredLevel = Item->Definition->GetEffectiveRequiredLevel();
+	if (FMath::Max(ItemLevel, RequiredLevel) > OwnerLevel)
 	{
-		AJ_LOG(this, TEXT("Server_EquipItem rejected: item level %d exceeds owner level %d (%s)"),
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem rejected: item level %d or required level %d exceeds owner level %d (%s)"),
 			ItemLevel,
+			RequiredLevel,
 			OwnerLevel,
 			*GetNameSafe(Item));
+		return;
+	}
+
+	const bool bExplicitIndex = SlotIndex != INDEX_NONE;
+	SlotIndex = SanitizeSlotIndex(ResolvedSlot, SlotIndex);
+	if (!CanEquipItemInSlot(Item, ResolvedSlot, bExplicitIndex ? SlotIndex : INDEX_NONE))
+	{
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem rejected: incompatible or locked slot Item=%s Slot=%d Index=%d OwnerLevel=%d Category=%d RequiredLevel=%d"),
+			*Item->UniqueId.ToString(),
+			static_cast<int32>(ResolvedSlot),
+			SlotIndex,
+			OwnerLevel,
+			static_cast<int32>(Item->Definition->ItemCategory),
+			RequiredLevel);
 		return;
 	}
 
@@ -460,21 +705,31 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 	{
 		if (!AddItemInstance(Item, true))
 		{
-			AJ_LOG(this, TEXT("Server_EquipItem failed: AddItemInstance rejected %s"), *Item->UniqueId.ToString());
+			AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem failed: AddItemInstance rejected %s"), *Item->UniqueId.ToString());
 			return;
 		}
 	}
 
-	const bool bExplicitIndex = SlotIndex != INDEX_NONE;
-	SlotIndex = SanitizeSlotIndex(SlotIndex);
 	if (!bExplicitIndex || SlotIndex == INDEX_NONE)
 	{
 		SlotIndex = FindFirstFreeSlotIndex(ResolvedSlot, Item);
 	}
 
+	if (!CanEquipItemInSlot(Item, ResolvedSlot, SlotIndex))
+	{
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem rejected: incompatible or locked slot Item=%s Slot=%d Index=%d OwnerLevel=%d Category=%d RequiredLevel=%d"),
+			*Item->UniqueId.ToString(),
+			static_cast<int32>(ResolvedSlot),
+			SlotIndex,
+			OwnerLevel,
+			static_cast<int32>(Item->Definition->ItemCategory),
+			RequiredLevel);
+		return;
+	}
+
 	if (SlotIndex == INDEX_NONE)
 	{
-		AJ_LOG(this, TEXT("Server_EquipItem aborted: no free slot for %s in %d"), *Item->UniqueId.ToString(), static_cast<int32>(ResolvedSlot));
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem aborted: no free slot for %s in %d"), *Item->UniqueId.ToString(), static_cast<int32>(ResolvedSlot));
 		return;
 	}
 
@@ -484,7 +739,7 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 	{
 		if (!AutoPlaceItem(CurrentlyEquipped))
 		{
-			AJ_LOG(this, TEXT("Server_EquipItem failed: could not auto-place previous %s"), *CurrentlyEquipped->UniqueId.ToString());
+			AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem failed: could not auto-place previous %s"), *CurrentlyEquipped->UniqueId.ToString());
 			return;
 		}
 
@@ -494,7 +749,7 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 		CurrentlyEquipped->EquippedSlotIndex = INDEX_NONE;
 
 		RemoveItemGameplayEffect(CurrentlyEquipped->UniqueId);
-		AJ_LOG(this, TEXT("Server_EquipItem unequipped %s from slot %d index %d"),
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem unequipped %s from slot %d index %d"),
 			*CurrentlyEquipped->UniqueId.ToString(),
 			static_cast<int32>(ResolvedSlot),
 			SlotIndex);
@@ -510,7 +765,7 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 	{
 		ExistingEntry->Item = Item;
 		ExistingEntry->ItemId = Item->UniqueId;
-		AJ_LOG(this, TEXT("Server_EquipItem updated slot entry for %s (index %d)"), *Item->UniqueId.ToString(), SlotIndex);
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem updated slot entry for %s (index %d)"), *Item->UniqueId.ToString(), SlotIndex);
 	}
 	else
 	{
@@ -520,20 +775,22 @@ void UAeyerjiInventoryComponent::Server_EquipItem_Implementation(const FGuid& It
 		NewEntry.ItemId = Item->UniqueId;
 		NewEntry.Item = Item;
 		EquippedItems.Add(NewEntry);
-		AJ_LOG(this, TEXT("Server_EquipItem added new slot entry for %s (index %d)"), *Item->UniqueId.ToString(), SlotIndex);
+		AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem added new slot entry for %s (index %d)"), *Item->UniqueId.ToString(), SlotIndex);
 	}
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, EquippedItems, this);
 
 	ClearPlacement(Item->UniqueId);
-	AJ_LOG(this, TEXT("Server_EquipItem cleared placement for %s"), *Item->UniqueId.ToString());
+	AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem cleared placement for %s"), *Item->UniqueId.ToString());
 
 	ApplyItemGameplayEffect(Item);
 	OnEquippedItemChanged.Broadcast(ResolvedSlot, SlotIndex, Item);
 	BroadcastItemStateChange(EInventoryItemStateChange::Equipped, Item, ResolvedSlot, SlotIndex);
-	AJ_LOG(this, TEXT("Server_EquipItem completed equip for %s Slot=%d Index=%d"),
+	AJ_LOG(this, TEXT("[InventoryPickup] Server_EquipItem completed equip for %s Slot=%d Index=%d EquippedItems=%d Grid=%d"),
 		*Item->UniqueId.ToString(),
 		static_cast<int32>(ResolvedSlot),
-		SlotIndex);
+		SlotIndex,
+		EquippedItems.Num(),
+		GridPlacements.Num());
 	RebuildItemSnapshots();
 }
 
@@ -656,37 +913,109 @@ void UAeyerjiInventoryComponent::ApplyItemGameplayEffect(UAeyerjiItemInstance* I
 				*GetNameSafe(Item->Definition.Get()));
 		}
 
+		const int32 ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Item->ItemLevel);
+		const int32 ItemLevelDelta = FMath::Max(ItemLevel - 1, 0);
+		float RarityMultiplier = 1.f;
+		if (const UWorld* World = GetWorld())
+		{
+			if (const UGameInstance* GI = World->GetGameInstance())
+			{
+				if (const ULootService* LootService = GI->GetSubsystem<ULootService>())
+				{
+					if (const UAeyerjiLootTable* LootTable = LootService->GetLootTable())
+					{
+						if (const FRarityScalingRow* RarityScaling = LootTable->FindRarityScaling(Item->Rarity))
+						{
+							RarityMultiplier = FMath::Max(0.f, RarityScaling->GrantedEffectLevelMultiplier);
+						}
+					}
+				}
+			}
+		}
 		for (const FItemGrantedEffect& Granted : Item->GetGrantedEffects())
 		{
 			if (!Granted.IsValid())
 			{
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect skipped invalid Item=%s Def=%s"),
+					*GetNameSafe(Item),
+					*GetNameSafe(Item->Definition.Get()));
 				continue;
 			}
+
+			UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect begin Item=%s Def=%s Effect=%s Level=%.2f AppTags=%d SetByCaller=%d"),
+				*GetNameSafe(Item),
+				*GetNameSafe(Item->Definition.Get()),
+				*GetNameSafe(Granted.EffectClass.Get()),
+				Granted.EffectLevel,
+				Granted.ApplicationTags.Num(),
+				Granted.SetByCallerMagnitudes.Num());
 
 			FGameplayEffectContextHandle ExtraContext = ASC->MakeEffectContext();
 			ExtraContext.AddSourceObject(Item);
 
 			FGameplayEffectSpecHandle ExtraSpecHandle = ASC->MakeOutgoingSpec(Granted.EffectClass, Granted.EffectLevel, ExtraContext);
-			if (!ExtraSpecHandle.IsValid())
+			if (!ExtraSpecHandle.IsValid() || !ExtraSpecHandle.Data.IsValid())
 			{
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect spec invalid Item=%s Effect=%s Level=%.2f"),
+					*GetNameSafe(Item),
+					*GetNameSafe(Granted.EffectClass.Get()),
+					Granted.EffectLevel);
 				continue;
 			}
 
 			FGameplayEffectSpec* ExtraSpec = ExtraSpecHandle.Data.Get();
 			if (!ExtraSpec)
 			{
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect spec null Item=%s Effect=%s"),
+					*GetNameSafe(Item),
+					*GetNameSafe(Granted.EffectClass.Get()));
 				continue;
 			}
 
 			if (Granted.ApplicationTags.Num() > 0)
 			{
 				ExtraSpec->DynamicGrantedTags.AppendTags(Granted.ApplicationTags);
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect added %d app tags Item=%s Effect=%s"),
+					Granted.ApplicationTags.Num(),
+					*GetNameSafe(Item),
+					*GetNameSafe(Granted.EffectClass.Get()));
+			}
+
+			for (const FItemSetByCallerMagnitude& SetByCaller : Granted.SetByCallerMagnitudes)
+			{
+				if (!SetByCaller.IsValid())
+				{
+					UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect set-by-caller invalid Item=%s Effect=%s"),
+						*GetNameSafe(Item),
+						*GetNameSafe(Granted.EffectClass.Get()));
+					continue;
+				}
+
+				const float ScaledMagnitude =
+					(SetByCaller.LevelOneMagnitude * (1.f + (SetByCaller.PerLevelMultiplier * ItemLevelDelta)))
+					+ (SetByCaller.PerLevelAdd * ItemLevelDelta);
+				const float FinalMagnitude = ScaledMagnitude * RarityMultiplier;
+				ExtraSpec->SetSetByCallerMagnitude(SetByCaller.DataTag, FinalMagnitude);
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect set-by-caller Item=%s Effect=%s Tag=%s Mag=%.3f"),
+					*GetNameSafe(Item),
+					*GetNameSafe(Granted.EffectClass.Get()),
+					*SetByCaller.DataTag.ToString(),
+					FinalMagnitude);
 			}
 
 			FActiveGameplayEffectHandle ExtraHandle = ASC->ApplyGameplayEffectSpecToSelf(*ExtraSpec);
 			if (ExtraHandle.IsValid())
 			{
 				HandleSet.AdditionalHandles.Add(ExtraHandle);
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect applied Item=%s Effect=%s"),
+					*GetNameSafe(Item),
+					*GetNameSafe(Granted.EffectClass.Get()));
+			}
+			else
+			{
+				UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] GrantedEffect apply failed Item=%s Effect=%s"),
+					*GetNameSafe(Item),
+					*GetNameSafe(Granted.EffectClass.Get()));
 			}
 		}
 
@@ -722,7 +1051,7 @@ void UAeyerjiInventoryComponent::ApplyItemGameplayEffect(UAeyerjiItemInstance* I
 					{
 						for (const FGameplayTag& Tag : AbilityGrant.OwnedTags)
 						{
-							ASC->AddLooseGameplayTag(Tag);
+							UpdateManagedOwnedTagCount(ASC, Tag, 1);
 							HandleSet.AddedOwnedTags.Add(Tag);
 						}
 					}
@@ -803,7 +1132,7 @@ void UAeyerjiInventoryComponent::RemoveItemGameplayEffect(const FGuid& ItemId)
 				{
 					for (const FGameplayTag& Tag : HandleSet->AddedOwnedTags)
 					{
-						ASC->RemoveLooseGameplayTag(Tag);
+						UpdateManagedOwnedTagCount(ASC, Tag, -1);
 					}
 				}
 			}
@@ -811,6 +1140,33 @@ void UAeyerjiInventoryComponent::RemoveItemGameplayEffect(const FGuid& ItemId)
 			ActiveEffectHandles.Remove(ItemId);
 		}
 	}
+}
+
+void UAeyerjiInventoryComponent::UpdateManagedOwnedTagCount(UAbilitySystemComponent* ASC, const FGameplayTag& Tag, int32 Delta)
+{
+	if (!ASC || !Tag.IsValid() || Delta == 0)
+	{
+		return;
+	}
+
+	const int32 CurrentCount = ManagedOwnedTagCounts.FindRef(Tag);
+	const int32 NewCount = FMath::Max(CurrentCount + Delta, 0);
+	if (NewCount == CurrentCount)
+	{
+		return;
+	}
+
+	if (NewCount > 0)
+	{
+		ManagedOwnedTagCounts.Add(Tag, NewCount);
+	}
+	else
+	{
+		ManagedOwnedTagCounts.Remove(Tag);
+	}
+
+	// Drive the ASC to the exact count we expect so repeated equipment refreshes stay idempotent.
+	ASC->SetLooseGameplayTagCount(Tag, NewCount);
 }
 
 bool UAeyerjiInventoryComponent::GetPlacementForItem(const FGuid& ItemId, FInventoryItemGridData& OutPlacement) const
@@ -942,10 +1298,10 @@ void UAeyerjiInventoryComponent::Server_SwapEquippedSlots_Implementation(EEquipm
 		return;
 	}
 
-	SlotIndexA = SanitizeSlotIndex(SlotIndexA);
-	SlotIndexB = SanitizeSlotIndex(SlotIndexB);
+	SlotIndexA = SanitizeSlotIndex(Slot, SlotIndexA);
+	SlotIndexB = SanitizeSlotIndex(Slot, SlotIndexB);
 
-	if (SlotIndexA == SlotIndexB)
+	if (SlotIndexA == INDEX_NONE || SlotIndexB == INDEX_NONE || SlotIndexA == SlotIndexB)
 	{
 		return;
 	}
@@ -1104,6 +1460,7 @@ void UAeyerjiInventoryComponent::Server_DropItem_Implementation(const FGuid& Ite
 		}
 	}
 
+	SyncProfileInventoryCache(TEXT("Drop"));
 	BroadcastItemStateChange(EInventoryItemStateChange::Dropped, Item, PreviousSlot, PreviousSlotIndex);
 }
 
@@ -1205,17 +1562,32 @@ void UAeyerjiInventoryComponent::OnRep_EquippedItems(const TArray<FEquippedItemE
 		UAeyerjiItemInstance* const CurrentItem = Entry.Item;
 		const int32 SanitizedIndex = FMath::Max(0, Entry.SlotIndex);
 		const int64 SlotKey = MakeSlotKey(Entry.Slot, SanitizedIndex);
+
+		auto BroadcastIfResolved = [this, &Entry, SanitizedIndex, CurrentItem]()
+		{
+			if (Entry.ItemId.IsValid() && !CurrentItem)
+			{
+				AJ_LOG(this, TEXT("OnRep_EquippedItems deferred unresolved item Slot=%d Index=%d ItemId=%s"),
+					static_cast<int32>(Entry.Slot),
+					SanitizedIndex,
+					*Entry.ItemId.ToString());
+				return;
+			}
+
+			OnEquippedItemChanged.Broadcast(Entry.Slot, SanitizedIndex, CurrentItem);
+		};
+
 		if (FGuid* OldIdPtr = OldEntries.Find(SlotKey))
 		{
 			if (*OldIdPtr != Entry.ItemId)
 			{
-				OnEquippedItemChanged.Broadcast(Entry.Slot, SanitizedIndex, CurrentItem);
+				BroadcastIfResolved();
 			}
 			OldEntries.Remove(SlotKey);
 		}
 		else
 		{
-			OnEquippedItemChanged.Broadcast(Entry.Slot, SanitizedIndex, CurrentItem);
+			BroadcastIfResolved();
 		}
 	}
 
@@ -1231,6 +1603,17 @@ void UAeyerjiInventoryComponent::OnRep_Items()
 {
 	UE_LOG(LogTemp, Display, TEXT("[Inventory] OnRep_Items count=%d"), Items.Num());
 
+	auto MakeSlotKey = [](EEquipmentSlot Slot, int32 Index)
+	{
+		return (static_cast<int64>(Slot) << 32) | static_cast<uint32>(Index);
+	};
+
+	TMap<int64, UAeyerjiItemInstance*> PreviousResolvedItems;
+	for (const FEquippedItemEntry& Entry : EquippedItems)
+	{
+		PreviousResolvedItems.Add(MakeSlotKey(Entry.Slot, FMath::Max(0, Entry.SlotIndex)), Entry.Item);
+	}
+
 	for (TObjectPtr<UAeyerjiItemInstance>& Item : Items)
 	{
 		if (Item)
@@ -1245,22 +1628,34 @@ void UAeyerjiInventoryComponent::OnRep_Items()
 
 	for (const FEquippedItemEntry& Entry : EquippedItems)
 	{
+		const int32 SanitizedIndex = FMath::Max(0, Entry.SlotIndex);
+		UAeyerjiItemInstance* const PreviousResolvedItem = PreviousResolvedItems.FindRef(MakeSlotKey(Entry.Slot, SanitizedIndex));
 		if (Entry.Item)
 		{
-			AJ_LOG(this, TEXT("OnRep_Items resolved equipped slot %d -> %s"),
+			const bool bNewlyResolved = PreviousResolvedItem != Entry.Item;
+			AJ_LOG(this, TEXT("OnRep_Items resolved equipped slot %d index %d -> %s NewlyResolved=%s"),
 				static_cast<int32>(Entry.Slot),
-				*Entry.Item->UniqueId.ToString());
-			OnEquippedItemChanged.Broadcast(Entry.Slot, Entry.SlotIndex, Entry.Item);
+				SanitizedIndex,
+				*Entry.Item->UniqueId.ToString(),
+				bNewlyResolved ? TEXT("true") : TEXT("false"));
+
+			if (bNewlyResolved)
+			{
+				OnEquippedItemChanged.Broadcast(Entry.Slot, SanitizedIndex, Entry.Item);
+			}
 		}
 		else if (Entry.ItemId.IsValid())
 		{
-			AJ_LOG(this, TEXT("OnRep_Items still missing item for slot %d id=%s"),
+			AJ_LOG(this, TEXT("OnRep_Items still missing item for slot %d index %d id=%s"),
 				static_cast<int32>(Entry.Slot),
+				SanitizedIndex,
 				*Entry.ItemId.ToString());
 		}
 		else
 		{
-			AJ_LOG(this, TEXT("OnRep_Items slot %d has no assignment"), static_cast<int32>(Entry.Slot));
+			AJ_LOG(this, TEXT("OnRep_Items slot %d index %d has no assignment"),
+				static_cast<int32>(Entry.Slot),
+				SanitizedIndex);
 		}
 	}
 
@@ -1331,6 +1726,15 @@ FAeyerjiInventorySaveData UAeyerjiInventoryComponent::BuildSaveData()
 		Entry.Item = nullptr;
 	}
 
+	UE_LOG(LogTemp, Display, TEXT("[InventorySave] BuildSaveData Inventory=%s Items=%d Snapshots=%d Equipped=%d Grid=%d GridSize=(%d,%d)"),
+		*GetNameSafe(this),
+		Items.Num(),
+		SaveData.ItemSnapshots.Num(),
+		SaveData.EquippedItems.Num(),
+		SaveData.GridPlacements.Num(),
+		SaveData.GridColumns,
+		SaveData.GridRows);
+
 	return SaveData;
 }
 
@@ -1356,6 +1760,7 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 	Items.Reset();
 	ItemChangedDelegateHandles.Reset();
 	ActiveEffectHandles.Reset();
+	ManagedOwnedTagCounts.Reset();
 	GridPlacements.Reset();
 	EquippedItems.Reset();
 	ItemSnapshots.Reset();
@@ -1370,10 +1775,20 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 			continue;
 		}
 
-		UAeyerjiItemInstance* Item = NewObject<UAeyerjiItemInstance>(this);
-		Item->Definition = Snapshot.Definition;
+		UItemDefinition* ResolvedDefinition = ResolveSnapshotDefinition(Snapshot, this);
+		if (!ResolvedDefinition)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Inventory] ApplySaveData skipped item %s because definition key %s could not be resolved."),
+				*Snapshot.ItemId.ToString(),
+				*Snapshot.DefinitionKey.ToString());
+			continue;
+		}
+
+		const FName ItemName = MakeUniqueObjectName(this, UAeyerjiItemInstance::StaticClass(), TEXT("AeyerjiItemInstance"));
+		UAeyerjiItemInstance* Item = NewObject<UAeyerjiItemInstance>(this, UAeyerjiItemInstance::StaticClass(), ItemName);
+		Item->Definition = ResolvedDefinition;
 		Item->Rarity = Snapshot.Rarity;
-		Item->ItemLevel = Snapshot.ItemLevel;
+		Item->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Snapshot.ItemLevel);
 		Item->Seed = Snapshot.Seed;
 		Item->UniqueId = Snapshot.ItemId;
 		Item->RolledAffixes = Snapshot.RolledAffixes;
@@ -1384,6 +1799,19 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 		Item->EquippedSlotIndex = Snapshot.SlotIndex;
 		Item->InventorySize = Snapshot.InventorySize;
 		Item->SetNetAddressable();
+
+		if (ShouldRebuildEmptySnapshotAggregation(Item))
+		{
+			UE_LOG(LogTemp, Display, TEXT("[InventorySave] Rebuilding empty item aggregation ItemId=%s Def=%s ItemLevel=%d"),
+				*Item->UniqueId.ToString(),
+				*GetNameSafe(Item->Definition.Get()),
+				Item->ItemLevel);
+			Item->RebuildAggregation();
+			if (const UAeyerjiLootTable* LootTable = ResolveLootTableForInventory(this))
+			{
+				Item->ApplyLootStatScaling(LootTable);
+			}
+		}
 
 		AddItemInstance(Item, /*bSkipAutoPlacement=*/true);
 	}
@@ -1420,6 +1848,14 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 	{
 		OnEquippedItemChanged.Broadcast(Entry.Slot, Entry.SlotIndex, Entry.Item);
 	}
+
+	UE_LOG(LogTemp, Display, TEXT("[InventorySave] ApplySaveData complete Inventory=%s RestoredItems=%d Equipped=%d Grid=%d GridSize=(%d,%d)"),
+		*GetNameSafe(this),
+		Items.Num(),
+		EquippedItems.Num(),
+		GridPlacements.Num(),
+		GridColumns,
+		GridRows);
 }
 
 void UAeyerjiInventoryComponent::BroadcastItemStateChange(EInventoryItemStateChange Change, UAeyerjiItemInstance* Item, EEquipmentSlot Slot, int32 SlotIndex)
@@ -1478,7 +1914,9 @@ bool UAeyerjiInventoryComponent::TryAutoPlaceItem(UAeyerjiItemInstance* Item)
 {
 	if (!Item || !Item->UniqueId.IsValid())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[Inventory] TryAutoPlaceItem invalid item"));
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] TryAutoPlaceItem invalid item Inventory=%s Item=%s"),
+			*GetNameSafe(this),
+			*GetNameSafe(Item));
 		return false;
 	}
 
@@ -1487,11 +1925,19 @@ bool UAeyerjiInventoryComponent::TryAutoPlaceItem(UAeyerjiItemInstance* Item)
 	FInventoryItemGridData Existing;
 	if (GetPlacementForItem(Item->UniqueId, Existing))
 	{
+		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] TryAutoPlaceItem already placed %s at (%d,%d)"),
+			*Item->UniqueId.ToString(),
+			Existing.TopLeft.X,
+			Existing.TopLeft.Y);
 		return true;
 	}
 
 	if (GridColumns <= 0 || GridRows <= 0)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] TryAutoPlaceItem invalid grid for %s Grid=(%d,%d)"),
+			*Item->UniqueId.ToString(),
+			GridColumns,
+			GridRows);
 		return false;
 	}
 
@@ -1511,8 +1957,8 @@ bool UAeyerjiInventoryComponent::TryAutoPlaceItem(UAeyerjiItemInstance* Item)
 
 			if (CanPlaceAt(Candidate))
 			{
-				UE_LOG(LogTemp, Display, TEXT("[Inventory] Placing %s at (%d,%d) size (%d,%d)"),
-					*Item->UniqueId.ToString(), X, Y, Size.X, Size.Y);
+				UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] Placing %s at (%d,%d) size (%d,%d) Grid=(%d,%d)"),
+					*Item->UniqueId.ToString(), X, Y, Size.X, Size.Y, GridColumns, GridRows);
 				GridPlacements.Add(Candidate);
 				MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
 				OnInventoryChanged.Broadcast();
@@ -1521,6 +1967,13 @@ bool UAeyerjiInventoryComponent::TryAutoPlaceItem(UAeyerjiItemInstance* Item)
 		}
 	}
 
+	UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] TryAutoPlaceItem failed for %s Size=(%d,%d) Grid=(%d,%d) ExistingPlacements=%d"),
+		*Item->UniqueId.ToString(),
+		Size.X,
+		Size.Y,
+		GridColumns,
+		GridRows,
+		GridPlacements.Num());
 	return false;
 }
 
@@ -1615,8 +2068,10 @@ void UAeyerjiInventoryComponent::RebuildItemSnapshots()
 		FInventoryItemSnapshot Snapshot;
 		Snapshot.ItemId = Item->UniqueId;
 		Snapshot.Definition = Item->Definition;
+		Snapshot.DefinitionKey = Item->Definition ? Item->Definition->GetDefinitionKey() : NAME_None;
 		Snapshot.Rarity = Item->Rarity;
-		Snapshot.ItemLevel = Item->ItemLevel;
+		Snapshot.ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Item->ItemLevel);
+		Item->ItemLevel = Snapshot.ItemLevel;
 		Snapshot.Seed = Item->Seed;
 		Snapshot.RolledAffixes = Item->RolledAffixes;
 		Snapshot.FinalAggregatedModifiers = Item->FinalAggregatedModifiers;
@@ -1627,23 +2082,87 @@ void UAeyerjiInventoryComponent::RebuildItemSnapshots()
 		Snapshot.InventorySize = Item->InventorySize;
 
 		ItemSnapshots.Add(MoveTemp(Snapshot));
+
+		UE_LOG(LogTemp, Verbose, TEXT("[InventorySave] Snapshot item UniqueId=%s Def=%s DefinitionKey=%s EquippedSlot=%d SlotIndex=%d Size=(%d,%d)"),
+			Item->UniqueId.IsValid() ? *Item->UniqueId.ToString() : TEXT("Invalid"),
+			*GetNameSafe(Item->Definition.Get()),
+			*ItemSnapshots.Last().DefinitionKey.ToString(),
+			static_cast<int32>(Item->EquippedSlot),
+			Item->EquippedSlotIndex,
+			Item->InventorySize.X,
+			Item->InventorySize.Y);
 	}
 
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, ItemSnapshots, this);
+}
+
+void UAeyerjiInventoryComponent::SyncProfileInventoryCache(const TCHAR* Reason)
+{
+	if (GetOwnerRole() != ROLE_Authority)
+	{
+		return;
+	}
+
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	const APlayerState* PlayerState = OwnerPawn ? OwnerPawn->GetPlayerState() : Cast<APlayerState>(GetOwner());
+	if (!PlayerState)
+	{
+		UE_LOG(LogTemp, Verbose,
+			TEXT("[InventorySave] RuntimeCacheSync skipped Reason=%s Inventory=%s Owner=%s Detail=NoPlayerState"),
+			Reason ? Reason : TEXT("Unknown"),
+			*GetNameSafe(this),
+			*GetNameSafe(GetOwner()));
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	UAeyerjiSaveManagerSubsystem* SaveManager =
+		GameInstance ? GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>() : nullptr;
+	if (!SaveManager)
+	{
+		return;
+	}
+
+	UAeyerjiSaveGame* CachedProfile = nullptr;
+	if (!SaveManager->GetServerCachedProfile(PlayerState, CachedProfile) || !CachedProfile)
+	{
+		UE_LOG(LogTemp, Verbose,
+			TEXT("[InventorySave] RuntimeCacheSync skipped Reason=%s Inventory=%s PlayerState=%s Detail=NoServerCachedProfile Items=%d Equipped=%d Grid=%d"),
+			Reason ? Reason : TEXT("Unknown"),
+			*GetNameSafe(this),
+			*GetNameSafe(PlayerState),
+			Items.Num(),
+			EquippedItems.Num(),
+			GridPlacements.Num());
+		return;
+	}
+
+	CachedProfile->Inventory = BuildSaveData();
+	UE_LOG(LogTemp, Display,
+		TEXT("[InventorySave] RuntimeCacheSync Reason=%s Inventory=%s PlayerState=%s CachedItems=%d CachedEquipped=%d CachedGrid=%d"),
+		Reason ? Reason : TEXT("Unknown"),
+		*GetNameSafe(this),
+		*GetNameSafe(PlayerState),
+		CachedProfile->Inventory.ItemSnapshots.Num(),
+		CachedProfile->Inventory.EquippedItems.Num(),
+		CachedProfile->Inventory.GridPlacements.Num());
 }
 
 void UAeyerjiInventoryComponent::ResolveEquippedItems()
 {
 	PruneEmptyEquippedEntries();
 
-	for (FEquippedItemEntry& Entry : EquippedItems)
+	for (int32 EntryIndex = EquippedItems.Num() - 1; EntryIndex >= 0; --EntryIndex)
 	{
+		FEquippedItemEntry& Entry = EquippedItems[EntryIndex];
 		UAeyerjiItemInstance* const ResolvedItem = Entry.ItemId.IsValid() ? FindItemById(Entry.ItemId) : nullptr;
 		if (!ResolvedItem && Entry.ItemId.IsValid())
 		{
-			AJ_LOG(this, TEXT("ResolveEquippedItems unresolved ItemId=%s Slot=%d"),
+			AJ_LOG(this, TEXT("ResolveEquippedItems unresolved ItemId=%s Slot=%d Index=%d"),
 				*Entry.ItemId.ToString(),
-				static_cast<int32>(Entry.Slot));
+				static_cast<int32>(Entry.Slot),
+				Entry.SlotIndex);
 		}
 
 		Entry.Item = ResolvedItem;
@@ -1657,7 +2176,7 @@ void UAeyerjiInventoryComponent::ResolveEquippedItems()
 			Entry.Slot = SanitizedSlot;
 		}
 
-		const int32 SanitizedIndex = SanitizeSlotIndex(Entry.SlotIndex);
+		const int32 SanitizedIndex = SanitizeSlotIndex(Entry.Slot, Entry.SlotIndex);
 		if (SanitizedIndex != Entry.SlotIndex)
 		{
 			AJ_LOG(this, TEXT("ResolveEquippedItems sanitized slot index %d -> %d for %s"),
@@ -1665,6 +2184,26 @@ void UAeyerjiInventoryComponent::ResolveEquippedItems()
 				SanitizedIndex,
 				Entry.Item ? *Entry.Item->UniqueId.ToString() : TEXT("None"));
 			Entry.SlotIndex = SanitizedIndex;
+		}
+
+		if (Entry.Item && !CanEquipItemInSlot(Entry.Item, Entry.Slot, Entry.SlotIndex))
+		{
+			AJ_LOG(this, TEXT("ResolveEquippedItems unequipping locked or incompatible item %s Slot=%d Index=%d OwnerLevel=%d"),
+				*Entry.Item->UniqueId.ToString(),
+				static_cast<int32>(Entry.Slot),
+				Entry.SlotIndex,
+				GetOwnerLevelForInventoryRules());
+
+			Entry.Item->EquippedSlot = ResolveEquipmentSlot(Entry.Item->Definition ? Entry.Item->Definition->DefaultSlot : Entry.Slot, Entry.Item->Definition.Get());
+			Entry.Item->EquippedSlotIndex = INDEX_NONE;
+			if (GetOwnerRole() == ROLE_Authority)
+			{
+				RemoveItemGameplayEffect(Entry.Item->UniqueId);
+				AutoPlaceItem(Entry.Item);
+			}
+			EquippedItems.RemoveAt(EntryIndex);
+			MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, EquippedItems, this);
+			continue;
 		}
 
 		if (Entry.Item)
@@ -1732,13 +2271,14 @@ void UAeyerjiInventoryComponent::RefreshClientItemsFromSnapshots()
 		UAeyerjiItemInstance* Item = FindItemById(Snapshot.ItemId);
 		if (!Item)
 		{
-			Item = NewObject<UAeyerjiItemInstance>(this);
+			const FName ItemName = MakeUniqueObjectName(this, UAeyerjiItemInstance::StaticClass(), TEXT("AeyerjiItemInstance"));
+			Item = NewObject<UAeyerjiItemInstance>(this, UAeyerjiItemInstance::StaticClass(), ItemName);
 			Items.Add(Item);
 		}
 
-		Item->Definition = Snapshot.Definition;
+		Item->Definition = ResolveSnapshotDefinition(Snapshot, this);
 		Item->Rarity = Snapshot.Rarity;
-		Item->ItemLevel = Snapshot.ItemLevel;
+		Item->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Snapshot.ItemLevel);
 		Item->Seed = Snapshot.Seed;
 		Item->UniqueId = Snapshot.ItemId;
 		Item->RolledAffixes = Snapshot.RolledAffixes;
@@ -1759,6 +2299,78 @@ void UAeyerjiInventoryComponent::RefreshClientItemsFromSnapshots()
 			Items.RemoveAt(Index);
 		}
 	}
+}
+
+void UAeyerjiInventoryComponent::TryBindOwnerLevelChange()
+{
+	UnbindOwnerLevelChange();
+
+	UAbilitySystemComponent* ASC = GetASC();
+	if (!ASC)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimer(LevelBindingRetryHandle, this, &UAeyerjiInventoryComponent::TryBindOwnerLevelChange, 0.25f, false);
+		}
+		return;
+	}
+
+	const FGameplayAttribute LevelAttribute = UAeyerjiAttributeSet::GetLevelAttribute();
+	LevelChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(LevelAttribute).AddUObject(this, &UAeyerjiInventoryComponent::HandleOwnerLevelChanged);
+	LevelBoundASC = ASC;
+	BroadcastEquipmentSlotUnlocksIfChanged(true);
+}
+
+void UAeyerjiInventoryComponent::UnbindOwnerLevelChange()
+{
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(LevelBindingRetryHandle);
+	}
+
+	if (LevelChangedHandle.IsValid())
+	{
+		if (UAbilitySystemComponent* ASC = LevelBoundASC.Get())
+		{
+			ASC->GetGameplayAttributeValueChangeDelegate(UAeyerjiAttributeSet::GetLevelAttribute()).Remove(LevelChangedHandle);
+		}
+		LevelChangedHandle.Reset();
+	}
+
+	LevelBoundASC.Reset();
+}
+
+void UAeyerjiInventoryComponent::HandleOwnerLevelChanged(const FOnAttributeChangeData& Data)
+{
+	(void)Data;
+
+	BroadcastEquipmentSlotUnlocksIfChanged();
+
+	if (GetOwnerRole() == ROLE_Authority)
+	{
+		ResolveEquippedItems();
+		RebuildItemSnapshots();
+	}
+}
+
+void UAeyerjiInventoryComponent::BroadcastEquipmentSlotUnlocksIfChanged(bool bForce)
+{
+	const int32 PlayerLevel = GetOwnerLevelForInventoryRules();
+	const int32 NormalLaneSlots = GetUnlockedEquipmentSlotCount(EEquipmentSlot::Assault);
+	const int32 CorruptionSlots = GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption);
+
+	if (!bForce
+		&& PlayerLevel == LastBroadcastPlayerLevel
+		&& NormalLaneSlots == LastBroadcastNormalLaneSlots
+		&& CorruptionSlots == LastBroadcastCorruptionSlots)
+	{
+		return;
+	}
+
+	LastBroadcastPlayerLevel = PlayerLevel;
+	LastBroadcastNormalLaneSlots = NormalLaneSlots;
+	LastBroadcastCorruptionSlots = CorruptionSlots;
+	OnEquipmentSlotUnlocksChanged.Broadcast(PlayerLevel, NormalLaneSlots, CorruptionSlots, CorruptionSlots > 0);
 }
 
 void UAeyerjiInventoryComponent::ClearPlacement(const FGuid& ItemId)
@@ -1782,20 +2394,29 @@ void UAeyerjiInventoryComponent::ClearPlacement(const FGuid& ItemId)
 	}
 }
 
-int32 UAeyerjiInventoryComponent::SanitizeSlotIndex(int32 SlotIndex) const
+int32 UAeyerjiInventoryComponent::SanitizeSlotIndex(EEquipmentSlot Slot, int32 SlotIndex) const
 {
 	if (SlotIndex == INDEX_NONE)
 	{
 		return INDEX_NONE;
 	}
 
-	const int32 MaxSlots = FMath::Max(1, SlotsPerEquipmentCategory);
+	const int32 MaxSlots = GetUnlockedEquipmentSlotCount(Slot);
+	if (MaxSlots <= 0)
+	{
+		return INDEX_NONE;
+	}
 	return FMath::Clamp(SlotIndex, 0, MaxSlots - 1);
 }
 
 int32 UAeyerjiInventoryComponent::FindFirstFreeSlotIndex(EEquipmentSlot Slot, const UAeyerjiItemInstance* IgnoredItem) const
 {
-	const int32 MaxSlots = FMath::Max(1, SlotsPerEquipmentCategory);
+	const int32 MaxSlots = GetUnlockedEquipmentSlotCount(Slot);
+	if (MaxSlots <= 0)
+	{
+		return INDEX_NONE;
+	}
+
 	TSet<int32> UsedIndices;
 
 	for (const FEquippedItemEntry& Entry : EquippedItems)
@@ -1883,7 +2504,11 @@ bool UAeyerjiInventoryComponent::TryPlaceItemAt(UAeyerjiItemInstance* Item, cons
 
 bool UAeyerjiInventoryComponent::UnequipSlotInternal(EEquipmentSlot Slot, int32 SlotIndex, const FIntPoint* PreferredTopLeft)
 {
-	SlotIndex = SanitizeSlotIndex(SlotIndex);
+	SlotIndex = SanitizeSlotIndex(Slot, SlotIndex);
+	if (SlotIndex == INDEX_NONE)
+	{
+		return false;
+	}
 	const int32 EntryIndex = EquippedItems.IndexOfByPredicate(
 		[Slot, SlotIndex](const FEquippedItemEntry& Entry)
 		{

@@ -1,9 +1,12 @@
 ﻿#include "Abilities/Blink/GABlink.h"
 #include "AbilitySystemComponent.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Components/CapsuleComponent.h"
 #include "DrawDebugHelpers.h"          // optional - visualise trace
 #include "NativeGameplayTags.h"
+#include "Abilities/AeyerjiAbilityTuning.h"
 #include "Attributes/AttributeSet_Ranges.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 
@@ -13,13 +16,31 @@
  * ─────────────────────────────────────────────────────────────── */
 namespace BlinkTags
 {
-	// These must exist in DefaultGameplayTags.ini (or your Primary Data Table)
-	const FGameplayTag AbilityTag  = FGameplayTag::RequestGameplayTag(TEXT("Ability.Blink"));
-	const FGameplayTag CooldownTag = FGameplayTag::RequestGameplayTag(TEXT("Cooldown.Blink"));
+	// Resolve tags lazily so packaged startup does not depend on file-scope initialization.
+	const FGameplayTag& AbilityTag()
+	{
+		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Blink"));
+		return Tag;
+	}
+
+	const FGameplayTag& CooldownTag()
+	{
+		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("Cooldown.Blink"));
+		return Tag;
+	}
 
 	/* GameplayCues (VFX/SFX) */
-	const FGameplayTag GC_BlinkOut = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Blink.Out"));
-	const FGameplayTag GC_BlinkIn  = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Blink.In"));
+	const FGameplayTag& GC_BlinkOut()
+	{
+		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Blink.Out"));
+		return Tag;
+	}
+
+	const FGameplayTag& GC_BlinkIn()
+	{
+		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("GameplayCue.Blink.In"));
+		return Tag;
+	}
 }
 /* ------------------------------------------------------------ */
 
@@ -28,14 +49,14 @@ UGABlink::UGABlink()
 	/* Asset (ability) tag – must pass a container to SetAssetTags in UE 5.6 :contentReference[oaicite:5]{index=5} */
 	{
 		FGameplayTagContainer AssetTags;
-		AssetTags.AddTag(BlinkTags::AbilityTag);
+		AssetTags.AddTag(BlinkTags::AbilityTag());
 		SetAssetTags(AssetTags);
 	}
 
 	/* Local helpers */
-	CooldownTags.AddTag(BlinkTags::CooldownTag);
-	BlinkOutCue = BlinkTags::GC_BlinkOut;
-	BlinkInCue  = BlinkTags::GC_BlinkIn;
+	CooldownTags.AddTag(BlinkTags::CooldownTag());
+	BlinkOutCue = BlinkTags::GC_BlinkOut();
+	BlinkInCue  = BlinkTags::GC_BlinkIn();
 
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 }
@@ -44,23 +65,9 @@ float UGABlink::GetMaxBlinkRange(const UAbilitySystemComponent* ASC) const
 {
 	float Range = MaxBlinkDistance;
 
-	if (BlinkConfig)
+	if (const FAeyerjiAbilityTableRow* Row = GetAbilityTuningRow(ASC))
 	{
-		const FRichCurve* Curve = BlinkConfig->Tunables.RangeByLevel.GetRichCurveConst();
-		if (Curve && Curve->GetNumKeys() > 0)
-		{
-			const int32 Level = (ASC && ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetLevelAttribute()))
-				? FMath::RoundToInt(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetLevelAttribute()))
-				: 1;
-			const float CurveRange = Curve->Eval(static_cast<float>(Level), BlinkConfig->Tunables.MaxRange);
-			Range = FMath::Max(Range, CurveRange);
-		}
-		else
-		{
-			Range = FMath::Max(Range, BlinkConfig->Tunables.MaxRange);
-		}
-
-		Range *= FMath::Max(0.0f, BlinkConfig->Tunables.RangeScalar);
+		Range = FMath::Max(Range, FMath::Max(Row->MaxRange, Row->PreviewRange));
 	}
 
 	if (ASC)

@@ -23,4 +23,9 @@ public:
 
 	// Evaluate the condition: returns true if target is in range.
 	virtual bool TestCondition(FStateTreeExecutionContext& Context) const override;
+
+private:
+	mutable double LastRangeDecisionLogTime = -1.0;
+	mutable bool bHasLoggedRangeDecision = false;
+	mutable bool bLastRangeDecision = false;
 };

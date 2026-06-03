@@ -3,26 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Abilities/GA_AeyerjiBase.h"
-#include "DA_AGSpinTornado.h"
+#include "Abilities/GA_AeyerjiTargetedEffectBase.h"
 #include "GA_AGSpinTornado.generated.h"
 
 UCLASS()
-class AEYERJI_API UGA_AGSpinTornado : public UGA_AeyerjiBase
+class AEYERJI_API UGA_AGSpinTornado : public UGA_AeyerjiTargetedEffectBase
 {
 	GENERATED_BODY()
 
 public:
 	UGA_AGSpinTornado();
-
-protected:
-	virtual void ActivateAbility(const FGameplayAbilitySpecHandle Handle,
-	                             const FGameplayAbilityActorInfo* ActorInfo,
-	                             const FGameplayAbilityActivationInfo ActivationInfo,
-	                             const FGameplayEventData* TriggerEventData) override;
-
-public:
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="SpinTornado|Config")
-	TObjectPtr<UDA_AGSpinTornado> SpinConfig = nullptr;
 };
-

@@ -3,7 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AbilitySystemInterface.h"
 #include "AbilitySystemComponent.h"
 #include "GameplayTagContainer.h"
@@ -12,7 +14,6 @@
 #include "AeyerjiCharacterMovementComponent.h"
 #include "AeyerjiCharacter.generated.h"
 
-struct FTimerHandle;
 class UAeyerjiPickupFXComponent;
 class UGameplayAbility;
 
@@ -22,7 +23,7 @@ struct AEYERJI_API FAeyerjiDeathStateOptions
 {
 	GENERATED_BODY();
 
-	/** Detach/destroy attachments so ragdolls are not constrained by gameplay props. */
+	/** Detach/destroy attached gameplay actors so the dead pawn stops driving carried props. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
 	bool bDetachAttachments = true;
 
@@ -34,28 +35,40 @@ struct AEYERJI_API FAeyerjiDeathStateOptions
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
 	bool bStopRegeneration = true;
 
-	/** Register the corpse in the shared cleanup list on the authority. */
+	/** Register the dead pawn in the shared cleanup list on the authority. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
 	bool bRegisterCorpseForCleanup = true;
 
-	/** After ragdoll settles, disable collision so the body no longer blocks movement. */
+	/** Stop character movement so the dead pawn can no longer navigate under gameplay control. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	bool bDisableMovement = true;
+
+	/** Stop controller-side AI logic such as StateTree, focus, and perception ticking. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	bool bDisableControllerLogic = true;
+
+	/** Disable pawn collision so the dead actor no longer blocks movement or targeting. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	bool bDisableCollision = true;
+
+	/** Deprecated: native death state no longer drives ragdoll collision. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death", meta=(DeprecatedProperty, DeprecationMessage="Native death state no longer drives ragdoll collision."))
 	bool bDisableRagdollCollision = false;
 
-	/** Delay before disabling ragdoll collision (allows the body to settle). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death", meta=(EditCondition="bDisableRagdollCollision", ClampMin="0.0"))
+	/** Deprecated: native death state no longer drives ragdoll collision. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death", meta=(DeprecatedProperty, DeprecationMessage="Native death state no longer drives ragdoll collision.", EditCondition="bDisableRagdollCollision", ClampMin="0.0"))
 	float RagdollCollisionDisableDelay = 0.35f;
 
-	/** Optional ragdoll impulse. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	/** Deprecated: native death state no longer applies ragdoll impulses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death", meta=(DeprecatedProperty, DeprecationMessage="Native death state no longer applies ragdoll impulses."))
 	FVector Impulse = FVector::ZeroVector;
 
-	/** Optional impulse application world location. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	/** Deprecated: native death state no longer applies ragdoll impulses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death", meta=(DeprecatedProperty, DeprecationMessage="Native death state no longer applies ragdoll impulses."))
 	FVector ImpulseWorldLocation = FVector::ZeroVector;
 
-	/** Optional bone to apply the impulse to. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death")
+	/** Deprecated: native death state no longer applies ragdoll impulses. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Death", meta=(DeprecatedProperty, DeprecationMessage="Native death state no longer applies ragdoll impulses."))
 	FName ImpulseBoneName = NAME_None;
 };
 
@@ -95,6 +108,7 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|Events")
 	void BP_OnDeath(AActor* Killer, float DamageTaken);
 
+	/** Applies the non-visual death shutdown for this pawn. */
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Death", meta = (AutoCreateRefTerm = "Options"))
 	void ApplyDeathState(FAeyerjiDeathStateOptions Options = FAeyerjiDeathStateOptions());
 
@@ -125,15 +139,27 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|FX")
 	UAeyerjiPickupFXComponent* GetPickupFXComponent() const { return PickupFXComponent; }
+
+	/** Returns true while this pawn has the replicated stunned gameplay tag. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Crowd Control")
+	bool IsStunned() const;
+
+	/** Cosmetic/UI hook fired when the stun tag count moves between active and inactive. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|Crowd Control")
+	void BP_OnStunStateChanged(bool bIsStunned);
 protected:
     /* ------------------ Components ------------------ */
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|GAS")
     TObjectPtr<UAbilitySystemComponent> AbilitySystemAeyerji;
 
-    /** Derives secondary stats from primaries and applies passive GE */
+    /** Default attribute set subobject used by GAS replication and baseline stats. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|GAS")
-    class UAeyerjiStatEngineComponent* StatEngine;
+    TObjectPtr<UAeyerjiAttributeSet> AttributeSetAeyerji;
+
+    /** Derives secondary stats from primaries and applies passive GE */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|GAS")
+	class UAeyerjiStatEngineComponent* StatEngine;
 
 	/** Plays loot pickup FX directly on the character. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|FX")
@@ -159,9 +185,18 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|GAS")
 	int32 CharacterLevel = 1;
 
+	/** Optional authored capsule radius in cm; 0 preserves the Blueprint/component default size. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Collision", meta = (ClampMin = "0.0", Units = "cm"))
+	float CollisionCapsuleRadius = 0.f;
+
+	/** Optional authored capsule half-height in cm; 0 preserves the Blueprint/component default size. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Collision", meta = (ClampMin = "0.0", Units = "cm"))
+	float CollisionCapsuleHalfHeight = 0.f;
+
 	/* ------------------ AActor / ACharacter ------------------ */
 
 	//virtual void PossessedBy(AController* NewController) override; // part of children as it should be
+	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -169,6 +204,13 @@ protected:
 
 	void AddStartupAbilities();
 	void BindDeathEvent();
+	void BindCrowdControlEvents();
+	void EnsurePrimaryAttributeSetRegistered();
+	void RefreshCollisionCapsuleSize();
+	void WarnOnScaledRootCapsule() const;
+
+	/** Native hook fired immediately on the server when HP reaches zero. */
+	virtual void OnDeath_Implementation();
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastApplyDeathState(FAeyerjiDeathStateOptions Options);
@@ -187,18 +229,26 @@ private:
 	void HandleOutOfHealth(AActor* Victim, AActor* Killer, float DamageTaken);
 
 	void ApplyDeathStateInternal(const FAeyerjiDeathStateOptions& Options);
+	void HandleStunTagChanged(const FGameplayTag CallbackTag, int32 NewCount);
+	void ApplyStunState();
+	void ClearStunState();
 	void RemoveFloatingWidgets();
 	void StopRegeneration();
-	void ScheduleRagdollCollisionDisable(float DelaySeconds);
-	void DisableRagdollCollisionNow();
+	void StopMovementAndInput();
+	void ShutdownControllerLogic();
+	void DisableDeathCollision();
 	void RegisterCorpseForCleanup();
 	void UnregisterCorpseFromCleanup();
 
-	// Prevent repeated ragdoll/apply logic when multiple systems notify death
+	// Prevent repeated death-shutdown logic when multiple systems notify death.
 	bool bHasAppliedDeathState = false;
 	bool bCorpseRegisteredForCleanup = false;
-
-	FTimerHandle RagdollCollisionDisableHandle;
+	bool bStunStateApplied = false;
+	bool bStunShouldRestoreMovement = false;
+	bool bStunIgnoredControllerInput = false;
+	TEnumAsByte<EMovementMode> PreStunMovementMode = MOVE_Walking;
+	uint8 PreStunCustomMovementMode = 0;
+	FDelegateHandle StunTagChangedHandle;
 
 	static TArray<TWeakObjectPtr<AAeyerjiCharacter>> CorpsesPendingCleanup;
 

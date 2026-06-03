@@ -86,6 +86,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Damage")
 	float DamageScalar = 1.f;
 
+	/** Gameplay Effects applied when a matching AilmentType tag is present on the source. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
+	TMap<FGameplayTag, TSoftClassPtr<UGameplayEffect>> AilmentEffectsByType;
+
+	/** SetByCaller tag for ailment damage-per-second magnitude. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
+	FGameplayTag AilmentDamagePerSecondSetByCallerTag;
+
+	/** SetByCaller tag for ailment duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
+	FGameplayTag AilmentDurationSetByCallerTag;
+
 	/** Minimum cooldown duration when computing SetByCaller duration. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cooldown")
 	float MinCooldownDuration = 0.05f;
@@ -152,6 +164,8 @@ private:
 	/* --- Damage helpers --- */
 	void ApplyDamageToTarget(const FGameplayAbilityTargetDataHandle& TargetData);
 	bool BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecHandle) const;
+	void ApplyAilmentsToTargetData(const FGameplayAbilityTargetDataHandle& TargetData);
+	bool ResolveAilmentMagnitudes(const FGameplayTag& AilmentTypeTag, float& OutAmount, float& OutDuration) const;
 
 	/* --- Utility --- */
 	FTransform ComputeMuzzleTransform(const FGameplayAbilityActorInfo* ActorInfo) const;

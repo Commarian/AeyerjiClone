@@ -6,18 +6,33 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/GridSlot.h"
 #include "Components/SizeBox.h"
+#include "Components/Widget.h"
 #include "GUI/W_ItemTile.h"
 #include "GUI/W_EquipmentSlot.h"
 #include "GUI/ItemTooltipData.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Logging/AeyerjiLog.h"
 #include "Player/PlayerParentNative.h"
+#include "Engine/Texture2D.h"
+#include "UObject/ConstructorHelpers.h"
+
+UW_InventoryBag_Native::UW_InventoryBag_Native(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+	static ConstructorHelpers::FObjectFinder<UTexture2D> DefaultEmptyIcon(
+		TEXT("/Game/GUI/GeneralImages/item_general_empty_icon.item_general_empty_icon"));
+	if (DefaultEmptyIcon.Succeeded())
+	{
+		EmptyInventorySlotIcon = DefaultEmptyIcon.Object;
+	}
+}
 
 void UW_InventoryBag_Native::NativeConstruct()
 {
 	Super::NativeConstruct();
 
 	DiscoverEquipmentSlots();
+	RefreshCorruptionLaneVisibility(false);
 
 	if (!ItemTileClass)
 	{
@@ -39,6 +54,7 @@ void UW_InventoryBag_Native::NativeDestruct()
 	{
 		Inventory->OnInventoryChanged.RemoveAll(this);
 		Inventory->OnInventoryItemStateChanged.RemoveAll(this);
+		Inventory->OnEquipmentSlotUnlocksChanged.RemoveAll(this);
 		BP_OnInventoryComponentUnbound(Inventory.Get());
 	}
 
@@ -56,8 +72,14 @@ void UW_InventoryBag_Native::BindToPlayer(APlayerParentNative* Player)
 {
 	if (!Player)
 	{
+		AJ_LOG(this, TEXT("[InventoryUI] BindToPlayer skipped: Player=None Widget=%s"), *GetNameSafe(this));
 		return;
 	}
+
+	AJ_LOG(this, TEXT("[InventoryUI] BindToPlayer Widget=%s OldPlayer=%s NewPlayer=%s"),
+		*GetNameSafe(this),
+		*GetNameSafe(BoundPlayer.Get()),
+		*GetNameSafe(Player));
 
 	if (BoundPlayer.IsValid())
 	{
@@ -250,29 +272,50 @@ void UW_InventoryBag_Native::AttachToInventory(UAeyerjiInventoryComponent* Inv)
 {
 	if (!Inv)
 	{
+		AJ_LOG(this, TEXT("[InventoryUI] AttachToInventory skipped: Inventory=None Widget=%s"), *GetNameSafe(this));
 		return;
 	}
 
 	if (Inventory.Get() == Inv)
 	{
+		AJ_LOG(this, TEXT("[InventoryUI] AttachToInventory already bound. Widget=%s Inventory=%s Items=%d Equipped=%d Grid=%d"),
+			*GetNameSafe(this),
+			*GetNameSafe(Inv),
+			Inv->Items.Num(),
+			Inv->EquippedItems.Num(),
+			Inv->GridPlacements.Num());
 		DispatchRebuild();
 		return;
 	}
 
 	if (Inventory.IsValid())
 	{
+		AJ_LOG(this, TEXT("[InventoryUI] Unbinding inventory widget. Widget=%s OldInventory=%s"),
+			*GetNameSafe(this),
+			*GetNameSafe(Inventory.Get()));
 		Inventory->OnInventoryChanged.RemoveAll(this);
 		Inventory->OnInventoryItemStateChanged.RemoveAll(this);
+		Inventory->OnEquipmentSlotUnlocksChanged.RemoveAll(this);
 		BP_OnInventoryComponentUnbound(Inventory.Get());
 		ClearEquipmentSlotBindings();
 	}
 
 	Inventory = Inv;
+	AJ_LOG(this, TEXT("[InventoryUI] Bound inventory widget. Widget=%s Inventory=%s Owner=%s Items=%d Equipped=%d Grid=%d"),
+		*GetNameSafe(this),
+		*GetNameSafe(Inv),
+		*GetNameSafe(Inv->GetOwner()),
+		Inv->Items.Num(),
+		Inv->EquippedItems.Num(),
+		Inv->GridPlacements.Num());
 	Inventory->OnInventoryChanged.AddDynamic(this, &UW_InventoryBag_Native::HandleInventoryGridChanged);
 	Inventory->OnInventoryItemStateChanged.AddDynamic(this, &UW_InventoryBag_Native::HandleInventoryItemStateChanged);
+	Inventory->OnEquipmentSlotUnlocksChanged.AddDynamic(this, &UW_InventoryBag_Native::HandleEquipmentSlotUnlocksChanged);
 
+	DiscoverEquipmentSlots();
 	RefreshRegisteredEquipmentSlots();
 	BP_OnInventoryComponentBound(Inv);
+	Inventory->RefreshEquipmentSlotUnlockState();
 	DispatchRebuild();
 }
 
@@ -291,6 +334,30 @@ void UW_InventoryBag_Native::HandleInventoryItemStateChanged(const FInventoryIte
 		EventData.Item ? *EventData.Item->UniqueId.ToString() : TEXT("None"));
 	BP_OnInventoryItemStateChanged(EventData);
 	RefreshRegisteredEquipmentSlots();
+}
+
+void UW_InventoryBag_Native::HandleEquipmentSlotUnlocksChanged(int32 PlayerLevel, int32 NormalLaneSlots, int32 CorruptionSlots, bool bCorruptionUnlocked)
+{
+	AJ_LOG(this, TEXT("HandleEquipmentSlotUnlocksChanged Level=%d NormalSlots=%d CorruptionSlots=%d CorruptionUnlocked=%s"),
+		PlayerLevel,
+		NormalLaneSlots,
+		CorruptionSlots,
+		bCorruptionUnlocked ? TEXT("true") : TEXT("false"));
+	RefreshCorruptionLaneVisibility(bCorruptionUnlocked);
+	DiscoverEquipmentSlots();
+	RefreshRegisteredEquipmentSlots();
+	BP_OnEquipmentSlotUnlocksChanged(PlayerLevel, NormalLaneSlots, CorruptionSlots, bCorruptionUnlocked);
+	InvalidateLayoutAndVolatility();
+}
+
+void UW_InventoryBag_Native::RefreshCorruptionLaneVisibility(bool bCorruptionUnlocked)
+{
+	if (!CorruptionBorder)
+	{
+		return;
+	}
+
+	CorruptionBorder->SetVisibility(bCorruptionUnlocked ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
 }
 
 void UW_InventoryBag_Native::RefreshRegisteredEquipmentSlots()
@@ -404,16 +471,19 @@ void UW_InventoryBag_Native::RebuildInventoryGrid_Implementation(const TArray<FI
 		else
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[InventoryBag] Missing item instance for %s"), *Placement.ItemId.ToString());
-		}
+			}
 
-		Tile->BindInventory(Inventory.Get());
+			Tile->BindInventory(Inventory.Get());
 
 		const int32 SpanX = FMath::Max(1, Placement.Size.X);
 		const int32 SpanY = FMath::Max(1, Placement.Size.Y);
 		const FVector2D TileSize(CellSize.X * SpanX, CellSize.Y * SpanY);
+		Tile->SetBorderMaterial(InventoryTileGenericBorderMaterial);
+		Tile->SetTileLayerPadding(InventoryTileIconPadding, InventoryTileBorderPadding);
 		Tile->SetTileVisualSize(TileSize);
 
-		USizeBox* TileContainer = NewObject<USizeBox>(this, NAME_None);
+		const FName TileContainerName = MakeUniqueObjectName(this, USizeBox::StaticClass(), TEXT("InventoryTileContainer"));
+		USizeBox* TileContainer = NewObject<USizeBox>(this, USizeBox::StaticClass(), TileContainerName);
 		if (TileContainer)
 		{
 			TileContainer->SetWidthOverride(TileSize.X);
@@ -476,9 +546,13 @@ void UW_InventoryBag_Native::RebuildInventoryGrid_Implementation(const TArray<FI
 					continue;
 				}
 
+				EmptyTile->SetEmptySlotIcon(EmptyInventorySlotIcon);
+				EmptyTile->SetBorderMaterial(InventoryTileGenericBorderMaterial);
+				EmptyTile->SetTileLayerPadding(InventoryTileIconPadding, InventoryTileBorderPadding);
 				EmptyTile->SetupEmptySlot();
 				EmptyTile->SetTileVisualSize(CellSize);
-				USizeBox* EmptyContainer = NewObject<USizeBox>(this, NAME_None);
+				const FName EmptyContainerName = MakeUniqueObjectName(this, USizeBox::StaticClass(), TEXT("InventoryEmptyTileContainer"));
+				USizeBox* EmptyContainer = NewObject<USizeBox>(this, USizeBox::StaticClass(), EmptyContainerName);
 				if (EmptyContainer)
 				{
 					EmptyContainer->SetWidthOverride(CellSize.X);

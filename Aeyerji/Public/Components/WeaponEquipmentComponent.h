@@ -69,7 +69,6 @@ protected:
 	FMovementSnapshot DefaultMovementState;
 
 	void ApplyAnimClass(TSubclassOf<UAnimInstance> AnimClass);
-	void ApplyMovementSettings(const FWeaponMovementSettings& Settings);
-	void SpawnOrUpdateWeaponActor(const UItemDefinition* Definition, const FWeaponEquipmentConfig& Config, FName SocketName);
+	void SpawnOrUpdateWeaponActor(const UItemDefinition* Definition, FName SocketName);
 	void DestroyWeaponActor();
 };

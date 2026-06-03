@@ -24,6 +24,10 @@ enum class EAeyerjiAddItemResult : uint8
 	Bagged,
 	Failed_NoInventory,
 	Failed_NoItem,
+	Failed_MissingDefinition,
+	Failed_LevelTooHigh,
+	Failed_EquipRejected,
+	Failed_BagPlacementFailed,
 	Failed_BagFull
 };
 

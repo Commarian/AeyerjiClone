@@ -2,6 +2,9 @@
 
 #include "Inventory/AeyerjiInventoryBPFL.h"
 
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemInterface.h"
+#include "Attributes/AeyerjiAttributeSet.h"
 #include "Engine/World.h"
 #include "Inventory/AeyerjiLootPickup.h"
 #include "Items/InventoryComponent.h"
@@ -11,7 +14,9 @@
 #include "CharacterStatsLibrary.h"
 #include "EngineUtils.h"
 #include "Logging/AeyerjiLog.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "GameFramework/GameStateBase.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerState.h"
 #include "Systems/LootService.h"
 #include "CollisionQueryParams.h"
@@ -20,6 +25,16 @@
 
 namespace
 {
+	FString AddItemResultToString(const EAeyerjiAddItemResult Result)
+	{
+		if (const UEnum* ResultEnum = StaticEnum<EAeyerjiAddItemResult>())
+		{
+			return ResultEnum->GetNameStringByValue(static_cast<int64>(Result));
+		}
+
+		return FString::Printf(TEXT("Value_%d"), static_cast<int32>(Result));
+	}
+
 	TSubclassOf<AAeyerjiLootPickup> ResolveLootPickupClass(UObject* WorldContextObject)
 	{
 		if (const UAeyerjiInventoryComponent* Inventory = Cast<UAeyerjiInventoryComponent>(WorldContextObject))
@@ -118,6 +133,64 @@ namespace
 		}
 	}
 
+	int32 ResolveActorGameplayLevel(const AActor* Actor)
+	{
+		if (!Actor)
+		{
+			return 0;
+		}
+
+		auto ReadLevelFromASC = [](const UAbilitySystemComponent* ASC) -> int32
+		{
+			if (!ASC)
+			{
+				return 0;
+			}
+
+			if (const UAeyerjiAttributeSet* Attr = ASC->GetSet<UAeyerjiAttributeSet>())
+			{
+				return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
+			}
+
+			return 0;
+		};
+
+		if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Actor))
+		{
+			if (const int32 Level = ReadLevelFromASC(ASI->GetAbilitySystemComponent()); Level > 0)
+			{
+				return Level;
+			}
+		}
+
+		if (const APawn* Pawn = Cast<APawn>(Actor))
+		{
+			if (const APlayerState* PS = Pawn->GetPlayerState())
+			{
+				if (const IAbilitySystemInterface* PSASI = Cast<IAbilitySystemInterface>(PS))
+				{
+					if (const int32 Level = ReadLevelFromASC(PSASI->GetAbilitySystemComponent()); Level > 0)
+					{
+						return Level;
+					}
+				}
+			}
+		}
+
+		return 0;
+	}
+
+	int32 ResolveDirectSpawnItemLevel(int32 RequestedItemLevel, AActor* RecipientOrInstigator)
+	{
+		const int32 ActorLevel = ResolveActorGameplayLevel(RecipientOrInstigator);
+		if (RequestedItemLevel <= 1 && ActorLevel > 1)
+		{
+			return ActorLevel;
+		}
+
+		return UAeyerjiDifficultySettings::ClampGameplayLevel(RequestedItemLevel);
+	}
+
 	int32 DeriveSeedForRecipient(const FLootDropResult& Result, int32 SeedOverride, int32 RecipientIndex, bool bUniquePerPlayer)
 	{
 		const int32 BaseSeed = (Result.Seed != 0) ? Result.Seed : (SeedOverride != 0 ? SeedOverride : FMath::Rand());
@@ -193,34 +266,78 @@ EAeyerjiAddItemResult UAeyerjiInventoryBPFL::EquipFirstThenBag(
 {
 	if (!Inventory)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] EquipFirstThenBag failed: null inventory Item=%s"),
+			*GetNameSafe(ItemInstance));
 		return EAeyerjiAddItemResult::Failed_NoInventory;
 	}
 
 	if (!ItemInstance)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] EquipFirstThenBag failed: null item Inventory=%s"),
+			*GetNameSafe(Inventory));
 		return EAeyerjiAddItemResult::Failed_NoItem;
 	}
 
+	if (!ItemInstance->Definition)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] EquipFirstThenBag failed: item %s has no definition UniqueId=%s"),
+			*GetNameSafe(ItemInstance),
+			ItemInstance->UniqueId.IsValid() ? *ItemInstance->UniqueId.ToString() : TEXT("Invalid"));
+		return EAeyerjiAddItemResult::Failed_MissingDefinition;
+	}
+
 	const bool bAlreadyOwned = Inventory->FindItemById(ItemInstance->UniqueId) != nullptr;
+	const int32 OwnerLevel = Inventory->GetOwnerLevelForInventoryRules();
+	ItemInstance->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemInstance->ItemLevel);
+	const int32 ItemLevel = ItemInstance->ItemLevel;
+
+	UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] EquipFirstThenBag start Inventory=%s Owner=%s Item=%s UniqueId=%s Def=%s ItemLevel=%d OwnerLevel=%d AlreadyOwned=%d Grid=(%d,%d)"),
+		*GetNameSafe(Inventory),
+		*GetNameSafe(Inventory->GetOwner()),
+		*GetNameSafe(ItemInstance),
+		ItemInstance->UniqueId.IsValid() ? *ItemInstance->UniqueId.ToString() : TEXT("Invalid"),
+		*GetNameSafe(ItemInstance->Definition.Get()),
+		ItemLevel,
+		OwnerLevel,
+		bAlreadyOwned ? 1 : 0,
+		Inventory->GetGridSize().X,
+		Inventory->GetGridSize().Y);
 
 	// Ensure the item lives inside the inventory component.
 	if (!Inventory->AddItemInstance(ItemInstance, true))
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] EquipFirstThenBag failed: AddItemInstance rejected item %s"),
+			*GetNameSafe(ItemInstance));
 		return EAeyerjiAddItemResult::Failed_BagFull;
 	}
 
-	const EEquipmentSlot PreferredSlot = ItemInstance->Definition
-		? ItemInstance->Definition->DefaultSlot
-		: ItemInstance->EquippedSlot;
+	const EEquipmentSlot PreferredSlot = ItemInstance->Definition->DefaultSlot;
 
 	Inventory->Server_EquipItem(ItemInstance->UniqueId, PreferredSlot, INDEX_NONE);
 	if (ItemInstance->EquippedSlotIndex != INDEX_NONE)
 	{
+		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] EquipFirstThenBag result=%s Item=%s Slot=%d Index=%d"),
+			*AddItemResultToString(EAeyerjiAddItemResult::Equipped),
+			*ItemInstance->UniqueId.ToString(),
+			static_cast<int32>(ItemInstance->EquippedSlot),
+			ItemInstance->EquippedSlotIndex);
 		return EAeyerjiAddItemResult::Equipped;
 	}
 
+	UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] EquipFirstThenBag equip rejected for %s PreferredSlot=%d ItemLevel=%d OwnerLevel=%d; trying bag."),
+		*ItemInstance->UniqueId.ToString(),
+		static_cast<int32>(PreferredSlot),
+		ItemLevel,
+		OwnerLevel);
+
 	if (Inventory->AutoPlaceItem(ItemInstance))
 	{
+		FInventoryItemGridData Placement;
+		const bool bHasPlacement = Inventory->GetPlacementForItem(ItemInstance->UniqueId, Placement);
+		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] EquipFirstThenBag result=%s Item=%s Placement=%s"),
+			*AddItemResultToString(EAeyerjiAddItemResult::Bagged),
+			*ItemInstance->UniqueId.ToString(),
+			bHasPlacement ? *FString::Printf(TEXT("(%d,%d)"), Placement.TopLeft.X, Placement.TopLeft.Y) : TEXT("None"));
 		return EAeyerjiAddItemResult::Bagged;
 	}
 
@@ -228,7 +345,18 @@ EAeyerjiAddItemResult UAeyerjiInventoryBPFL::EquipFirstThenBag(
 	{
 		Inventory->Server_RemoveItemById(ItemInstance->UniqueId);
 	}
-	return EAeyerjiAddItemResult::Failed_BagFull;
+
+	const EAeyerjiAddItemResult Failure = ItemLevel > OwnerLevel
+		? EAeyerjiAddItemResult::Failed_LevelTooHigh
+		: EAeyerjiAddItemResult::Failed_BagPlacementFailed;
+	UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] EquipFirstThenBag result=%s Item=%s ItemLevel=%d OwnerLevel=%d Grid=(%d,%d)"),
+		*AddItemResultToString(Failure),
+		*GetNameSafe(ItemInstance),
+		ItemLevel,
+		OwnerLevel,
+		Inventory->GetGridSize().X,
+		Inventory->GetGridSize().Y);
+	return Failure;
 }
 
 AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootByDefinition(
@@ -274,6 +402,19 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootByDefinition(
 	AAeyerjiLootPickup* LastSpawned = nullptr;
 	for (int32 Idx = 0; Idx < Recipients.Num(); ++Idx)
 	{
+		AActor* Recipient = Recipients[Idx] ? Recipients[Idx] : Instigator;
+		const int32 ResolvedItemLevel = ResolveDirectSpawnItemLevel(ItemLevel, Recipient);
+		if (ResolvedItemLevel < Definition->GetEffectiveRequiredLevel())
+		{
+			AJ_LOG(WorldContextObject, TEXT("SpawnLootByDefinition rejected - Def=%s RequestedLevel=%d ResolvedLevel=%d Recipient=%s RequiredLevel=%d"),
+				*GetNameSafe(Definition),
+				ItemLevel,
+				ResolvedItemLevel,
+				*GetNameSafe(Recipient),
+				Definition->GetEffectiveRequiredLevel());
+			continue;
+		}
+
 		const int32 SeedToUse = bUniquePerPlayer ? (BaseSeed + Idx + 1) : BaseSeed;
 
 		const TSubclassOf<AAeyerjiLootPickup> LootPickupClass = ResolveLootPickupClass(WorldContextObject);
@@ -281,16 +422,18 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootByDefinition(
 		AAeyerjiLootPickup* Spawned = AAeyerjiLootPickup::SpawnFromDefinition(
 			*World,
 			Definition,
-			ItemLevel,
+			ResolvedItemLevel,
 			Rarity,
 			FTransform(Rotation, SnappedLocation),
 			SeedToUse,
 			LootPickupClass);
 
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootByDefinition %s Mode=%d Recipient=%s Seed=%d Class=%s Location=%s Result=%s"),
+		AJ_LOG(WorldContextObject, TEXT("SpawnLootByDefinition %s Mode=%d Recipient=%s RequestedLevel=%d ResolvedLevel=%d Seed=%d Class=%s Location=%s Result=%s"),
 			*GetNameSafe(WorldContextObject),
 			static_cast<int32>(DropMode),
-			*GetNameSafe(Recipients[Idx]),
+			*GetNameSafe(Recipient),
+			ItemLevel,
+			ResolvedItemLevel,
 			SeedToUse,
 			*GetNameSafe(LootPickupClass.Get()),
 			*SnappedLocation.ToString(),
@@ -349,6 +492,7 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootByInstance(
 			continue;
 		}
 
+		Copy->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Copy->ItemLevel);
 		Copy->Seed = bUniquePerPlayer ? (BaseSeed + Idx + 1) : BaseSeed;
 
 		LastSpawned = SpawnPickupWithInstance(WorldContextObject, World, Copy, FTransform(Rotation, SnappedLocation));
@@ -390,18 +534,28 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootFromResult(
 	}
 
 	UItemDefinition* Definition = Result.ItemDefinition;
-	if (!Definition && Result.ItemId != NAME_None)
+	if (!Definition && Result.ItemDefinitionKey != NAME_None)
 	{
-		Definition = UCharacterStatsLibrary::ResolveItemDefinitionById(WorldContextObject, Result.ItemId);
+		Definition = UCharacterStatsLibrary::ResolveItemDefinitionByKey(WorldContextObject, Result.ItemDefinitionKey);
 	}
 
 	if (!Definition)
 	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult aborted - missing item definition (ItemId=%s)"), *Result.ItemId.ToString());
+		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult aborted - missing item definition (DefinitionKey=%s)"), *Result.ItemDefinitionKey.ToString());
 		return nullptr;
 	}
 
-	const int32 ItemLevel = FMath::Max(1, Result.ItemLevel);
+	const int32 ItemLevel = ResolveDirectSpawnItemLevel(Result.ItemLevel, Instigator);
+	if (ItemLevel < Definition->GetEffectiveRequiredLevel())
+	{
+		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult rejected - Def=%s RequestedLevel=%d ResolvedLevel=%d Instigator=%s RequiredLevel=%d"),
+			*GetNameSafe(Definition),
+			Result.ItemLevel,
+			ItemLevel,
+			*GetNameSafe(Instigator),
+			Definition->GetEffectiveRequiredLevel());
+		return nullptr;
+	}
 	const EItemRarity Rarity = Result.Rarity;
 	const bool bUniquePerPlayer = (DropMode == EItemDropDistributionMode::DropUniqueItemForEveryPlayer);
 	const int32 BaseSeed = (Result.Seed != 0) ? Result.Seed : (SeedOverride != 0 ? SeedOverride : FMath::Rand());
@@ -423,7 +577,7 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootFromResult(
 		UAeyerjiItemInstance* Instance = UItemGenerator::RollItemInstance(WorldContextObject, Definition, ItemLevel, Rarity, Seed, Definition->DefaultSlot);
 		if (!Instance)
 		{
-			AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult failed to roll item instance for %s (ItemId=%s)"), *GetNameSafe(Definition), *Result.ItemId.ToString());
+			AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult failed to roll item instance for %s (DefinitionKey=%s)"), *GetNameSafe(Definition), *Result.ItemDefinitionKey.ToString());
 			continue;
 		}
 
@@ -472,6 +626,11 @@ void UAeyerjiInventoryBPFL::SpawnMultiDropFromContext(
 		return;
 	}
 
+	if (!BaseContext.PlayerActor.IsValid() && Instigator)
+	{
+		BaseContext.PlayerActor = Instigator;
+	}
+
 	TArray<FLootDropResult> Results;
 	if (!LootService->RollMultiDrop(BaseContext, Config, Results))
 	{
@@ -512,6 +671,11 @@ void UAeyerjiInventoryBPFL::SpawnDistributedLootFromContext(
 	{
 		AJ_LOG(WorldContextObject, TEXT("SpawnDistributedLootFromContext aborted - LootService missing"));
 		return;
+	}
+
+	if (!BaseContext.PlayerActor.IsValid() && Instigator)
+	{
+		BaseContext.PlayerActor = Instigator;
 	}
 
 	// If mode is unique per player, roll individually per recipient. Otherwise just spawn via the normal path.

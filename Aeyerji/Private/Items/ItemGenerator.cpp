@@ -5,6 +5,7 @@
 #include "Items/ItemAffixDefinition.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/LootService.h"
 #include "Systems/LootTable.h"
 #include "UObject/Package.h"
@@ -21,6 +22,8 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	{
 		return nullptr;
 	}
+
+	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
 
 	int32 MinAffixes = 0;
 	int32 MaxAffixes = 0;
@@ -61,19 +64,65 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	}
 
 	const EEquipmentSlot FinalSlot =
-		(SlotOverride == EEquipmentSlot::Offense && Definition->DefaultSlot != EEquipmentSlot::Offense)
+		(SlotOverride == EEquipmentSlot::Assault && Definition->DefaultSlot != EEquipmentSlot::Assault)
 			? Definition->DefaultSlot
 			: SlotOverride;
 
 	TArray<UItemAffixDefinition*> ChosenAffixes;
 	TArray<const FAffixTier*> ChosenTiers;
+	FGameplayTagContainer ChosenAffixTags;
+	FGameplayTagContainer ChosenExclusionTags;
+	TSet<const UItemAffixDefinition*> ChosenAffixDefinitions;
+
+	for (UItemAffixDefinition* GuaranteedAffix : Definition->GuaranteedAffixes)
+	{
+		if (!GuaranteedAffix)
+		{
+			continue;
+		}
+
+		if (!GuaranteedAffix->IsAllowedFor(Definition->ItemCategory, FinalSlot))
+		{
+			continue;
+		}
+
+		const FAffixTier* Tier = GuaranteedAffix->RollTier(RNG, ClampedItemLevel);
+		if (!Tier)
+		{
+			continue;
+		}
+
+		ChosenAffixes.Add(GuaranteedAffix);
+		ChosenTiers.Add(Tier);
+		ChosenAffixTags.AppendTags(GuaranteedAffix->AffixTags);
+		ChosenExclusionTags.AppendTags(GuaranteedAffix->ExclusionTags);
+		ChosenAffixDefinitions.Add(GuaranteedAffix);
+	}
+
 	if (AffixCount > 0)
 	{
-		ChooseAffixes(Definition, ItemLevel, FinalSlot, AffixCount, RNG, ChosenAffixes, ChosenTiers);
+		TArray<UItemAffixDefinition*> OptionalAffixes;
+		TArray<const FAffixTier*> OptionalTiers;
+		ChooseAffixes(
+			Definition,
+			Definition->OptionalAffixPool,
+			ClampedItemLevel,
+			FinalSlot,
+			AffixCount,
+			RNG,
+			ChosenAffixTags,
+			ChosenExclusionTags,
+			ChosenAffixDefinitions,
+			OptionalAffixes,
+			OptionalTiers);
+
+		ChosenAffixes.Append(OptionalAffixes);
+		ChosenTiers.Append(OptionalTiers);
 	}
 
 	UObject* Outer = WorldContext ? WorldContext : GetTransientPackage();
-	UAeyerjiItemInstance* NewInstance = NewObject<UAeyerjiItemInstance>(Outer);
+	const FName InstanceName = MakeUniqueObjectName(Outer, UAeyerjiItemInstance::StaticClass(), TEXT("AeyerjiItemInstance"));
+	UAeyerjiItemInstance* NewInstance = NewObject<UAeyerjiItemInstance>(Outer, UAeyerjiItemInstance::StaticClass(), InstanceName);
 	if (!NewInstance)
 	{
 		return nullptr;
@@ -82,7 +131,7 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	NewInstance->InitializeFromDefinition(
 		Definition,
 		Rarity,
-		ItemLevel,
+		ClampedItemLevel,
 		EffectiveSeed,
 		FinalSlot,
 		ChosenAffixes,
@@ -99,11 +148,15 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 }
 
 void UItemGenerator::ChooseAffixes(
-	UItemDefinition* Definition,
+	const UItemDefinition* Definition,
+	const TArray<TObjectPtr<UItemAffixDefinition>>& SourcePool,
 	int32 ItemLevel,
 	EEquipmentSlot Slot,
 	int32 AffixCount,
 	FRandomStream& RNG,
+	FGameplayTagContainer& InOutChosenAffixTags,
+	FGameplayTagContainer& InOutChosenExclusionTags,
+	TSet<const UItemAffixDefinition*>& InOutChosenAffixDefinitions,
 	TArray<UItemAffixDefinition*>& OutAffixes,
 	TArray<const FAffixTier*>& OutTiers)
 {
@@ -115,10 +168,17 @@ void UItemGenerator::ChooseAffixes(
 		return;
 	}
 
+	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
+
 	TArray<UItemAffixDefinition*> Pool;
-	for (UItemAffixDefinition* Candidate : Definition->AffixPool)
+	for (UItemAffixDefinition* Candidate : SourcePool)
 	{
 		if (!Candidate)
+		{
+			continue;
+		}
+
+		if (InOutChosenAffixDefinitions.Contains(Candidate))
 		{
 			continue;
 		}
@@ -128,7 +188,7 @@ void UItemGenerator::ChooseAffixes(
 			continue;
 		}
 
-		if (Candidate->GetTotalWeight(ItemLevel) <= 0)
+		if (Candidate->GetTotalWeight(ClampedItemLevel) <= 0)
 		{
 			continue;
 		}
@@ -136,9 +196,7 @@ void UItemGenerator::ChooseAffixes(
 		Pool.Add(Candidate);
 	}
 
-	FGameplayTagContainer ChosenAffixTags;
-	FGameplayTagContainer ChosenExclusionTags;
-	const auto IsCompatibleWithChosen = [&ChosenAffixTags, &ChosenExclusionTags](const UItemAffixDefinition* Candidate)
+	const auto IsCompatibleWithChosen = [&InOutChosenAffixTags, &InOutChosenExclusionTags](const UItemAffixDefinition* Candidate)
 	{
 		if (!Candidate)
 		{
@@ -146,13 +204,13 @@ void UItemGenerator::ChooseAffixes(
 		}
 
 		// Candidate forbids tags that already exist on the item.
-		if (!Candidate->ExclusionTags.IsEmpty() && Candidate->ExclusionTags.HasAny(ChosenAffixTags))
+		if (!Candidate->ExclusionTags.IsEmpty() && Candidate->ExclusionTags.HasAny(InOutChosenAffixTags))
 		{
 			return false;
 		}
 
 		// Already-chosen affixes forbid tags on the candidate.
-		if (!ChosenExclusionTags.IsEmpty() && !Candidate->AffixTags.IsEmpty() && ChosenExclusionTags.HasAny(Candidate->AffixTags))
+		if (!InOutChosenExclusionTags.IsEmpty() && !Candidate->AffixTags.IsEmpty() && InOutChosenExclusionTags.HasAny(Candidate->AffixTags))
 		{
 			return false;
 		}
@@ -175,14 +233,15 @@ void UItemGenerator::ChooseAffixes(
 		const int32 PickIdx = RNG.RandRange(0, Pool.Num() - 1);
 		UItemAffixDefinition* Pick = Pool[PickIdx];
 
-		const FAffixTier* Tier = Pick ? Pick->RollTier(RNG, ItemLevel) : nullptr;
+		const FAffixTier* Tier = Pick ? Pick->RollTier(RNG, ClampedItemLevel) : nullptr;
 		if (Pick && Tier)
 		{
 			OutAffixes.Add(Pick);
 			OutTiers.Add(Tier);
 
-			ChosenAffixTags.AppendTags(Pick->AffixTags);
-			ChosenExclusionTags.AppendTags(Pick->ExclusionTags);
+			InOutChosenAffixTags.AppendTags(Pick->AffixTags);
+			InOutChosenExclusionTags.AppendTags(Pick->ExclusionTags);
+			InOutChosenAffixDefinitions.Add(Pick);
 		}
 
 		Pool.RemoveAtSwap(PickIdx);

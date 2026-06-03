@@ -59,7 +59,7 @@ public:
 	TArray<FItemGrantedAbility> GrantedAbilities;
 
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Item")
-	EEquipmentSlot EquippedSlot = EEquipmentSlot::Offense;
+	EEquipmentSlot EquippedSlot = EEquipmentSlot::Assault;
 
 	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category = "Item")
 	int32 EquippedSlotIndex = INDEX_NONE;

@@ -15,7 +15,9 @@
 #include "Components/WidgetComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "NiagaraComponent.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "NiagaraSystem.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Materials/MaterialInterface.h"
 #include "Components/OutlineHighlightComponent.h"
 #include "Engine/ActorChannel.h"
@@ -25,6 +27,7 @@
 #include "Items/InventoryComponent.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemGenerator.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/LootTable.h"
 #include "Items/ItemInstance.h"
 #include "Net/Core/PushModel/PushModel.h"
@@ -170,6 +173,8 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromInstance(
 		return nullptr;
 	}
 
+	InItemInstance->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(InItemInstance->ItemLevel);
+
 	Pickup->ItemInstance = InItemInstance;
 	Pickup->ItemDefinition = InItemInstance->Definition;
 	Pickup->ItemLevel = InItemInstance->ItemLevel;
@@ -195,6 +200,16 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromDefinition(
 		return nullptr;
 	}
 
+	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
+	if (ClampedItemLevel < Definition->GetEffectiveRequiredLevel())
+	{
+		AJ_LOG(&World, TEXT("SpawnFromDefinition rejected - Def=%s ItemLevel=%d RequiredLevel=%d"),
+			*GetNameSafe(Definition),
+			ClampedItemLevel,
+			Definition->GetEffectiveRequiredLevel());
+		return nullptr;
+	}
+
 	UClass* ClassToSpawn = PickupClass
 		? *PickupClass
 		: AAeyerjiLootPickup::StaticClass();
@@ -215,7 +230,7 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromDefinition(
 	}
 
 	Pickup->ItemDefinition = Definition;
-	Pickup->ItemLevel = ItemLevel;
+	Pickup->ItemLevel = ClampedItemLevel;
 	Pickup->ItemRarity = Rarity;
 	Pickup->SeedOverride = SeedOverride;
 	Pickup->ApplyDefinitionMesh();
@@ -223,7 +238,7 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromDefinition(
 	UAeyerjiItemInstance* Rolled = UItemGenerator::RollItemInstance(
 		Pickup,
 		Definition,
-		ItemLevel,
+		ClampedItemLevel,
 		Rarity,
 		SeedOverride,
 		Definition->DefaultSlot);
@@ -273,20 +288,33 @@ void AAeyerjiLootPickup::ExecutePickup(AAeyerjiPlayerController* Controller)
 {
 	if (!HasAuthority() || !Controller || !ItemInstance)
 	{
-		AJ_LOG(this, TEXT("ExecutePickup aborted - Authority=%d Controller=%s Item=%s"),
+		AJ_LOG(this, TEXT("[InventoryPickup] ExecutePickup aborted Authority=%d Controller=%s Item=%s Definition=%s"),
 			HasAuthority(),
 			*GetNameSafe(Controller),
-			ItemInstance ? *ItemInstance->GetName() : TEXT("NULL"));
+			ItemInstance ? *ItemInstance->GetName() : TEXT("NULL"),
+			ItemInstance ? *GetNameSafe(ItemInstance->Definition.Get()) : TEXT("NULL"));
 		return;
 	}
 
 	if (!CanPawnLoot(Controller))
 	{
-		AJ_LOG(this, TEXT("ExecutePickup denied - pawn not eligible (%s)"), *GetNameSafe(Controller));
+		AJ_LOG(this, TEXT("[InventoryPickup] ExecutePickup denied: pawn not eligible Controller=%s Pickup=%s"),
+			*GetNameSafe(Controller),
+			*GetNameSafe(this));
 		return;
 	}
 
 	UAeyerjiItemInstance* GrantedItem = ItemInstance;
+	AJ_LOG(this, TEXT("[InventoryPickup] ExecutePickup start Pickup=%s Controller=%s Pawn=%s Item=%s Def=%s Rarity=%d Level=%d UniqueId=%s"),
+		*GetNameSafe(this),
+		*GetNameSafe(Controller),
+		*GetNameSafe(Controller->GetPawn()),
+		*GetNameSafe(GrantedItem),
+		*GetNameSafe(GrantedItem->Definition.Get()),
+		static_cast<int32>(GrantedItem->Rarity),
+		GrantedItem->ItemLevel,
+		GrantedItem->UniqueId.IsValid() ? *GrantedItem->UniqueId.ToString() : TEXT("Invalid"));
+
 	const FAeyerjiPickupVisualConfig VisualConfig = ResolvePickupVisualConfig(GrantedItem);
 
 	ItemInstance = nullptr;
@@ -294,7 +322,10 @@ void AAeyerjiLootPickup::ExecutePickup(AAeyerjiPlayerController* Controller)
 
 	if (UAeyerjiItemInstance* GrantedInventoryItem = GiveLootToInventory(Controller, GrantedItem))
 	{
-		AJ_LOG(this, TEXT("ExecutePickup success - granted to %s"), *GetNameSafe(Controller));
+		AJ_LOG(this, TEXT("[InventoryPickup] ExecutePickup success Controller=%s GrantedItem=%s UniqueId=%s"),
+			*GetNameSafe(Controller),
+			*GetNameSafe(GrantedInventoryItem),
+			GrantedInventoryItem->UniqueId.IsValid() ? *GrantedInventoryItem->UniqueId.ToString() : TEXT("Invalid"));
 		PickupIntents.Empty();
 		BroadcastPickupEvent(Controller, GrantedInventoryItem);
 		TriggerPickupFX(Controller, VisualConfig);
@@ -311,7 +342,9 @@ void AAeyerjiLootPickup::ExecutePickup(AAeyerjiPlayerController* Controller)
 		// Restore the item so the pickup remains usable.
 		ItemInstance = GrantedItem;
 		MARK_PROPERTY_DIRTY_FROM_NAME(AAeyerjiLootPickup, ItemInstance, this);
-		AJ_LOG(this, TEXT("ExecutePickup failed - inventory rejected for %s"), *GetNameSafe(Controller));
+		AJ_LOG(this, TEXT("[InventoryPickup] ExecutePickup failed: inventory rejected Controller=%s Item=%s; pickup kept alive"),
+			*GetNameSafe(Controller),
+			*GetNameSafe(GrantedItem));
 	}
 }
 
@@ -436,6 +469,17 @@ void AAeyerjiLootPickup::BeginPlay()
 
 	if (HasAuthority() && !ItemInstance && ItemDefinition)
 	{
+		ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
+		if (ItemLevel < ItemDefinition->GetEffectiveRequiredLevel())
+		{
+			UE_LOG(LogAeyerji, Warning, TEXT("AeyerjiLootPickup BeginPlay skipped rolling locked item - Def=%s Level=%d Required=%d"),
+				*GetNameSafe(ItemDefinition),
+				ItemLevel,
+				ItemDefinition->GetEffectiveRequiredLevel());
+			Destroy();
+			return;
+		}
+
 		UE_LOG(LogAeyerji, Display, TEXT("AeyerjiLootPickup BeginPlay rolling item - Def=%s Level=%d Rarity=%d"),
 			*GetNameSafe(ItemDefinition),
 			ItemLevel,
@@ -833,7 +877,8 @@ bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
 	// Apply a high-friction runtime physical material to encourage fun rolling without sliding away forever.
 	if (!RuntimePhysicsMaterial)
 	{
-		RuntimePhysicsMaterial = NewObject<UPhysicalMaterial>(this);
+		const FName PhysicsMaterialName = MakeUniqueObjectName(this, UPhysicalMaterial::StaticClass(), TEXT("RuntimePhysicsMaterial"));
+		RuntimePhysicsMaterial = NewObject<UPhysicalMaterial>(this, UPhysicalMaterial::StaticClass(), PhysicsMaterialName);
 		RuntimePhysicsMaterial->Friction = PhysicsFriction;
 		RuntimePhysicsMaterial->Restitution = PhysicsRestitution;
 		RuntimePhysicsMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
@@ -1362,7 +1407,7 @@ UAeyerjiItemInstance* AAeyerjiLootPickup::GiveLootToInventory(AAeyerjiPlayerCont
 {
 	if (!Controller || !GrantedItem)
 	{
-		AJ_LOG(this, TEXT("GiveLootToInventory failed - Controller=%s Item=%s"),
+		AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory failed: Controller=%s Item=%s"),
 			*GetNameSafe(Controller),
 			GrantedItem ? *GrantedItem->GetName() : TEXT("NULL"));
 		return nullptr;
@@ -1371,29 +1416,38 @@ UAeyerjiItemInstance* AAeyerjiLootPickup::GiveLootToInventory(AAeyerjiPlayerCont
 	APawn* Pawn = Controller->GetPawn();
 	if (!Pawn)
 	{
-		AJ_LOG(this, TEXT("GiveLootToInventory failed - %s has no pawn"), *GetNameSafe(Controller));
+		AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory failed: %s has no pawn"), *GetNameSafe(Controller));
 		return nullptr;
 	}
 
 	UAeyerjiInventoryComponent* Inventory = Pawn->FindComponentByClass<UAeyerjiInventoryComponent>();
 	if (!Inventory)
 	{
-		AJ_LOG(this, TEXT("GiveLootToInventory failed - pawn %s missing inventory component"), *GetNameSafe(Pawn));
+		AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory failed: pawn %s missing inventory component"), *GetNameSafe(Pawn));
 		return nullptr;
 	}
+
+	AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory duplicate start Pawn=%s Inventory=%s SourceItem=%s SourceOuter=%s SourceDef=%s SourceUniqueId=%s"),
+		*GetNameSafe(Pawn),
+		*GetNameSafe(Inventory),
+		*GetNameSafe(GrantedItem),
+		*GetNameSafe(GrantedItem->GetOuter()),
+		*GetNameSafe(GrantedItem->Definition.Get()),
+		GrantedItem->UniqueId.IsValid() ? *GrantedItem->UniqueId.ToString() : TEXT("Invalid"));
 
 	const FName UniqueName = MakeUniqueObjectName(Inventory, UAeyerjiItemInstance::StaticClass(), GrantedItem->GetFName());
 	UAeyerjiItemInstance* TransferItem = DuplicateObject<UAeyerjiItemInstance>(GrantedItem, Inventory, UniqueName);
 	if (!TransferItem)
 	{
-		AJ_LOG(this, TEXT("GiveLootToInventory failed - duplicate of %s could not be created"), *GetNameSafe(GrantedItem));
+		AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory failed: duplicate of %s could not be created"), *GetNameSafe(GrantedItem));
 		return nullptr;
 	}
 
 	TransferItem->SetNetAddressable();
 	TransferItem->UniqueId = FGuid::NewGuid();
-	AJ_LOG(this, TEXT("GiveLootToInventory prepared duplicate %s (UniqueId=%s) for %s"),
+	AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory prepared duplicate %s Outer=%s UniqueId=%s for %s"),
 		*TransferItem->GetPathName(),
+		*GetNameSafe(TransferItem->GetOuter()),
 		*TransferItem->UniqueId.ToString(),
 		*GetNameSafe(Inventory));
 
@@ -1402,9 +1456,26 @@ UAeyerjiItemInstance* AAeyerjiLootPickup::GiveLootToInventory(AAeyerjiPlayerCont
 	const FString ResultName = ResultEnum
 		? ResultEnum->GetNameStringByValue(static_cast<int64>(Result))
 		: FString::Printf(TEXT("Value_%d"), static_cast<int32>(Result));
-	AJ_LOG(this, TEXT("GiveLootToInventory result for %s -> %s"),
+	FInventoryItemGridData Placement;
+	const bool bInGrid = Inventory->GetPlacementForItem(TransferItem->UniqueId, Placement);
+	TArray<FEquippedItemEntry> EquippedEntries;
+	Inventory->GetAllEquippedItems(EquippedEntries);
+	const bool bEquipped = EquippedEntries.ContainsByPredicate(
+		[TransferItem](const FEquippedItemEntry& Entry)
+		{
+			return Entry.ItemId == TransferItem->UniqueId || Entry.Item == TransferItem;
+		});
+	const bool bOwned = Inventory->FindItemById(TransferItem->UniqueId) != nullptr;
+
+	AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory result Controller=%s Result=%s Owned=%d Equipped=%d Grid=%d Items=%d EquippedEntries=%d GridEntries=%d"),
 		*GetNameSafe(Controller),
-		*ResultName);
+		*ResultName,
+		bOwned ? 1 : 0,
+		bEquipped ? 1 : 0,
+		bInGrid ? 1 : 0,
+		Inventory->Items.Num(),
+		EquippedEntries.Num(),
+		Inventory->GridPlacements.Num());
 	if (Result == EAeyerjiAddItemResult::Equipped || Result == EAeyerjiAddItemResult::Bagged)
 	{
 		return TransferItem;
@@ -1456,7 +1527,7 @@ FAeyerjiPickupVisualConfig AAeyerjiLootPickup::ResolvePickupVisualConfig(const U
 		const FAeyerjiPickupVisualConfig FromInstance = SourceInstance->GetPickupVisualConfig();
 		AJ_LOG(this, TEXT("ResolvePickupVisualConfig: using item instance %s (Definition=%s, System=%s)"),
 			*GetNameSafe(SourceInstance),
-			*GetNameSafe(SourceInstance->Definition),
+			*GetNameSafe(SourceInstance->Definition.Get()),
 			*GetNameSafe(FromInstance.PickupGrantedSystem));
 		return FromInstance;
 	}

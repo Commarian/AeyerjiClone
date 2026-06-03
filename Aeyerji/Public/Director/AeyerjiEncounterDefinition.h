@@ -21,7 +21,7 @@ struct AEYERJI_API FEnemySetDef
 	GENERATED_BODY()
 
 	/** Enemy pawn/character class (soft ref). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(AllowedClasses="Pawn"))
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(AllowedClasses="/Script/Engine.Pawn"))
 	TSoftClassPtr<APawn> EnemyClass;
 
 	/** Exact count to emit for this set in the wave. */

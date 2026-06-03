@@ -55,6 +55,9 @@ public:
     /** Override to clear velocity when rooted */
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
+	/** Log client-side network smoothing corrections so held-move jitter can be separated from pathing updates. */
+	virtual void SmoothCorrection(const FVector& OldLocation, const FQuat& OldRotation, const FVector& NewLocation, const FQuat& NewRotation) override;
+
     /** Optional: enable built-in RVO avoidance (settable in BP). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Movement|Avoidance|RVO")
     bool bEnableRVOAvoidance = true;
@@ -84,6 +87,21 @@ protected:
 	/** How often to refresh the cached rooted state (in seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Movement")
 	float RootedStateCheckInterval = 0.1f;
+
+	/** Enables throttled logs when network smoothing receives a visible server correction. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="NetworkSmoothing|Debug")
+	bool bLogMovementCorrections = true;
+
+	/** Minimum correction distance in cm before a smoothing correction is logged. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="NetworkSmoothing|Debug", meta=(ClampMin="0.0", Units="cm"))
+	float MovementCorrectionLogThresholdCm = 3.f;
+
+	/** Minimum seconds between correction logs for this movement component. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="NetworkSmoothing|Debug", meta=(ClampMin="0.0", Units="s"))
+	float MovementCorrectionLogInterval = 0.1f;
+
+	/** Last time a movement correction diagnostic was emitted. */
+	double LastMovementCorrectionLogTime = -1.0;
 
 	/** Get the Ability System Component from the character */
 	UAbilitySystemComponent* GetAbilitySystemComponent() const;

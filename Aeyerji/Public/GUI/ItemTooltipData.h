@@ -43,6 +43,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
 	FText Description = FText::GetEmpty();
 
+	/** Asset-derived key for the source item definition. */
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
 	FName DefinitionId = NAME_None;
 
@@ -50,13 +51,28 @@ public:
 	EItemRarity Rarity = EItemRarity::Common;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
-	EItemCategory ItemCategory = EItemCategory::Offense;
+	EItemCategory ItemCategory = EItemCategory::Assault;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
-	EEquipmentSlot DefaultSlot = EEquipmentSlot::Offense;
+	EEquipmentSlot DefaultSlot = EEquipmentSlot::Assault;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
-	EEquipmentSlot EquippedSlot = EEquipmentSlot::Offense;
+	EEquipmentSlot EquippedSlot = EEquipmentSlot::Assault;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Item")
+	int32 RequiredLevel = 1;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Item")
+	FText LaneDisplayText = FText::GetEmpty();
+
+	UPROPERTY(BlueprintReadOnly, Category = "Item|Corruption")
+	bool bIsCorruptionItem = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Item|Corruption")
+	FText CorruptionPowerText = FText::GetEmpty();
+
+	UPROPERTY(BlueprintReadOnly, Category = "Item|Corruption")
+	FText CorruptionDrawbackText = FText::GetEmpty();
 
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
 	int32 EquippedSlotIndex = INDEX_NONE;
@@ -69,10 +85,6 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Item")
 	FIntPoint InventorySize = FIntPoint(1, 1);
-
-	/** Base stats coming from the definition (pre-affix). */
-	UPROPERTY(BlueprintReadOnly, Category = "Item|Stats")
-	TArray<FItemStatModifier> BaseModifiers;
 
 	/** Rolled affixes with their modifiers/effects. */
 	UPROPERTY(BlueprintReadOnly, Category = "Item|Stats")

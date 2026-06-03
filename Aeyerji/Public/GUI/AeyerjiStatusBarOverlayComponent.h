@@ -70,9 +70,10 @@ private:
 	bool IsOccluded(const FVector& WorldLoc, const AActor* Ignore) const;
 	APlayerController* GetPC() const
 	{
-		if (Cast<APlayerController>(GetOwner())->IsLocalController())
+		APlayerController* PC = Cast<APlayerController>(GetOwner());
+		if (PC && PC->IsLocalController())
 		{
-			return Cast<APlayerController>(GetOwner());
+			return PC;
 		}
 		return nullptr;
 	}

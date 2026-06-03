@@ -3,11 +3,15 @@
 
 #include "Enemy/Tasks/STT_SetSpeedFromAttributeTask.h"
 #include "Enemy/Tasks/STT_SetSpeedFromAttributeTask.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
 #include "AbilitySystemComponent.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "StateTreeExecutionContext.h"
 #include "Logging/AeyerjiLog.h"
 

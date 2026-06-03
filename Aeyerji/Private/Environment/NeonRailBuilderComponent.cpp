@@ -177,7 +177,8 @@ void UNeonRailBuilderComponent::SpawnOneSegment(const float T0, const float T1)
 		return;
 	}
 
-	USplineMeshComponent* SplineMesh = NewObject<USplineMeshComponent>(Owner, USplineMeshComponent::StaticClass(), NAME_None, RF_Transactional);
+	const FName SplineMeshName = MakeUniqueObjectName(Owner, USplineMeshComponent::StaticClass(), TEXT("NeonRailSplineMesh"));
+	USplineMeshComponent* SplineMesh = NewObject<USplineMeshComponent>(Owner, USplineMeshComponent::StaticClass(), SplineMeshName, RF_Transactional);
 	if (!SplineMesh)
 	{
 		return;

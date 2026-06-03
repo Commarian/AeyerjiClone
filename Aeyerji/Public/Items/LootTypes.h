@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "Items/ItemTypes.h"
 
 #include "LootTypes.generated.h"
@@ -18,9 +19,9 @@ struct AEYERJI_API FLootDropResult
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	EItemRarity Rarity = EItemRarity::Common;
 
-	/** Stable identifier for the dropped item definition, if available. */
+	/** Asset-derived key for the dropped item definition, if available. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
-	FName ItemId = NAME_None;
+	FName ItemDefinitionKey = NAME_None;
 
 	/** Optional reference to the dropped item definition (not persisted). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
@@ -33,4 +34,20 @@ struct AEYERJI_API FLootDropResult
 	/** Optional seed to make item rolls deterministic. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	int32 Seed = 0;
+
+	/** Source tag that produced the roll. Copied from FLootContext for memory/debugging. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
+	FGameplayTag SourceTag;
+
+	/** Optional named pity bucket this result should record against. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	FGameplayTag PityGroup;
+
+	/** Minimum rarity that counts as a success for PityGroup memory. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	EItemRarity PitySuccessRarity = EItemRarity::Legendary;
+
+	/** True when this roll satisfied the named pity group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	bool bCountsAsPitySuccess = false;
 };

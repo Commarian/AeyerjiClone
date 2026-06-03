@@ -7,6 +7,7 @@
 #include "Abilities/GameplayAbilityTypes.h"
 #include "Delegates/Delegate.h"
 #include "Delegates/DelegateCombinations.h"
+#include "Systems/AeyerjiWorldStateTypes.h"
 #include "AeyerjiGameplayEventSubsystem.generated.h"
 
 /**
@@ -31,9 +32,23 @@ public:
 	/** Broadcast a gameplay event payload to all native listeners keyed to the given tag. */
 	void BroadcastEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload);
 
+	/** Records a gameplay event as happened in the central world-state registry without broadcasting it. */
+	void RecordEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload, EAeyerjiWorldStatePersistence Persistence, EAeyerjiWorldStateReplication Replication);
+
+	/** Broadcasts a gameplay event and records it as happened in the central world-state registry. */
+	void BroadcastAndRecordEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload, EAeyerjiWorldStatePersistence Persistence, EAeyerjiWorldStateReplication Replication);
+
 	/** Blueprint-friendly helper that broadcasts an event through the subsystem. */
 	UFUNCTION(BlueprintCallable, Category="Gameplay Events", meta=(WorldContext="WorldContextObject"))
 	static void BroadcastGameplayEvent(UObject* WorldContextObject, FGameplayTag EventTag, const FGameplayEventData& Payload);
+
+	/** Blueprint-friendly helper that records an event through the world-state registry. */
+	UFUNCTION(BlueprintCallable, Category="Gameplay Events", meta=(WorldContext="WorldContextObject"))
+	static void RecordGameplayEvent(UObject* WorldContextObject, FGameplayTag EventTag, const FGameplayEventData& Payload, EAeyerjiWorldStatePersistence Persistence = EAeyerjiWorldStatePersistence::Persistent, EAeyerjiWorldStateReplication Replication = EAeyerjiWorldStateReplication::ServerOnly);
+
+	/** Blueprint-friendly helper that broadcasts and records an event through explicit opt-in. */
+	UFUNCTION(BlueprintCallable, Category="Gameplay Events", meta=(WorldContext="WorldContextObject"))
+	static void BroadcastAndRecordGameplayEvent(UObject* WorldContextObject, FGameplayTag EventTag, const FGameplayEventData& Payload, EAeyerjiWorldStatePersistence Persistence = EAeyerjiWorldStatePersistence::Persistent, EAeyerjiWorldStateReplication Replication = EAeyerjiWorldStateReplication::ServerOnly);
 
 private:
 	FAeyerjiGameplayEventNativeSignature& FindOrAddDelegate(const FGameplayTag& EventTag);

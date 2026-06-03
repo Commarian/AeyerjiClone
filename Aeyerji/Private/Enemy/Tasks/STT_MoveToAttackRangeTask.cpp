@@ -2,9 +2,13 @@
 
 
 #include "Enemy/Tasks/STT_MoveToAttackRangeTask.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Pawn.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/MovementComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"

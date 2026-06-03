@@ -88,6 +88,18 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Damage")
     float DamageScalar;
 
+    /** Gameplay Effects applied when a matching AilmentType tag is present on the source. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
+    TMap<FGameplayTag, TSoftClassPtr<UGameplayEffect>> AilmentEffectsByType;
+
+    /** SetByCaller tag for ailment damage-per-second magnitude. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
+    FGameplayTag AilmentDamagePerSecondSetByCallerTag;
+
+    /** SetByCaller tag for ailment duration (seconds). */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
+    FGameplayTag AilmentDurationSetByCallerTag;
+
     /** Minimum cooldown duration applied even if AttackSpeed is very high. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cooldown", meta=(ClampMin="0.0"))
     float MinCooldownDuration;
@@ -125,7 +137,7 @@ protected:
     float ConeTraceRangeFallback = 220.f;
 
     /** Default cone angle (degrees) if the AttackAngle attribute is unset. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="1.0", ClampMax="360.0"))
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.0", ClampMax="360.0"))
     float ConeTraceAngleFallback = 75.f;
 
     /** Collision channel queried by the melee cone (defaults to Pawn to hit characters). */
@@ -208,6 +220,9 @@ private:
     /** Timer driving repeated cone sweeps during the strike. */
     FTimerHandle ConeTraceTimerHandle;
 
+    /** Failsafe timer that forces the ability to finish if montage callbacks never arrive. */
+    FTimerHandle MontageFailsafeTimerHandle;
+
     /** Cached play rate for the active montage so cone timings scale with speed. */
     float CurrentMontagePlayRate = 1.f;
 
@@ -245,6 +260,9 @@ private:
 
     bool StartMontage(float AttackSpeed, UAnimMontage* MontageToPlay);
     void StopMontageTask();
+    void ArmMontageFailsafe(UAnimMontage* Montage, float PlayRate);
+    void ClearMontageFailsafeTimer();
+    void OnMontageFailsafeExpired();
 
     void HandleServerDamage(const FGameplayAbilityTargetDataHandle& TargetData);
     void HandlePredictedFeedback(const FGameplayAbilityTargetDataHandle& TargetData);
@@ -260,6 +278,7 @@ private:
     void GatherConeTraceTargets(AActor* InstigatorActor, float Range, float AngleDegrees, TArray<FHitResult>& OutHits, const FVector* OverrideOrigin = nullptr, const FVector* OverrideForward = nullptr) const;
     AActor* ResolvePreferredClickedTarget(const FGameplayAbilityActorInfo* ActorInfo, float MaxAgeSeconds = 1.5f) const;
     bool TryBuildHitFromActor(AActor* InstigatorActor, AActor* TargetActor, float MaxRange, FHitResult& OutHit) const;
+    bool TryResolveTargetCollisionPoint(AActor* TargetActor, const FVector& QueryOrigin, FVector& OutTargetPoint, UPrimitiveComponent*& OutTargetComponent) const;
 
     FGameplayAbilityTargetDataHandle MakeUniqueTargetData(const TArray<FHitResult>& Hits);
 
@@ -291,6 +310,8 @@ private:
     void ExecuteConeTraceSweep();
     void ClearConeTraceTimer();
     float CalculateMontagePlayRate(float AttackSpeed) const;
+    void ApplyAilmentsToTargetData(const FGameplayAbilityTargetDataHandle& TargetData);
+    bool ResolveAilmentMagnitudes(const FGameplayTag& AilmentTypeTag, float& OutAmount, float& OutDuration) const;
 
 protected:
     /** Override in Blueprint to select a montage per activation (e.g. via interfaces on the avatar). */

@@ -1,16 +1,16 @@
 ﻿#include "Abilities/GA_Death.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
-#include "GameFramework/CharacterMovementComponent.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Abilities/GameplayAbilityTypes.h"
 #include "Abilities/GameplayAbility.h"
 #include "AbilitySystemComponent.h"
-#include "Components/CapsuleComponent.h"
-#include "Components/SkeletalMeshComponent.h"
 #include "AeyerjiCharacter.h"
+#include "Aeyerji/AeyerjiPlayerState.h"
 #include "AeyerjiGameplayTags.h"
-#include "Abilities/AeyerjiRagdollHelpers.h"
 #include "GameFramework/GameModeBase.h"
 #include "Logging/AeyerjiLog.h"
+#include "TimerManager.h"
 
 UGA_Death::UGA_Death()
 {
@@ -58,72 +58,31 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 	}
 
 	ACharacter* Char = Cast<ACharacter>(ActorInfo->AvatarActor.Get());
-	if (Char)
-	{
-		// Stop movement & input
-		if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
-		{
-			Move->StopMovementImmediately();
-			Move->DisableMovement();
-		}
-		Char->DisableInput(nullptr);
-
-		if (const bool bHasAnim = (DeathMontage && ActorInfo->AnimInstance.IsValid()))
-		{
-			// Play via ASC so montage replication reaches clients
-			UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
-			float PlayLen = ASC ? ASC->PlayMontage(this, ActivationInfo, DeathMontage, /*Rate=*/1.f) : 0.f;
-			if (PlayLen <= 0.f)
-			{
-				// Fallback: no anim actually played -> ragdoll now
-				FAeyerjiRagdollHelpers::StartRagdoll(Char);
-				// give viewers time to see the fall
-				PlayLen = 1.25f;
-			}
-			else if (UAnimInstance* AnimInst = ActorInfo->GetAnimInstance())
-			{
-				// When montage ends, start ragdoll
-				FOnMontageEnded OnEnd;
-				OnEnd.BindLambda([this, Char](UAnimMontage*, bool /*bInterrupted*/)
-				{
-					FAeyerjiRagdollHelpers::StartRagdoll(Char);
-				});
-				AnimInst->Montage_SetEndDelegate(OnEnd, DeathMontage);
-			}
-
-			// Schedule finish AFTER montage + a short ragdoll display
-			const float RagdollViewSeconds = FMath::Max(RespawnDelay, 0.f);
-			GetWorld()->GetTimerManager().SetTimer(
-				RespawnHandle, this, &UGA_Death::Server_FinishDeath,
-				PlayLen + RagdollViewSeconds, /*bLoop=*/false);
-		}
-		else
-		{
-			// No montage → ragdoll immediately, then delay cleanup a bit
-			FAeyerjiRagdollHelpers::StartRagdoll(Char);
-			const float RagdollViewSeconds = FMath::Max(RespawnDelay, 0.f);
-			GetWorld()->GetTimerManager().SetTimer(
-				RespawnHandle, this, &UGA_Death::Server_FinishDeath,
-				RagdollViewSeconds, /*bLoop=*/false);
-		}
-	}
-	else
+	if (!Char)
 	{
 		AJ_LOG(this, TEXT("GA_Death ActivateAbility: Avatar is not a character, aborting."));
+		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/false, /*bWasCancelled=*/true);
 		return;
 	}
 
-	// Broadcast finished after 5 s - AI corpses cleaned up, players will respawn.
-	FTimerDelegate EndAbilityDelegate;
-	EndAbilityDelegate.BindUObject(
-		this,
-		&UGA_Death::OnDeathTimeout,               // helper we’ll add below
-		Handle,                                  // pass-through params
-		ActivationInfo
-	);
+	UWorld* World = Char->GetWorld();
+	if (!World)
+	{
+		AJ_LOG(this, TEXT("GA_Death ActivateAbility: World is null, aborting."));
+		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/false, /*bWasCancelled=*/true);
+		return;
+	}
 
-	FTimerHandle Timer;
-	Char->GetWorldTimerManager().SetTimer(Timer, EndAbilityDelegate, 5.f, /*bLoop=*/false);
+	const float FinalizeDelay = FMath::Max(RespawnDelay, 0.f);
+	if (FinalizeDelay <= 0.f)
+	{
+		Server_FinishDeath();
+		return;
+	}
+
+	World->GetTimerManager().SetTimer(
+		RespawnHandle, this, &UGA_Death::Server_FinishDeath,
+		FinalizeDelay, /*bLoop=*/false);
 }
 
 void UGA_Death::EndAbility(const FGameplayAbilitySpecHandle Handle,
@@ -131,7 +90,11 @@ void UGA_Death::EndAbility(const FGameplayAbilitySpecHandle Handle,
 						   const FGameplayAbilityActivationInfo ActivationInfo,
 						   bool bReplicateEndAbility, bool bWasCancelled)
 {
-	// Only do ability-level cleanup here (detach VFX, stop cues, etc.)
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(RespawnHandle);
+	}
+
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
 }
 
@@ -156,9 +119,12 @@ void UGA_Death::Server_FinishDeath()
 		return; // Only the server can respawn/destroy.
 	}
 
-	// If you want EndAbility to replicate the final state you can call it here,
-	// but keep it non-destructive as above.
-	Super::EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
+	if (UWorld* World = DeadChar->GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(RespawnHandle);
+	}
+
+	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
 
 	// Cancel any remaining abilities to avoid shutdown crashes during ASC destruction.
 	const FGameplayAbilityActorInfo* ActorInfo = GetCurrentActorInfo();
@@ -171,6 +137,15 @@ void UGA_Death::Server_FinishDeath()
 	{
 		if (AController* PC = DeadChar->GetController())
 		{
+			// Persist the dying pawn before possession swaps so the respawn load sees the latest inventory/action bar.
+			if (const APawn* DeadPawn = Cast<APawn>(DeadChar))
+			{
+				if (AAeyerjiPlayerState* PS = DeadPawn->GetPlayerState<AAeyerjiPlayerState>())
+				{
+					PS->CommitCheckpointProfileFromPawn(EAeyerjiSaveCheckpointReason::DeathBeforeRespawn, DeadPawn, /*bBumpRevision=*/true);
+				}
+			}
+
 			AJ_LOG(this, TEXT("Server_FinishDeath: restarting controller %s from pawn %s"),
 				*GetNameSafe(PC), *GetNameSafe(DeadChar));
 

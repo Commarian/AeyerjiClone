@@ -4,38 +4,72 @@
 
 #include "AbilitySystemComponent.h"
 #include "Abilities/GameplayAbility.h"
-#include "Abilities/AeyerjiAbilityData.h"
+#include "Abilities/AeyerjiAbilityTuning.h"
+#include "Abilities/GA_AeyerjiBase.h"
 #include "UObject/UnrealType.h"
 
-const UAeyerjiAbilityData* FAeyerjiAbilityTooltipData::ResolveAbilityData(TSubclassOf<UGameplayAbility> AbilityClass)
+const FAeyerjiAbilityTableRow* FAeyerjiAbilityTooltipData::ResolveAbilityRow(const FAeyerjiAbilitySlot& Slot)
 {
-	if (!AbilityClass)
+	FGameplayTag AbilityTag;
+	if (Slot.Tag.Num() > 0)
 	{
-		return nullptr;
-	}
-
-	const UGameplayAbility* AbilityCDO = AbilityClass->GetDefaultObject<UGameplayAbility>();
-	if (!AbilityCDO)
-	{
-		return nullptr;
-	}
-
-	const FObjectProperty* DataProp = nullptr;
-	for (TFieldIterator<FObjectProperty> It(AbilityClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
-	{
-		if (It->PropertyClass && It->PropertyClass->IsChildOf(UAeyerjiAbilityData::StaticClass()))
+		for (const FGameplayTag& Tag : Slot.Tag)
 		{
-			DataProp = *It;
-			break;
+			if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
+			{
+				AbilityTag = Tag;
+				break;
+			}
 		}
 	}
 
-	if (!DataProp)
+	if (!AbilityTag.IsValid() && Slot.Class)
 	{
-		return nullptr;
+		if (const UGameplayAbility* AbilityCDO = Slot.Class->GetDefaultObject<UGameplayAbility>())
+		{
+			int32 BestDepth = -1;
+			for (const FGameplayTag& Tag : AbilityCDO->GetAssetTags())
+			{
+				const FString TagString = Tag.ToString();
+				if (!TagString.StartsWith(TEXT("Ability.")))
+				{
+					continue;
+				}
+
+				int32 Depth = 1;
+				for (const TCHAR Character : TagString)
+				{
+					if (Character == TEXT('.'))
+					{
+						++Depth;
+					}
+				}
+
+				if (Depth > BestDepth)
+				{
+					BestDepth = Depth;
+					AbilityTag = Tag;
+				}
+			}
+		}
 	}
 
-	return Cast<UAeyerjiAbilityData>(DataProp->GetObjectPropertyValue_InContainer(AbilityCDO));
+	return UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
+		UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
+		AbilityTag);
+}
+
+namespace
+{
+	UTexture2D* LoadIcon(const TSoftObjectPtr<UTexture2D>& Icon)
+	{
+		if (Icon.IsNull())
+		{
+			return nullptr;
+		}
+
+		return Icon.LoadSynchronous();
+	}
 }
 
 FAeyerjiAbilityTooltipData FAeyerjiAbilityTooltipData::FromSlot(
@@ -50,24 +84,37 @@ FAeyerjiAbilityTooltipData FAeyerjiAbilityTooltipData::FromSlot(
 	Data.Icon = Slot.Icon;
 	Data.DisplayName = Slot.Description.IsNone() ? FText::GetEmpty() : FText::FromName(Slot.Description);
 
-	if (const UAeyerjiAbilityData* AbilityData = ResolveAbilityData(Slot.Class))
+	const UGameplayAbility* AbilityCDO = Slot.Class ? Slot.Class->GetDefaultObject<UGameplayAbility>() : nullptr;
+	const UGA_AeyerjiBase* AeyerjiAbilityCDO = Cast<UGA_AeyerjiBase>(AbilityCDO);
+	if (const FAeyerjiAbilityTableRow* Row = ResolveAbilityRow(Slot))
 	{
-		if (!AbilityData->DisplayName.IsEmpty())
+		if (!Row->DisplayName.IsEmpty())
 		{
-			Data.DisplayName = AbilityData->DisplayName;
+			Data.DisplayName = Row->DisplayName;
 		}
 
-		Data.Description = AbilityData->Description;
-
-		if (!Data.Icon && AbilityData->Icon)
+		if (!Row->Description.IsEmpty())
 		{
-			Data.Icon = AbilityData->Icon;
+			Data.Description = Row->Description;
 		}
 
-		const FAeyerjiAbilityCost Cost = AbilityData->EvaluateCost(ASC);
-		Data.ManaCost = Cost.ManaCost;
-		Data.CooldownSeconds = Cost.Cooldown;
+		if (!Data.Icon)
+		{
+			Data.Icon = LoadIcon(Row->Icon);
+		}
+
+		Data.ManaCost = Row->Cost.ManaCost;
+		Data.CooldownSeconds = Row->Cost.Cooldown;
+		Data.RequiredLevel = FMath::Max(1, Row->RequiredLevel);
+		Data.bUnlockedByDefault = Row->bUnlockedByDefault;
+	}
+	else if (AeyerjiAbilityCDO)
+	{
+		// Deprecated fallback for un-migrated rows; runtime ability logic still uses table data only.
+		Data.RequiredLevel = FMath::Max(1, AeyerjiAbilityCDO->RequiredLevel);
+		Data.bUnlockedByDefault = AeyerjiAbilityCDO->bUnlockedByDefault;
 	}
 
+	(void)ASC;
 	return Data;
 }

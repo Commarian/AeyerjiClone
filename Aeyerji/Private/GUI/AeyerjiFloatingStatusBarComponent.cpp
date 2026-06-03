@@ -3,15 +3,25 @@
 #include "GUI/AeyerjiFloatingStatusBarComponent.h"
 #include "GUI/W_AeyerjiStatusBar.h"
 #include "GUI/AeyerjiStatusBarOverlayComponent.h"
+#include "Aeyerji/AeyerjiGameState.h"
+#include "AeyerjiCharacter.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 
 #include "Components/WidgetComponent.h"
 #include "AbilitySystemInterface.h"
 #include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Logging/AeyerjiLog.h"
+
+namespace
+{
+    constexpr int32 StatusBarValueResyncCount = 12;
+    constexpr int32 StatusBarMissingASCRetryCount = 20;
+    constexpr float StatusBarDeferredRebindDelay = 0.10f;
+}
 
 UAeyerjiFloatingStatusBarComponent::UAeyerjiFloatingStatusBarComponent()
 {
@@ -33,24 +43,41 @@ void UAeyerjiFloatingStatusBarComponent::BeginPlay()
 {
     Super::BeginPlay();
 
-    if (!StatusBarWidgetClass)
+    DeferredBindAttempts = 0;
+    BindOwnerASCReadyDelegate();
+
+    if (ShouldDeferHUDInitializationToRunStart())
     {
-        LogMissingWidget();
+        BindToRunStateChanges();
+        SetComponentTickEnabled(false);
+        return;
     }
 
-    switch (Mode)
-    {
-    case EStatusBarMode::HUD:     CreateHUDWidget();               break;
-    case EStatusBarMode::World:   CreateWorldWidget();             break;
-    case EStatusBarMode::Overlay: RegisterWithOverlay();           break;
-    }
-
-    // Only tick to billboard in legacy World mode
-    SetComponentTickEnabled(Mode == EStatusBarMode::World && bFaceCamera);
+    InitializeStatusBarPresentation();
 }
 
 void UAeyerjiFloatingStatusBarComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+    if (RunStateBindRetryTimer.IsValid())
+    {
+        if (UWorld* World = GetWorld())
+        {
+            World->GetTimerManager().ClearTimer(RunStateBindRetryTimer);
+        }
+    }
+
+    UnbindFromRunStateChanges();
+
+    if (DeferredBindTimer.IsValid())
+    {
+        if (UWorld* World = GetWorld())
+        {
+            World->GetTimerManager().ClearTimer(DeferredBindTimer);
+        }
+    }
+
+    UnbindOwnerASCReadyDelegate();
+
     // HUD cleanup
     if (HUDWidget)
     {
@@ -68,7 +95,10 @@ void UAeyerjiFloatingStatusBarComponent::EndPlay(const EEndPlayReason::Type EndP
 
     if (RetryTimer.IsValid())
     {
-        GetWorld()->GetTimerManager().ClearTimer(RetryTimer);
+        if (UWorld* World = GetWorld())
+        {
+            World->GetTimerManager().ClearTimer(RetryTimer);
+        }
     }
 
     Super::EndPlay(EndPlayReason);
@@ -94,6 +124,14 @@ void UAeyerjiFloatingStatusBarComponent::TickComponent(float DeltaTime, ELevelTi
 
 UAbilitySystemComponent* UAeyerjiFloatingStatusBarComponent::FindASC() const
 {
+    if (AActor* OwnerActor = GetOwner())
+    {
+        if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(OwnerActor, /*LookForComponent=*/true))
+        {
+            return ASC;
+        }
+    }
+
     if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(GetOwner()))
     {
         return ASI->GetAbilitySystemComponent();
@@ -134,6 +172,13 @@ void UAeyerjiFloatingStatusBarComponent::BindWidget(UW_AeyerjiStatusBar* WB)
         if (HPRegenAttr.IsValid() && ManaRegenAttr.IsValid())
         {
             WB->BindRegenAttributes(ASC, HPRegenAttr, ManaRegenAttr);
+        }
+    }
+    else
+    {
+        if (DeferredBindAttempts == 0)
+        {
+            AJ_LOG(this, TEXT("Status bar bind deferred; ASC not ready on %s"), *GetNameSafe(GetOwner()));
         }
     }
 }
@@ -242,11 +287,231 @@ void UAeyerjiFloatingStatusBarComponent::CleanupOverlay()
     }
 }
 
+void UAeyerjiFloatingStatusBarComponent::RebindLiveWidget()
+{
+    switch (Mode)
+    {
+    case EStatusBarMode::HUD:
+        if (HUDWidget)
+        {
+            BindWidget(HUDWidget);
+        }
+        break;
+
+    case EStatusBarMode::World:
+        if (WidgetComp)
+        {
+            if (UW_AeyerjiStatusBar* WB = Cast<UW_AeyerjiStatusBar>(WidgetComp->GetWidget()))
+            {
+                BindWidget(WB);
+            }
+        }
+        break;
+
+    case EStatusBarMode::Overlay:
+        if (OverlayMgr)
+        {
+            OverlayMgr->RegisterSource(this);
+        }
+        else
+        {
+            RegisterWithOverlay();
+        }
+        break;
+    }
+}
+
+void UAeyerjiFloatingStatusBarComponent::BindOwnerASCReadyDelegate()
+{
+    AAeyerjiCharacter* OwnerCharacter = Cast<AAeyerjiCharacter>(GetOwner());
+    if (!OwnerCharacter)
+    {
+        return;
+    }
+
+    OwnerCharacter->OnAbilitySystemReady.RemoveDynamic(this, &UAeyerjiFloatingStatusBarComponent::HandleOwnerAbilitySystemReady);
+    OwnerCharacter->OnAbilitySystemReady.AddDynamic(this, &UAeyerjiFloatingStatusBarComponent::HandleOwnerAbilitySystemReady);
+    BoundOwnerCharacter = OwnerCharacter;
+}
+
+void UAeyerjiFloatingStatusBarComponent::UnbindOwnerASCReadyDelegate()
+{
+    if (AAeyerjiCharacter* OwnerCharacter = BoundOwnerCharacter.Get())
+    {
+        OwnerCharacter->OnAbilitySystemReady.RemoveDynamic(this, &UAeyerjiFloatingStatusBarComponent::HandleOwnerAbilitySystemReady);
+    }
+    BoundOwnerCharacter = nullptr;
+}
+
+void UAeyerjiFloatingStatusBarComponent::HandleOwnerAbilitySystemReady()
+{
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(DeferredBindTimer);
+    }
+
+    DeferredBindAttempts = 0;
+    AttemptDeferredRebind();
+}
+
+void UAeyerjiFloatingStatusBarComponent::AttemptDeferredRebind()
+{
+    UWorld* World = GetWorld();
+    if (!World || World->IsNetMode(NM_DedicatedServer))
+    {
+        return;
+    }
+
+    RebindLiveWidget();
+    ++DeferredBindAttempts;
+
+    const bool bHasASC = (FindASC() != nullptr);
+    // Values can arrive a few frames after the ASC itself during load/replication.
+    const int32 MaxAttempts = bHasASC ? StatusBarValueResyncCount : StatusBarMissingASCRetryCount;
+    if (DeferredBindAttempts < MaxAttempts)
+    {
+        World->GetTimerManager().SetTimer(
+            DeferredBindTimer,
+            this,
+            &UAeyerjiFloatingStatusBarComponent::AttemptDeferredRebind,
+            StatusBarDeferredRebindDelay,
+            false);
+    }
+    else if (!bHasASC)
+    {
+        AJ_LOG(this, TEXT("Status bar bind retries exhausted for %s"), *GetNameSafe(GetOwner()));
+    }
+}
+
+void UAeyerjiFloatingStatusBarComponent::HandleRunStateChanged(EAeyerjiRunState NewState, EAeyerjiRunState OldState)
+{
+    static_cast<void>(OldState);
+
+    if (NewState == EAeyerjiRunState::InRun)
+    {
+        InitializeStatusBarPresentation();
+    }
+}
+
+void UAeyerjiFloatingStatusBarComponent::RetryBindToRunStateChanges()
+{
+    BindToRunStateChanges();
+}
+
 void UAeyerjiFloatingStatusBarComponent::LogMissingWidget() const
 {
     if (!StatusBarWidgetClass)
     {
         AJ_LOG(this, TEXT("StatusBarWidgetClass is NULL. Set it on the component (BP or CDO)."));
     }
+}
+
+bool UAeyerjiFloatingStatusBarComponent::ShouldDeferHUDInitializationToRunStart() const
+{
+    if (Mode != EStatusBarMode::HUD || !bInitializeHUDOnRunStart)
+    {
+        return false;
+    }
+
+    const UWorld* World = GetWorld();
+    if (!World || World->IsNetMode(NM_DedicatedServer))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void UAeyerjiFloatingStatusBarComponent::InitializeStatusBarPresentation()
+{
+    if (bStatusBarInitialized)
+    {
+        RebindLiveWidget();
+        return;
+    }
+
+    if (!StatusBarWidgetClass)
+    {
+        LogMissingWidget();
+    }
+
+    switch (Mode)
+    {
+    case EStatusBarMode::HUD:
+        CreateHUDWidget();
+        bStatusBarInitialized = (HUDWidget != nullptr);
+        break;
+
+    case EStatusBarMode::World:
+        CreateWorldWidget();
+        bStatusBarInitialized = (WidgetComp != nullptr);
+        break;
+
+    case EStatusBarMode::Overlay:
+        RegisterWithOverlay();
+        bStatusBarInitialized = (OverlayMgr != nullptr) || RetryTimer.IsValid();
+        break;
+    }
+
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(DeferredBindTimer);
+    }
+
+    DeferredBindAttempts = 0;
+    AttemptDeferredRebind();
+
+    // Only tick to billboard in legacy World mode after the presentation exists.
+    SetComponentTickEnabled(bStatusBarInitialized && Mode == EStatusBarMode::World && bFaceCamera);
+}
+
+void UAeyerjiFloatingStatusBarComponent::BindToRunStateChanges()
+{
+    if (bStatusBarInitialized)
+    {
+        return;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World || World->IsNetMode(NM_DedicatedServer))
+    {
+        return;
+    }
+
+    AAeyerjiGameState* GameState = World->GetGameState<AAeyerjiGameState>();
+    if (!GameState)
+    {
+        if (!RunStateBindRetryTimer.IsValid())
+        {
+            World->GetTimerManager().SetTimer(
+                RunStateBindRetryTimer,
+                this,
+                &UAeyerjiFloatingStatusBarComponent::RetryBindToRunStateChanges,
+                0.1f,
+                false);
+        }
+        return;
+    }
+
+    World->GetTimerManager().ClearTimer(RunStateBindRetryTimer);
+
+    GameState->OnRunStateChanged.RemoveDynamic(this, &UAeyerjiFloatingStatusBarComponent::HandleRunStateChanged);
+    GameState->OnRunStateChanged.AddDynamic(this, &UAeyerjiFloatingStatusBarComponent::HandleRunStateChanged);
+    BoundGameState = GameState;
+
+    if (GameState->GetRunState() == EAeyerjiRunState::InRun)
+    {
+        InitializeStatusBarPresentation();
+    }
+}
+
+void UAeyerjiFloatingStatusBarComponent::UnbindFromRunStateChanges()
+{
+    if (AAeyerjiGameState* GameState = BoundGameState.Get())
+    {
+        GameState->OnRunStateChanged.RemoveDynamic(this, &UAeyerjiFloatingStatusBarComponent::HandleRunStateChanged);
+    }
+
+    BoundGameState.Reset();
 }
 

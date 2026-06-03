@@ -1,17 +1,26 @@
 #include "Director/AeyerjiSpawnerGroup.h"
 
 #include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "Systems/AeyerjiGameplayEventSubsystem.h"
 #include "TimerManager.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Director/AeyerjiEncounterDefinition.h"
+#include "Director/AeyerjiEncounterDirector.h"
 #include "Director/AeyerjiLevelDirector.h"
+#include "Director/AeyerjiSpawnRegion.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+#include "GameFramework/PlayerStart.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Enemy/AeyerjiEnemyManagementBPFL.h"
 #include "Enemy/EnemyParentNative.h"
+#include "EngineUtils.h"
 #include "Engine/Engine.h"
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
@@ -21,7 +30,35 @@
 #include "Attributes/AeyerjiRewardAttributeSet.h"
 #include "GameplayEffect.h"
 #include "GameplayAbilitySpec.h"
+#include "Logging/AeyerjiLog.h"
+#include "NavigationPath.h"
+#include "NavigationSystem.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "Algo/RandomShuffle.h"
+
+namespace
+{
+	void RefreshSpawnedPawnStatusBar(APawn* SpawnedPawn)
+	{
+		if (!IsValid(SpawnedPawn))
+		{
+			return;
+		}
+
+		if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(SpawnedPawn, /*LookForComponent=*/true))
+		{
+			ASC->ForceReplication();
+		}
+
+		SpawnedPawn->ForceNetUpdate();
+
+		if (AAeyerjiCharacter* Character = Cast<AAeyerjiCharacter>(SpawnedPawn))
+		{
+			// Status bars already listen to this delegate as the generic "attributes changed, re-pull now" signal.
+			Character->OnAbilitySystemReady.Broadcast();
+		}
+	}
+}
 
 AAeyerjiSpawnerGroup::AAeyerjiSpawnerGroup()
 {
@@ -139,7 +176,7 @@ void AAeyerjiSpawnerGroup::ActivateEncounter(AActor* ActivationInstigator, ACont
 	bCleared = false;
 	bAwaitingManualSpawns = !bHasRuntimeWaves;
 	CurrentWaveIndex = bHasRuntimeWaves ? 0 : INDEX_NONE;
-	LiveEnemies = 0;
+	ResetTrackedEnemies();
 
 	PendingSpawnCounts.Reset();
 	SpawnTimerHandles.Reset();
@@ -198,6 +235,74 @@ void AAeyerjiSpawnerGroup::ActivateEncounter(AActor* ActivationInstigator, ACont
 	}
 }
 
+void AAeyerjiSpawnerGroup::ActivateEncounterWithRuntimeWaves(const TArray<FWaveDefinition>& RuntimeWaves, AActor* ActivationInstigator, AController* ActivationController)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (bActive || RuntimeWaves.IsEmpty())
+	{
+		return;
+	}
+
+	GetWorldTimerManager().ClearAllTimersForObject(this);
+	EncounterWavesRuntime = RuntimeWaves;
+	CacheActivationStimulus(ActivationInstigator, ActivationController);
+	ResetSpawnPointCycle();
+	if (SpawnPointMode != EAeyerjiSpawnPointMode::Random)
+	{
+		RebuildSpawnPointOrder();
+	}
+
+	bActive = true;
+	bCleared = false;
+	bAwaitingManualSpawns = false;
+	CurrentWaveIndex = 0;
+	ResetTrackedEnemies();
+
+	PendingSpawnCounts.Reset();
+	SpawnTimerHandles.Reset();
+	PendingSpawnCounts.SetNum(EncounterWavesRuntime.Num());
+	SpawnTimerHandles.SetNum(EncounterWavesRuntime.Num());
+
+	int32 TotalPendingSpawns = 0;
+	for (int32 WaveIdx = 0; WaveIdx < EncounterWavesRuntime.Num(); ++WaveIdx)
+	{
+		const FWaveDefinition& WaveDef = EncounterWavesRuntime[WaveIdx];
+		PendingSpawnCounts[WaveIdx].SetNum(WaveDef.EnemySets.Num());
+		SpawnTimerHandles[WaveIdx].SetNum(WaveDef.EnemySets.Num());
+
+		for (int32 SetIdx = 0; SetIdx < WaveDef.EnemySets.Num(); ++SetIdx)
+		{
+			const FEnemySet& EnemySet = WaveDef.EnemySets[SetIdx];
+			PendingSpawnCounts[WaveIdx][SetIdx] = (EnemySet.bIsBoss || EnemySet.bIsMiniBoss) ? 0 : EnemySet.Count;
+			TotalPendingSpawns += PendingSpawnCounts[WaveIdx][SetIdx];
+		}
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("SurvivalSpawner %s activated with %d waves, %d pending spawns, %d spawn points, aggro actor=%s controller=%s."),
+		*GetNameSafe(this),
+		EncounterWavesRuntime.Num(),
+		TotalPendingSpawns,
+		SpawnPoints.Num(),
+		*GetNameSafe(ResolveAggroTargetActor()),
+		*GetNameSafe(ResolveAggroController()));
+
+	OnEncounterStarted.Broadcast(this);
+	SetDoorArrayEnabled(DoorsToClose, true);
+
+	if (InitialSpawnDelay > 0.f)
+	{
+		GetWorldTimerManager().SetTimer(InitialSpawnDelayHandle, this, &AAeyerjiSpawnerGroup::KickoffFirstWave, InitialSpawnDelay, false);
+	}
+	else
+	{
+		KickoffFirstWave();
+	}
+}
+
 void AAeyerjiSpawnerGroup::ResetEncounter()
 {
 	GetWorldTimerManager().ClearAllTimersForObject(this);
@@ -206,7 +311,7 @@ void AAeyerjiSpawnerGroup::ResetEncounter()
 	bCleared = false;
 	CurrentWaveIndex = INDEX_NONE;
 	bAwaitingManualSpawns = false;
-	LiveEnemies = 0;
+	ResetTrackedEnemies();
 
 	PendingSpawnCounts.Reset();
 	SpawnTimerHandles.Reset();
@@ -262,13 +367,78 @@ void AAeyerjiSpawnerGroup::RegisterExternalEnemy(APawn* SpawnedPawn, const FEnem
 
 	bAwaitingManualSpawns = false;
 
-	LiveEnemies++;
 	SpawnedPawn->OnDestroyed.RemoveDynamic(this, &AAeyerjiSpawnerGroup::OnEnemyDestroyed);
 	SpawnedPawn->OnDestroyed.AddDynamic(this, &AAeyerjiSpawnerGroup::OnEnemyDestroyed);
+	if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(SpawnedPawn))
+	{
+		Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiSpawnerGroup::OnEnemyDied);
+		Enemy->OnEnemyDied.AddDynamic(this, &AAeyerjiSpawnerGroup::OnEnemyDied);
+	}
+
+	const TWeakObjectPtr<AActor> EnemyKey(SpawnedPawn);
+	if (!TrackedLiveEnemies.Contains(EnemyKey))
+	{
+		TrackedLiveEnemies.Add(EnemyKey);
+	}
+	LiveEnemies = TrackedLiveEnemies.Num();
 
 	const bool bResolveElite = bApplyEliteSettings && !bSkipRandomEliteResolution;
 	const FEnemySet ResolvedTemplate = bResolveElite ? ResolveEliteSpawnSet(EnemyTemplate) : EnemyTemplate;
-	ApplyEnemyScaling(SpawnedPawn, ResolvedTemplate);
+	const bool bIsStaticBoss = ResolvedTemplate.bIsBoss;
+	const bool bSkipEnemyScaling = bIsStaticBoss || (ResolvedTemplate.bIsElite && ResolvedTemplate.bSkipEliteAutoScaling);
+	FTrackedEnemyScalingState& ScalingState = TrackedEnemyScalingStates.FindOrAdd(EnemyKey);
+	ScalingState.ResolvedTemplate = ResolvedTemplate;
+	ScalingState.EliteHealthMultiplier = 1.f;
+	ScalingState.EliteDamageMultiplier = 1.f;
+	ScalingState.EliteRangeMultiplier = 1.f;
+	ScalingState.bHasEliteAutoScaling = bApplyEliteSettings && ResolvedTemplate.bIsElite && !bIsStaticBoss && !ResolvedTemplate.bSkipEliteAutoScaling;
+	if (bIsStaticBoss)
+	{
+		TrackedBossEnemies.Add(EnemyKey);
+	}
+
+	AJ_LOG(this, TEXT("RegisterExternalEnemy: Spawner=%s Pawn=%s InputClass=%s ResolvedClass=%s Elite=%d SkipEliteAutoScaling=%d SkipEnemyScaling=%d ApplyElite=%d ApplyAggro=%d AutoActivate=%d SkipRandomEliteResolution=%d ActivationInstigator=%s ActivationController=%s"),
+		*GetNameSafe(this),
+		*GetNameSafe(SpawnedPawn),
+		*GetNameSafe(EnemyTemplate.EnemyClass),
+		*GetNameSafe(ResolvedTemplate.EnemyClass),
+		ResolvedTemplate.bIsElite ? 1 : 0,
+		ResolvedTemplate.bSkipEliteAutoScaling ? 1 : 0,
+		bSkipEnemyScaling ? 1 : 0,
+		bApplyEliteSettings ? 1 : 0,
+		bApplyAggro ? 1 : 0,
+		bAutoActivate ? 1 : 0,
+		bSkipRandomEliteResolution ? 1 : 0,
+		*GetNameSafe(ActivationInstigator),
+		*GetNameSafe(ActivationController));
+
+	// Bosses are authored as static archetypes; avoid all runtime stat scaling for them.
+	if (bIsStaticBoss)
+	{
+		if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(SpawnedPawn))
+		{
+			Enemy->ApplyArchetypeData();
+		}
+
+		if (!BossActorTag.IsNone())
+		{
+			SpawnedPawn->Tags.AddUnique(BossActorTag);
+		}
+
+		if (BossGameplayTag.IsValid())
+		{
+			if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(SpawnedPawn))
+			{
+				ASC->AddLooseGameplayTag(BossGameplayTag);
+			}
+		}
+
+		RefreshSpawnedPawnStatusBar(SpawnedPawn);
+	}
+	else if (!bSkipEnemyScaling)
+	{
+		ApplyEnemyScaling(SpawnedPawn, ResolvedTemplate);
+	}
 
 	if (bApplyAggro)
 	{
@@ -280,14 +450,38 @@ void AAeyerjiSpawnerGroup::RegisterExternalEnemy(APawn* SpawnedPawn, const FEnem
 		ApplyAggroToSpawnedPawn(SpawnedPawn);
 	}
 
-	if (bApplyEliteSettings)
+	if (bApplyEliteSettings && !bIsStaticBoss)
 	{
+		UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(SpawnedPawn, /*LookForComponent*/ true);
+		if (ScalingState.bHasEliteAutoScaling && ASC)
+		{
+			CaptureTrackedBaseValueIfNeeded(EnemyKey, ASC, UAeyerjiAttributeSet::GetHPMaxAttribute(), TEXT("AeyerjiAttributeSet.HPMax"));
+			CaptureTrackedBaseValueIfNeeded(EnemyKey, ASC, UAeyerjiAttributeSet::GetAttackDamageAttribute(), TEXT("AeyerjiAttributeSet.AttackDamage"));
+			CaptureTrackedBaseValueIfNeeded(EnemyKey, ASC, UAeyerjiAttributeSet::GetAttackRangeAttribute(), TEXT("AeyerjiAttributeSet.AttackRange"));
+		}
+
+		const float PreEliteHPMax = ASC ? ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute()) : 0.f;
+		const float PreEliteDamage = ASC ? ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackDamageAttribute()) : 0.f;
+		const float PreEliteRange = ASC ? ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackRangeAttribute()) : 0.f;
 		ApplyElitePackage(SpawnedPawn, ResolvedTemplate);
+
+		if (ScalingState.bHasEliteAutoScaling && ASC)
+		{
+			const float PostEliteHPMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+			const float PostEliteDamage = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackDamageAttribute());
+			const float PostEliteRange = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackRangeAttribute());
+
+			ScalingState.EliteHealthMultiplier = PreEliteHPMax > 0.f ? (PostEliteHPMax / PreEliteHPMax) : 1.f;
+			ScalingState.EliteDamageMultiplier = PreEliteDamage > 0.f ? (PostEliteDamage / PreEliteDamage) : 1.f;
+			ScalingState.EliteRangeMultiplier = PreEliteRange > 0.f ? (PostEliteRange / PreEliteRange) : 1.f;
+		}
 	}
 	else if (EnemyTemplate.bIsMiniBoss && !MiniBossActorTag.IsNone())
 	{
 		SpawnedPawn->Tags.AddUnique(MiniBossActorTag);
 	}
+
+	RegisterProgressEnemy(SpawnedPawn);
 
 	// If the encounter has no wave data and we just started it for this manual spawn, ensure completion can fire when the pawn dies.
 	if (bStartedEncounter && EncounterWavesRuntime.IsEmpty())
@@ -372,7 +566,15 @@ void AAeyerjiSpawnerGroup::HandleSpawnTimer(int32 WaveIndex, int32 SetIndex)
 		return;
 	}
 
-	SpawnOneFromSet(WaveIndex, SetIndex);
+	if (!SpawnOneFromSet(WaveIndex, SetIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Spawner %s failed to spawn wave=%d set=%d; retrying shortly."),
+			*GetNameSafe(this),
+			WaveIndex,
+			SetIndex);
+		ScheduleNextSpawn(WaveIndex, SetIndex, 0.5f);
+		return;
+	}
 
 	int32& Remaining = PendingSpawnCounts[WaveIndex][SetIndex];
 	Remaining = FMath::Max(0, Remaining - 1);
@@ -473,6 +675,7 @@ void AAeyerjiSpawnerGroup::FinishEncounter()
 	bActive = false;
 	bCleared = true;
 	bAwaitingManualSpawns = false;
+	ResetTrackedEnemies();
 
 	SetDoorArrayEnabled(DoorsToClose, false);
 	SetDoorArrayEnabled(DoorsToOpenOnClear, true);
@@ -502,14 +705,125 @@ void AAeyerjiSpawnerGroup::KickoffFirstWave()
 	StartWave(CurrentWaveIndex);
 }
 
-FTransform AAeyerjiSpawnerGroup::ChooseSpawnTransform()
+bool AAeyerjiSpawnerGroup::ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, FTransform& OutTransform)
 {
+	FVector ReferenceLocation = GetActorLocation();
+	const bool bHasReferenceLocation = ResolveSpawnReferenceLocation(ReferenceLocation);
+
 	const int32 SpawnIndex = GetNextSpawnPointIndex();
 	if (SpawnPoints.IsValidIndex(SpawnIndex))
 	{
 		if (AActor* Point = SpawnPoints[SpawnIndex])
 		{
-			return Point->GetActorTransform();
+			const FTransform PointTransform = Point->GetActorTransform();
+			if (!bRequireSpawnReachableFromTarget || !bHasReferenceLocation || IsSpawnCandidateReachable(PointTransform.GetLocation(), ReferenceLocation))
+			{
+				OutTransform = PointTransform;
+				return true;
+			}
+		}
+	}
+
+	float SpawnHalfHeight = 100.f;
+	if (const ACharacter* CharacterCDO = EnemyClass ? Cast<ACharacter>(EnemyClass->GetDefaultObject()) : nullptr)
+	{
+		if (const UCapsuleComponent* Capsule = CharacterCDO->GetCapsuleComponent())
+		{
+			SpawnHalfHeight = FMath::Max(1.f, Capsule->GetScaledCapsuleHalfHeight());
+		}
+	}
+
+	if (UWorld* World = GetWorld())
+	{
+		const float MaxDistanceFromReference = FMath::Max(0.f, SpawnMaxDistanceFromTarget);
+		const int32 MaxRegionSpawnAttempts = FMath::Max(1, SpawnRegionSearchAttempts);
+
+		TArray<AAeyerjiSpawnRegion*> Regions;
+		for (TActorIterator<AAeyerjiSpawnRegion> It(World); It; ++It)
+		{
+			AAeyerjiSpawnRegion* Region = *It;
+			if (!IsValid(Region))
+			{
+				continue;
+			}
+
+			const FBox Bounds = Region->GetRegionBounds();
+			if (!Bounds.IsValid)
+			{
+				continue;
+			}
+
+			if (Region->RegionWeight > 0.f)
+			{
+				Regions.Add(Region);
+			}
+		}
+
+		if (!Regions.IsEmpty())
+		{
+			TArray<AAeyerjiSpawnRegion*> PreferredRegions;
+			for (AAeyerjiSpawnRegion* Region : Regions)
+			{
+				const FBox Bounds = Region->GetRegionBounds();
+				const float DistSq = Bounds.ComputeSquaredDistanceToPoint(ReferenceLocation);
+				if (!bHasReferenceLocation || MaxDistanceFromReference <= 0.f || DistSq <= FMath::Square(MaxDistanceFromReference))
+				{
+					PreferredRegions.Add(Region);
+				}
+			}
+
+			const TArray<AAeyerjiSpawnRegion*>& CandidateRegions = PreferredRegions.IsEmpty() ? Regions : PreferredRegions;
+			const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+			for (int32 Attempt = 0; Attempt < MaxRegionSpawnAttempts; ++Attempt)
+			{
+				AAeyerjiSpawnRegion* Region = CandidateRegions[FMath::RandHelper(CandidateRegions.Num())];
+				const FBox Bounds = Region->GetRegionBounds();
+				const FVector Min = Bounds.Min;
+				const FVector Max = Bounds.Max;
+				const FVector SampleXY(
+					FMath::FRandRange(Min.X, Max.X),
+					FMath::FRandRange(Min.Y, Max.Y),
+					Max.Z + SpawnGroundTraceUpOffset);
+
+				FHitResult GroundHit;
+				const FVector TraceEnd(SampleXY.X, SampleXY.Y, Min.Z - SpawnGroundTraceDownDistance);
+				FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(AeyerjiSurvivalSpawnGround), true, this);
+				if (!World->LineTraceSingleByChannel(GroundHit, SampleXY, TraceEnd, ECC_WorldStatic, QueryParams))
+				{
+					continue;
+				}
+
+				FVector GroundLocation = GroundHit.ImpactPoint;
+				if (NavSys)
+				{
+					FNavLocation Projected;
+					if (!NavSys->ProjectPointToNavigation(GroundLocation, Projected, SpawnNavProjectionExtent))
+					{
+						continue;
+					}
+					GroundLocation = Projected.Location;
+				}
+
+				if (bRequireSpawnReachableFromTarget && bHasReferenceLocation && !IsSpawnCandidateReachable(GroundLocation, ReferenceLocation))
+				{
+					continue;
+				}
+
+				const FVector SpawnLocation = GroundLocation + FVector(0.f, 0.f, SpawnHalfHeight + SpawnGroundClearance);
+				OutTransform = FTransform(GetActorRotation(), SpawnLocation, FVector::OneVector);
+				return true;
+			}
+
+			if (NavSys && bHasReferenceLocation && MaxDistanceFromReference > 0.f)
+			{
+				FNavLocation Reachable;
+				if (NavSys->GetRandomReachablePointInRadius(ReferenceLocation, MaxDistanceFromReference, Reachable)
+					&& (!bRequireSpawnReachableFromTarget || IsSpawnCandidateReachable(Reachable.Location, ReferenceLocation)))
+				{
+					OutTransform = FTransform(GetActorRotation(), Reachable.Location + FVector(0.f, 0.f, SpawnHalfHeight + SpawnGroundClearance), FVector::OneVector);
+					return true;
+				}
+			}
 		}
 	}
 
@@ -517,50 +831,144 @@ FTransform AAeyerjiSpawnerGroup::ChooseSpawnTransform()
 	{
 		if (IsValid(Point))
 		{
-			return Point->GetActorTransform();
+			const FTransform PointTransform = Point->GetActorTransform();
+			if (!bRequireSpawnReachableFromTarget || !bHasReferenceLocation || IsSpawnCandidateReachable(PointTransform.GetLocation(), ReferenceLocation))
+			{
+				OutTransform = PointTransform;
+				return true;
+			}
 		}
 	}
 
-	return GetActorTransform();
+	const FTransform OwnTransform = GetActorTransform();
+	if (!bRequireSpawnReachableFromTarget || !bHasReferenceLocation || IsSpawnCandidateReachable(OwnTransform.GetLocation(), ReferenceLocation))
+	{
+		OutTransform = OwnTransform;
+		return true;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("Spawner %s could not find a reachable spawn point. Reference=%s MinDist=%.1f MaxDist=%.1f Regions/SpawnPoints may be on another nav island."),
+		*GetNameSafe(this),
+		*ReferenceLocation.ToCompactString(),
+		SpawnMinDistanceFromTarget,
+		SpawnMaxDistanceFromTarget);
+	return false;
 }
 
-void AAeyerjiSpawnerGroup::SpawnOneFromSet(int32 WaveIndex, int32 SetIndex)
+bool AAeyerjiSpawnerGroup::ResolveSpawnReferenceLocation(FVector& OutLocation) const
+{
+	if (const AActor* AggroActor = ResolveAggroTargetActor())
+	{
+		OutLocation = AggroActor->GetActorLocation();
+		return true;
+	}
+
+	if (const APawn* AggroPawn = ResolveAggroTargetPawn())
+	{
+		OutLocation = AggroPawn->GetActorLocation();
+		return true;
+	}
+
+	if (bFallbackReachabilityTargetToPlayerStart)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			for (TActorIterator<APlayerStart> It(World); It; ++It)
+			{
+				if (const APlayerStart* PlayerStart = *It)
+				{
+					OutLocation = PlayerStart->GetActorLocation();
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+bool AAeyerjiSpawnerGroup::IsSpawnCandidateReachable(const FVector& CandidateLocation, const FVector& ReferenceLocation) const
+{
+	const float DistSq = FVector::DistSquared2D(CandidateLocation, ReferenceLocation);
+	const float MinDistance = FMath::Max(0.f, SpawnMinDistanceFromTarget);
+	const float MaxDistance = FMath::Max(0.f, SpawnMaxDistanceFromTarget);
+	if (MinDistance > 0.f && DistSq < FMath::Square(MinDistance))
+	{
+		return false;
+	}
+
+	if (MaxDistance > 0.f && DistSq > FMath::Square(MaxDistance))
+	{
+		return false;
+	}
+
+	if (!bRequireSpawnReachableFromTarget)
+	{
+		return true;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	UNavigationPath* Path = UNavigationSystemV1::FindPathToLocationSynchronously(World, CandidateLocation, ReferenceLocation);
+	return Path && Path->IsValid() && !Path->IsPartial();
+}
+
+bool AAeyerjiSpawnerGroup::SpawnOneFromSet(int32 WaveIndex, int32 SetIndex)
 {
 	if (!HasAuthority())
 	{
-		return;
+		return false;
 	}
 
 	if (!EncounterWavesRuntime.IsValidIndex(WaveIndex))
 	{
-		return;
+		return false;
 	}
 
 	const FWaveDefinition& WaveDef = EncounterWavesRuntime[WaveIndex];
 	if (!WaveDef.EnemySets.IsValidIndex(SetIndex))
 	{
-		return;
+		return false;
 	}
 
 	const FEnemySet& EnemySet = WaveDef.EnemySets[SetIndex];
 	if (!EnemySet.EnemyClass)
 	{
-		return;
+		return false;
 	}
 
 	// Safety: bosses/mini-bosses should never flow through wave spawns; only manual RegisterExternalEnemy.
 	if (EnemySet.bIsBoss || EnemySet.bIsMiniBoss)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("SpawnOneFromSet aborted: boss/mini-boss found in wave on %s. Remove from wave data and spawn manually."), *GetNameSafe(this));
-		return;
+		return false;
 	}
 
-	const FTransform SpawnTransform = ChooseSpawnTransform();
+	const FEnemySet ResolvedEnemySet = ResolveEliteSpawnSet(EnemySet);
+	FTransform SpawnTransform;
+	if (!ChooseSpawnTransform(ResolvedEnemySet.EnemyClass, SpawnTransform))
+	{
+		return false;
+	}
+	AActor* AggroActor = ResolveAggroTargetActor();
+	AController* AggroController = ResolveAggroController();
 	APawn* InstigatorPawn = ResolveAggroTargetPawn();
 
-	if (!UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
+	UE_LOG(LogTemp, Log, TEXT("SurvivalSpawner %s spawning wave=%d set=%d class=%s location=%s aggro=%s."),
+		*GetNameSafe(this),
+		WaveIndex,
+		SetIndex,
+		*GetNameSafe(ResolvedEnemySet.EnemyClass),
+		*SpawnTransform.GetLocation().ToCompactString(),
+		*GetNameSafe(AggroActor));
+
+	APawn* SpawnedPawn = UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 		this,
-		EnemySet,
+		ResolvedEnemySet,
 		SpawnTransform,
 		this,
 		/*Owner=*/this,
@@ -569,12 +977,19 @@ void AAeyerjiSpawnerGroup::SpawnOneFromSet(int32 WaveIndex, int32 SetIndex)
 		/*bApplyAggro=*/true,
 		/*bAutoActivate=*/false,
 		/*bAutoActivateOnlyIfNoWaves=*/true,
-		/*ActivationInstigator=*/nullptr,
-		/*ActivationController=*/nullptr,
-		/*bSkipRandomEliteResolution=*/false))
+		/*ActivationInstigator=*/AggroActor,
+		/*ActivationController=*/AggroController,
+		/*bSkipRandomEliteResolution=*/true);
+	if (!SpawnedPawn)
 	{
-		return;
+		return false;
 	}
+
+	if (bTagSpawnedEnemiesAsCullIgnored && !SpawnedEnemyCullIgnoreActorTag.IsNone())
+	{
+		SpawnedPawn->Tags.AddUnique(SpawnedEnemyCullIgnoreActorTag);
+	}
+	return true;
 }
 
 void AAeyerjiSpawnerGroup::SetDoorArrayEnabled(const TArray<TObjectPtr<AActor>>& Targets, bool bEnabled)
@@ -603,8 +1018,203 @@ void AAeyerjiSpawnerGroup::OnEnemyDestroyed(AActor* DestroyedEnemy)
 		return;
 	}
 
-	LiveEnemies = FMath::Max(0, LiveEnemies - 1);
+	HandleTrackedEnemyRemoved(DestroyedEnemy);
+}
+
+void AAeyerjiSpawnerGroup::OnEnemyDied(AActor* DeadEnemy)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	HandleTrackedEnemyRemoved(DeadEnemy);
+}
+
+void AAeyerjiSpawnerGroup::HandleTrackedEnemyRemoved(AActor* EnemyActor)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (IsValid(EnemyActor))
+	{
+		UnbindTrackedEnemy(EnemyActor);
+	}
+
+	bool bRemovedTrackedEnemy = false;
+	for (auto It = TrackedLiveEnemies.CreateIterator(); It; ++It)
+	{
+		const TWeakObjectPtr<AActor>& TrackedEnemy = *It;
+		if (!TrackedEnemy.IsValid() || TrackedEnemy.Get() == EnemyActor)
+		{
+			bRemovedTrackedEnemy = true;
+			It.RemoveCurrent();
+		}
+	}
+
+	if (!bRemovedTrackedEnemy)
+	{
+		return;
+	}
+
+	TrackedEnemyScalingStates.Remove(TWeakObjectPtr<AActor>(EnemyActor));
+	const bool bRemovedBossEnemy = TrackedBossEnemies.Remove(TWeakObjectPtr<AActor>(EnemyActor)) > 0;
+	LiveEnemies = TrackedLiveEnemies.Num();
+	if (bRemovedBossEnemy)
+	{
+		OnBossDefeated.Broadcast(this, EnemyActor);
+	}
 	CheckWaveCompletion();
+}
+
+void AAeyerjiSpawnerGroup::UnbindTrackedEnemy(AActor* EnemyActor)
+{
+	if (!IsValid(EnemyActor))
+	{
+		return;
+	}
+
+	EnemyActor->OnDestroyed.RemoveDynamic(this, &AAeyerjiSpawnerGroup::OnEnemyDestroyed);
+	if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyActor))
+	{
+		Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiSpawnerGroup::OnEnemyDied);
+	}
+}
+
+void AAeyerjiSpawnerGroup::ResetTrackedEnemies()
+{
+	for (const TWeakObjectPtr<AActor>& TrackedEnemy : TrackedLiveEnemies)
+	{
+		if (AActor* EnemyActor = TrackedEnemy.Get())
+		{
+			UnbindTrackedEnemy(EnemyActor);
+		}
+	}
+
+	TrackedLiveEnemies.Reset();
+	TrackedBossEnemies.Reset();
+	TrackedEnemyScalingStates.Reset();
+	LiveEnemies = 0;
+}
+
+float AAeyerjiSpawnerGroup::ResolvePreservedResourceValue(const float OldCurrent, const float OldMax, const float NewMax, const bool bPreserveRatio)
+{
+	if (!bPreserveRatio || OldMax <= 0.f)
+	{
+		return NewMax;
+	}
+
+	const float Ratio = FMath::Clamp(OldCurrent / OldMax, 0.f, 1.f);
+	return NewMax * Ratio;
+}
+
+void AAeyerjiSpawnerGroup::CaptureTrackedBaseValueIfNeeded(const TWeakObjectPtr<AActor>& EnemyKey, UAbilitySystemComponent* ASC, const FGameplayAttribute& Attribute, const FName& AttributeName)
+{
+	if (!EnemyKey.IsValid() || !ASC || !Attribute.IsValid() || AttributeName.IsNone())
+	{
+		return;
+	}
+
+	if (FTrackedEnemyScalingState* ScalingState = TrackedEnemyScalingStates.Find(EnemyKey))
+	{
+		ScalingState->BaseAttributeValues.FindOrAdd(AttributeName, ASC->GetNumericAttribute(Attribute));
+	}
+}
+
+void AAeyerjiSpawnerGroup::RefreshTrackedEnemyScaling(TSet<TWeakObjectPtr<AActor>>& OutHandledEnemies)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	for (auto It = TrackedLiveEnemies.CreateIterator(); It; ++It)
+	{
+		const TWeakObjectPtr<AActor>& EnemyKey = *It;
+		APawn* EnemyPawn = Cast<APawn>(EnemyKey.Get());
+		if (!IsValid(EnemyPawn))
+		{
+			TrackedEnemyScalingStates.Remove(EnemyKey);
+			It.RemoveCurrent();
+			continue;
+		}
+
+		FTrackedEnemyScalingState* ScalingState = TrackedEnemyScalingStates.Find(EnemyKey);
+		if (!ScalingState)
+		{
+			continue;
+		}
+
+		ApplyEnemyScaling(EnemyPawn, ScalingState->ResolvedTemplate);
+
+		if (ScalingState->bHasEliteAutoScaling)
+		{
+			if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(EnemyPawn, /*LookForComponent*/ true))
+			{
+				CaptureTrackedBaseValueIfNeeded(EnemyKey, ASC, UAeyerjiAttributeSet::GetAttackRangeAttribute(), TEXT("AeyerjiAttributeSet.AttackRange"));
+
+				if (const float* BaseRange = ScalingState->BaseAttributeValues.Find(TEXT("AeyerjiAttributeSet.AttackRange")))
+				{
+					ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetAttackRangeAttribute(), *BaseRange);
+				}
+			}
+
+			ApplyEliteStats(
+				EnemyPawn,
+				ScalingState->EliteHealthMultiplier,
+				ScalingState->EliteDamageMultiplier,
+				ScalingState->EliteRangeMultiplier,
+				/*bPreserveHealthRatio=*/true);
+		}
+
+		RefreshSpawnedPawnStatusBar(EnemyPawn);
+		OutHandledEnemies.Add(EnemyKey);
+	}
+
+	LiveEnemies = TrackedLiveEnemies.Num();
+}
+
+void AAeyerjiSpawnerGroup::RegisterProgressEnemy(APawn* SpawnedPawn)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (!IsValid(SpawnedPawn))
+	{
+		return;
+	}
+
+	AAeyerjiEncounterDirector* EncounterDirector = nullptr;
+	if (LevelDirector)
+	{
+		EncounterDirector = LevelDirector->GetEncounterDirector();
+	}
+
+	if (!EncounterDirector)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			for (TActorIterator<AAeyerjiEncounterDirector> It(World); It; ++It)
+			{
+				EncounterDirector = *It;
+				break;
+			}
+		}
+	}
+
+	if (!EncounterDirector || !EncounterDirector->IsFixedWorldPopulationActive())
+	{
+		return;
+	}
+
+	if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(SpawnedPawn))
+	{
+		EncounterDirector->RegisterProgressEnemy(Enemy);
+	}
 }
 
 void AAeyerjiSpawnerGroup::MulticastApplyElitePresentation_Implementation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<FGameplayTag>& AffixTags)
@@ -805,26 +1415,74 @@ FEnemySet AAeyerjiSpawnerGroup::ResolveEliteSpawnSet(const FEnemySet& EnemySet) 
 {
 	FEnemySet ResolvedSet = EnemySet;
 
-	if (!bAllowRandomElites || ResolvedSet.bIsElite || ResolvedSet.bIsMiniBoss || ResolvedSet.bIsBoss)
+	// Mini bosses and bosses should always use their authored class path.
+	if (ResolvedSet.bIsMiniBoss || ResolvedSet.bIsBoss)
 	{
 		return ResolvedSet;
 	}
 
-	const float Chance = FMath::Clamp(RandomEliteChance, 0.f, 1.f);
-	if (Chance <= 0.f)
+	TArray<TSubclassOf<APawn>> CandidateEliteClasses;
+	const TArray<TSubclassOf<APawn>>& PreferredPool =
+		ResolvedSet.EliteEnemyClassPoolOverride.Num() > 0 ? ResolvedSet.EliteEnemyClassPoolOverride : EliteEnemyClassPool;
+	for (TSubclassOf<APawn> CandidateClass : PreferredPool)
 	{
-		return ResolvedSet;
+		if (*CandidateClass)
+		{
+			CandidateEliteClasses.Add(CandidateClass);
+		}
 	}
 
-	if (Chance >= 1.f || FMath::FRand() <= Chance)
+	auto ResolveEliteClass = [&CandidateEliteClasses]() -> TSubclassOf<APawn>
 	{
+		if (CandidateEliteClasses.Num() <= 0)
+		{
+			return nullptr;
+		}
+
+		const int32 Index = FMath::RandHelper(CandidateEliteClasses.Num());
+		return CandidateEliteClasses[Index];
+	};
+
+	const bool bAlreadyElite = ResolvedSet.bIsElite;
+	if (!bAlreadyElite)
+	{
+		if (!bAllowRandomElites)
+		{
+			return ResolvedSet;
+		}
+
+		const float Chance = FMath::Clamp(RandomEliteChance, 0.f, 1.f);
+		if (Chance <= 0.f)
+		{
+			return ResolvedSet;
+		}
+
+		if (bRequireEliteClassPoolForRandomPromotion && CandidateEliteClasses.IsEmpty())
+		{
+			return ResolvedSet;
+		}
+
+		if (!(Chance >= 1.f || FMath::FRand() <= Chance))
+		{
+			return ResolvedSet;
+		}
+
 		ResolvedSet.bIsElite = true;
+	}
+
+	if (ResolvedSet.bIsElite)
+	{
+		TSubclassOf<APawn> EliteClass = ResolveEliteClass();
+		if (*EliteClass)
+		{
+			ResolvedSet.EnemyClass = EliteClass;
+		}
 	}
 
 	return ResolvedSet;
 }
 
-void AAeyerjiSpawnerGroup::ApplyEliteStats(APawn* SpawnedPawn, float HealthMultiplier, float DamageMultiplier, float RangeMultiplier)
+void AAeyerjiSpawnerGroup::ApplyEliteStats(APawn* SpawnedPawn, float HealthMultiplier, float DamageMultiplier, float RangeMultiplier, bool bPreserveHealthRatio)
 {
 	if (!HasAuthority() || !IsValid(SpawnedPawn))
 	{
@@ -841,6 +1499,8 @@ void AAeyerjiSpawnerGroup::ApplyEliteStats(APawn* SpawnedPawn, float HealthMulti
 	const FGameplayAttribute HPMaxAttr = UAeyerjiAttributeSet::GetHPMaxAttribute();
 	const FGameplayAttribute DamageAttr = UAeyerjiAttributeSet::GetAttackDamageAttribute();
 	const FGameplayAttribute RangeAttr = UAeyerjiAttributeSet::GetAttackRangeAttribute();
+	const float OldHP = HPAttr.IsValid() ? ASC->GetNumericAttribute(HPAttr) : 0.f;
+	const float OldHPMax = HPMaxAttr.IsValid() ? ASC->GetNumericAttribute(HPMaxAttr) : 0.f;
 
 	const float SafeHealth = FMath::Max(KINDA_SMALL_NUMBER, HealthMultiplier);
 	const float SafeDamage = FMath::Max(KINDA_SMALL_NUMBER, DamageMultiplier);
@@ -869,7 +1529,7 @@ void AAeyerjiSpawnerGroup::ApplyEliteStats(APawn* SpawnedPawn, float HealthMulti
 
 		if (HPAttr.IsValid())
 		{
-			ASC->SetNumericAttributeBase(HPAttr, NewMax);
+			ASC->SetNumericAttributeBase(HPAttr, ResolvePreservedResourceValue(OldHP, OldHPMax, NewMax, bPreserveHealthRatio));
 		}
 	}
 }
@@ -980,8 +1640,9 @@ const FEliteAffixDefinition* AAeyerjiSpawnerGroup::FindAffixDefinition(const FGa
 float AAeyerjiSpawnerGroup::ComputeEliteScale(const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes) const
 {
 	float Scale = EnemySet.EliteScaleMultiplierOverride > 0.f ? EnemySet.EliteScaleMultiplierOverride : EliteScaleMultiplier;
+	const bool bApplyMiniBossBonuses = EnemySet.bIsMiniBoss && !EnemySet.bIsBoss;
 
-	if (EnemySet.bIsMiniBoss)
+	if (bApplyMiniBossBonuses)
 	{
 		Scale *= MiniBossScaleMultiplier;
 	}
@@ -1002,7 +1663,7 @@ float AAeyerjiSpawnerGroup::ComputeEliteScale(const FEnemySet& EnemySet, const T
 	return Scale;
 }
 
-void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes)
+void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes, bool bApplyXPMultipliers)
 {
 	if (!IsValid(SpawnedPawn))
 	{
@@ -1010,6 +1671,7 @@ void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySe
 	}
 
 	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(SpawnedPawn);
+	const bool bApplyMiniBossBonuses = EnemySet.bIsMiniBoss && !EnemySet.bIsBoss;
 
 	if (ASC)
 	{
@@ -1018,7 +1680,7 @@ void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySe
 			ASC->AddLooseGameplayTag(EliteGameplayTag);
 		}
 
-		if (EnemySet.bIsMiniBoss && MiniBossGameplayTag.IsValid())
+		if (bApplyMiniBossBonuses && MiniBossGameplayTag.IsValid())
 		{
 			ASC->AddLooseGameplayTag(MiniBossGameplayTag);
 		}
@@ -1063,7 +1725,7 @@ void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySe
 	}
 
 	// Mini-boss signature abilities (set override or default list).
-	if (ASC && EnemySet.bIsMiniBoss)
+	if (ASC && bApplyMiniBossBonuses)
 	{
 		const TArray<TSubclassOf<UGameplayAbility>>& MiniBossAbilities =
 			(EnemySet.MiniBossGrantedAbilities.Num() > 0) ? EnemySet.MiniBossGrantedAbilities : DefaultMiniBossAbilities;
@@ -1112,7 +1774,7 @@ void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySe
 		}
 	}
 
-	if (ASC)
+	if (ASC && bApplyXPMultipliers)
 	{
 		const UAeyerjiRewardAttributeSet* RewardSet = ASC->GetSet<UAeyerjiRewardAttributeSet>();
 		if (RewardSet)
@@ -1121,7 +1783,7 @@ void AAeyerjiSpawnerGroup::ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySe
 			const float CurrentXP = ASC->GetNumericAttribute(XPAttr);
 
 			float XPMult = EnemySet.EliteXPMultiplierOverride > 0.f ? EnemySet.EliteXPMultiplierOverride : EliteXPMultiplier;
-			if (EnemySet.bIsMiniBoss)
+			if (bApplyMiniBossBonuses)
 			{
 				const float MiniMult = EnemySet.MiniBossXPMultiplierOverride > 0.f ? EnemySet.MiniBossXPMultiplierOverride : MiniBossXPMultiplier;
 				XPMult *= MiniMult;
@@ -1231,6 +1893,7 @@ void AAeyerjiSpawnerGroup::ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet
 
 	FEnemySet RuntimeSet = EnemySet;
 	RuntimeSet.bIsElite = RuntimeSet.bIsElite || RuntimeSet.bIsMiniBoss || RuntimeSet.bIsBoss;
+	const bool bApplyMiniBossBonuses = RuntimeSet.bIsMiniBoss && !RuntimeSet.bIsBoss;
 
 	if (!RuntimeSet.bIsElite)
 	{
@@ -1242,7 +1905,7 @@ void AAeyerjiSpawnerGroup::ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet
 		SpawnedPawn->Tags.AddUnique(EliteActorTag);
 	}
 
-	if (RuntimeSet.bIsMiniBoss && !MiniBossActorTag.IsNone())
+	if (bApplyMiniBossBonuses && !MiniBossActorTag.IsNone())
 	{
 		SpawnedPawn->Tags.AddUnique(MiniBossActorTag);
 	}
@@ -1252,13 +1915,39 @@ void AAeyerjiSpawnerGroup::ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet
 		SpawnedPawn->Tags.AddUnique(BossActorTag);
 	}
 
+	if (RuntimeSet.bSkipEliteAutoScaling)
+	{
+		// Keep authored elite stats, but still apply affix gameplay (tags/abilities/effects) and visuals.
+		TArray<const FEliteAffixDefinition*> Affixes = BuildEliteAffixLoadout(RuntimeSet);
+		ApplyEliteGameplay(SpawnedPawn, RuntimeSet, Affixes, /*bApplyXPMultipliers=*/true);
+
+		TArray<FGameplayTag> AffixTags;
+		for (const FEliteAffixDefinition* Affix : Affixes)
+		{
+			if (Affix && Affix->AffixTag.IsValid())
+			{
+				AffixTags.Add(Affix->AffixTag);
+			}
+		}
+
+		// Preserve elite visual marking but do not change actor scale when authored stats are used.
+		MulticastApplyElitePresentation(SpawnedPawn, 1.f, AffixTags);
+		AJ_LOG(this, TEXT("ApplyElitePackage bypassed auto stat scaling only: Pawn=%s Elite=%d SkipEliteAutoScaling=%d AffixCount=%d"),
+			*GetNameSafe(SpawnedPawn),
+			RuntimeSet.bIsElite ? 1 : 0,
+			RuntimeSet.bSkipEliteAutoScaling ? 1 : 0,
+			AffixTags.Num());
+		RefreshSpawnedPawnStatusBar(SpawnedPawn);
+		return;
+	}
+
 	TArray<const FEliteAffixDefinition*> Affixes = BuildEliteAffixLoadout(RuntimeSet);
 
 	float HealthMult = RuntimeSet.EliteHealthMultiplierOverride > 0.f ? RuntimeSet.EliteHealthMultiplierOverride : EliteHealthMultiplier;
 	float DamageMult = RuntimeSet.EliteDamageMultiplierOverride > 0.f ? RuntimeSet.EliteDamageMultiplierOverride : EliteDamageMultiplier;
 	float RangeMult = RuntimeSet.EliteRangeMultiplierOverride > 0.f ? RuntimeSet.EliteRangeMultiplierOverride : EliteRangeMultiplier;
 
-	if (RuntimeSet.bIsMiniBoss)
+	if (bApplyMiniBossBonuses)
 	{
 		HealthMult *= MiniBossHealthMultiplier;
 		DamageMult *= MiniBossDamageMultiplier;
@@ -1286,7 +1975,7 @@ void AAeyerjiSpawnerGroup::ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet
 	const float ScaleMult = ComputeEliteScale(RuntimeSet, Affixes);
 
 	ApplyEliteStats(SpawnedPawn, HealthMult, DamageMult, RangeMult);
-	ApplyEliteGameplay(SpawnedPawn, RuntimeSet, Affixes);
+	ApplyEliteGameplay(SpawnedPawn, RuntimeSet, Affixes, /*bApplyXPMultipliers=*/true);
 
 	TArray<FGameplayTag> AffixTags;
 	for (const FEliteAffixDefinition* Affix : Affixes)
@@ -1299,6 +1988,14 @@ void AAeyerjiSpawnerGroup::ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet
 
 	// Cosmetic FX are multicast so dedicated servers can show them to clients even though they cannot render.
 	MulticastApplyElitePresentation(SpawnedPawn, ScaleMult, AffixTags);
+	AJ_LOG(this, TEXT("ApplyElitePackage applied: Pawn=%s Elite=%d MiniBoss=%d Boss=%d AffixCount=%d ScaleMult=%.2f"),
+		*GetNameSafe(SpawnedPawn),
+		RuntimeSet.bIsElite ? 1 : 0,
+		RuntimeSet.bIsMiniBoss ? 1 : 0,
+		RuntimeSet.bIsBoss ? 1 : 0,
+		AffixTags.Num(),
+		ScaleMult);
+	RefreshSpawnedPawnStatusBar(SpawnedPawn);
 }
 
 void AAeyerjiSpawnerGroup::HandleActivationEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload)
@@ -1597,32 +2294,38 @@ void AAeyerjiSpawnerGroup::ApplyEnemyScaling(APawn* SpawnedPawn, const FEnemySet
 		Enemy->ApplyArchetypeData();
 	}
 
+	const TWeakObjectPtr<AActor> EnemyKey(SpawnedPawn);
+	FTrackedEnemyScalingState* ScalingState = TrackedEnemyScalingStates.Find(EnemyKey);
+	const bool bPreserveResourceRatio = ScalingState && ScalingState->BaseAttributeValues.Num() > 0;
+	const float OldHP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
+	const float OldHPMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+	const float OldMana = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaAttribute());
+	const float OldManaMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaMaxAttribute());
+
 	const int32 PlayerLevel = ResolvePlayerLevelForScaling();
-	const bool bForcePlayerLevel = LevelDirector && LevelDirector->ShouldForceEnemyLevelToPlayerLevel();
-	const float DirectorDifficultyCurved = LevelDirector ? LevelDirector->GetCurvedDifficulty() : 0.f;
+	const int32 EnemyLevel = LevelDirector
+		? LevelDirector->GetEffectiveEnemyLevelForPlayerLevel(PlayerLevel)
+		: UAeyerjiDifficultySettings::Get()->EvaluateEnemyLevel(PlayerLevel);
+	const float DifficultyAlpha = LevelDirector
+		? LevelDirector->GetDerivedDifficultyAlpha()
+		: UAeyerjiDifficultySettings::Get()->EvaluateDifficultyAlpha(UAeyerjiDifficultySettings::GetNormalWorldTier());
+	const float GlobalStatBudgetMultiplier = LevelDirector
+		? LevelDirector->GetGlobalStatBudgetMultiplier()
+		: UAeyerjiDifficultySettings::Get()->EvaluateStatBudget(UAeyerjiDifficultySettings::GetNormalWorldTier());
 
 	const FEnemyScalingRow* Row = FindScalingRow(EnemySet.EnemyArchetypeTag);
 	if (!Row)
 	{
-		const int32 EnemyLevel = FMath::Max(1, PlayerLevel);
 		ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetLevelAttribute(), static_cast<float>(EnemyLevel));
 
 		if (Enemy)
 		{
-			Enemy->SetScalingSnapshot(EnemyLevel, DirectorDifficultyCurved, Enemy->GetScalingSourceTag());
+			Enemy->SetScalingSnapshot(EnemyLevel, DifficultyAlpha, Enemy->GetScalingSourceTag());
 		}
 
+		RefreshSpawnedPawnStatusBar(SpawnedPawn);
 		return;
 	}
-
-	const float DifficultyScale = LevelDirector ? LevelDirector->GetDifficultyScale() : 0.f;
-	const float DifficultyCurved = FMath::Pow(FMath::Clamp(DifficultyScale, 0.f, 1.f), FMath::Max(0.1f, Row->DifficultyExponent));
-
-	const float BaseLevel = FMath::Max(1.f, Row->BaseLevel);
-	const float LevelAdvantage = Row->MaxLevelAdvantage * DifficultyCurved;
-	const int32 EnemyLevel = bForcePlayerLevel
-		? FMath::Max(1, PlayerLevel)
-		: FMath::Max(1, FMath::RoundToInt(FMath::Max(BaseLevel, PlayerLevel + LevelAdvantage)));
 
 	ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetLevelAttribute(), static_cast<float>(EnemyLevel));
 
@@ -1635,23 +2338,46 @@ void AAeyerjiSpawnerGroup::ApplyEnemyScaling(APawn* SpawnedPawn, const FEnemySet
 		}
 
 		const int32 LevelDelta = FMath::Max(EnemyLevel - 1, 0);
-		float Value = ASC->GetNumericAttribute(Attr);
-		Value = (Value * (1.f + Entry.PerLevelMultiplier * LevelDelta)) + (Entry.PerLevelAdd * LevelDelta);
+		float PerLevelAdd = Entry.PerLevelAdd;
+		float MinValue = Entry.MinValue;
+		float MaxValue = Entry.MaxValue;
+		if (Attr == UAeyerjiAttributeSet::GetAttackSpeedAttribute() && MaxValue > 0.f && MaxValue <= 10.f)
+		{
+			// Legacy EnemyScaling rows stored AttackSpeed clamps as attacks/sec. Runtime attributes use rating units.
+			PerLevelAdd *= 100.f;
+			MinValue *= 100.f;
+			MaxValue *= 100.f;
+		}
 
-		const float DifficultyMult = FMath::Lerp(Entry.DifficultyMinMultiplier, Entry.DifficultyMaxMultiplier, DifficultyCurved);
-		Value *= DifficultyMult;
+		float BaseValue = ASC->GetNumericAttribute(Attr);
+		if (ScalingState)
+		{
+			if (const float* CachedBaseValue = ScalingState->BaseAttributeValues.Find(Entry.AttributeName))
+			{
+				BaseValue = *CachedBaseValue;
+			}
+			else
+			{
+				ScalingState->BaseAttributeValues.Add(Entry.AttributeName, BaseValue);
+			}
+		}
+
+		float Value = BaseValue;
+		Value = (Value * (1.f + Entry.PerLevelMultiplier * LevelDelta)) + (PerLevelAdd * LevelDelta);
 
 		if (Enemy)
 		{
 			Enemy->ApplyArchetypeStatMultipliers(Entry.AttributeName, Value);
 		}
 
-		const bool bClampMin = !FMath::IsNearlyZero(Entry.MinValue);
-		const bool bClampMax = !FMath::IsNearlyZero(Entry.MaxValue);
+		Value *= GlobalStatBudgetMultiplier;
+
+		const bool bClampMin = !FMath::IsNearlyZero(MinValue);
+		const bool bClampMax = !FMath::IsNearlyZero(MaxValue);
 		if (bClampMin || bClampMax)
 		{
-			const float Min = bClampMin ? Entry.MinValue : Value;
-			const float Max = bClampMax ? Entry.MaxValue : Value;
+			const float Min = bClampMin ? MinValue : Value;
+			const float Max = bClampMax ? MaxValue : Value;
 			Value = FMath::Clamp(Value, Min, Max);
 		}
 
@@ -1659,18 +2385,24 @@ void AAeyerjiSpawnerGroup::ApplyEnemyScaling(APawn* SpawnedPawn, const FEnemySet
 
 		if (Attr == UAeyerjiAttributeSet::GetHPMaxAttribute())
 		{
-			ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(), Value);
+			ASC->SetNumericAttributeBase(
+				UAeyerjiAttributeSet::GetHPAttribute(),
+				ResolvePreservedResourceValue(OldHP, OldHPMax, Value, bPreserveResourceRatio));
 		}
 		else if (Attr == UAeyerjiAttributeSet::GetManaMaxAttribute())
 		{
-			ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetManaAttribute(), Value);
+			ASC->SetNumericAttributeBase(
+				UAeyerjiAttributeSet::GetManaAttribute(),
+				ResolvePreservedResourceValue(OldMana, OldManaMax, Value, bPreserveResourceRatio));
 		}
 	}
 
 	if (Enemy)
 	{
-		Enemy->SetScalingSnapshot(EnemyLevel, DifficultyCurved, Row->SourceTag);
+		Enemy->SetScalingSnapshot(EnemyLevel, DifficultyAlpha, Row->SourceTag);
 	}
+
+	RefreshSpawnedPawnStatusBar(SpawnedPawn);
 }
 
 const FEnemyScalingRow* AAeyerjiSpawnerGroup::FindScalingRow(const FGameplayTag& ArchetypeTag) const
@@ -1754,7 +2486,7 @@ int32 AAeyerjiSpawnerGroup::ResolvePlayerLevelForScaling() const
 {
 	if (LevelDirector)
 	{
-		return LevelDirector->GetCurrentPlayerLevel();
+		return LevelDirector->GetEnemyScalingPlayerLevel();
 	}
 
 	if (APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0))
@@ -1762,7 +2494,7 @@ int32 AAeyerjiSpawnerGroup::ResolvePlayerLevelForScaling() const
 		if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(PlayerPawn, /*LookForComponent*/ true))
 		{
 			const float Level = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetLevelAttribute());
-			return FMath::Max(1, FMath::RoundToInt(Level));
+			return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Level));
 		}
 	}
 

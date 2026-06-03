@@ -2,10 +2,14 @@
 
 #include "Components/OutlineHighlightComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "NiagaraComponent.h"
 #include "NiagaraFunctionLibrary.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "NiagaraSystem.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Logging/AeyerjiLog.h"
 
 UAeyerjiPickupFXComponent::UAeyerjiPickupFXComponent()

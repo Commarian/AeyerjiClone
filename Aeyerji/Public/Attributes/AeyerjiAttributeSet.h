@@ -54,7 +54,16 @@ public:
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Strength,          Category="Stats|Core",    SaveGame) FGameplayAttributeData Strength;           AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, Strength)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Agility,           Category="Stats|Core",    SaveGame) FGameplayAttributeData Agility;            AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, Agility)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Intellect,           Category="Stats|Core",    SaveGame) FGameplayAttributeData Intellect;            AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, Intellect)
-    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Ailment,           Category="Stats|Core",    SaveGame) FGameplayAttributeData Ailment;            AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, Ailment)
+
+    /* ---------- Ailments ---------- */
+    // Ailment Amount is flat DPS added when that ailment is applied (1.0 = +1 damage/sec).
+    // Ailment Duration is flat seconds added to that ailment's duration (1.0 = +1 second).
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_PoisonAmount,      Category="Stats|Ailment", SaveGame) FGameplayAttributeData PoisonAmount;       AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, PoisonAmount)
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_PoisonDuration,    Category="Stats|Ailment", SaveGame) FGameplayAttributeData PoisonDuration;     AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, PoisonDuration)
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_TraumaAmount,      Category="Stats|Ailment", SaveGame) FGameplayAttributeData TraumaAmount;       AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, TraumaAmount)
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_TraumaDuration,    Category="Stats|Ailment", SaveGame) FGameplayAttributeData TraumaDuration;     AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, TraumaDuration)
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CorruptionAmount,  Category="Stats|Ailment", SaveGame) FGameplayAttributeData CorruptionAmount;   AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, CorruptionAmount)
+    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CorruptionDuration,Category="Stats|Ailment", SaveGame) FGameplayAttributeData CorruptionDuration; AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, CorruptionDuration)
 
     /* ---------- Derived (from Core) ---------- */
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CritChance,        Category="Stats|Derived", SaveGame) FGameplayAttributeData CritChance;         AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, CritChance)
@@ -64,8 +73,6 @@ public:
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_ManaRegen,         Category="Stats|Derived", SaveGame) FGameplayAttributeData ManaRegen;          AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, ManaRegen)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_HPRegen,           Category="Stats|Derived", SaveGame) FGameplayAttributeData HPRegen;            AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, HPRegen)
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_CooldownReduction, Category="Stats|Derived", SaveGame) FGameplayAttributeData CooldownReduction;  AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, CooldownReduction)
-    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_AilmentDPS,        Category="Stats|Derived", SaveGame) FGameplayAttributeData AilmentDPS;         AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, AilmentDPS)
-    UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_AilmentDuration,   Category="Stats|Derived", SaveGame) FGameplayAttributeData AilmentDuration;    AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, AilmentDuration)
 
     /* ---------- XP / Level ---------- */
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_XP,                Category="Stats|XP", SaveGame) FGameplayAttributeData XP;       AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, XP)
@@ -98,7 +105,12 @@ public:
     UFUNCTION() void OnRep_Strength                  (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, Strength, Old); }
     UFUNCTION() void OnRep_Agility                   (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, Agility, Old); }
     UFUNCTION() void OnRep_Intellect                   (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, Intellect, Old); }
-    UFUNCTION() void OnRep_Ailment                   (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, Ailment, Old); }
+    UFUNCTION() void OnRep_PoisonAmount              (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, PoisonAmount, Old); }
+    UFUNCTION() void OnRep_PoisonDuration            (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, PoisonDuration, Old); }
+    UFUNCTION() void OnRep_TraumaAmount              (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, TraumaAmount, Old); }
+    UFUNCTION() void OnRep_TraumaDuration            (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, TraumaDuration, Old); }
+    UFUNCTION() void OnRep_CorruptionAmount          (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, CorruptionAmount, Old); }
+    UFUNCTION() void OnRep_CorruptionDuration        (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, CorruptionDuration, Old); }
 
     UFUNCTION() void OnRep_CritChance                (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, CritChance, Old); }
     UFUNCTION() void OnRep_DodgeChance               (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, DodgeChance, Old); }
@@ -107,8 +119,6 @@ public:
     UFUNCTION() void OnRep_ManaRegen                 (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, ManaRegen, Old); }
     UFUNCTION() void OnRep_HPRegen                   (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, HPRegen, Old); }
     UFUNCTION() void OnRep_CooldownReduction         (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, CooldownReduction, Old); }
-    UFUNCTION() void OnRep_AilmentDPS                (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, AilmentDPS, Old); }
-    UFUNCTION() void OnRep_AilmentDuration           (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, AilmentDuration, Old); }
 
     UFUNCTION() void OnRep_XP                        (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, XP, Old); }
     UFUNCTION() void OnRep_XPMax                     (const FGameplayAttributeData& Old) const { GAMEPLAYATTRIBUTE_REPNOTIFY(UAeyerjiAttributeSet, XPMax, Old); }

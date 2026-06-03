@@ -2,9 +2,10 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "GameplayCueNotify_Static.h"
-#include "NiagaraFunctionLibrary.h"
-#include "Kismet/GameplayStatics.h"
 #include "GCN_Blink_In.generated.h"
+
+class UNiagaraSystem;
+class USoundBase;
 
 UCLASS()
 class AEYERJI_API UGCN_Blink_In : public UGameplayCueNotify_Static

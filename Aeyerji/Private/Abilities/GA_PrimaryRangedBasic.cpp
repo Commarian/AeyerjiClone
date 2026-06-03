@@ -10,7 +10,9 @@
 #include "Enemy/EnemyAIController.h"
 #include "Enemy/AeyerjiEnemyArchetypeComponent.h"
 #include "GAS/GE_DamagePhysical.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Controller.h"
 #include "GameFramework/Pawn.h"
 #include "GenericTeamAgentInterface.h"
@@ -47,12 +49,26 @@ UGA_PrimaryRangedBasic::UGA_PrimaryRangedBasic()
 
 	ActivationOwnedTags.AddTag(AeyerjiTags::Ability_Primary);
 	ActivationBlockedTags.Reset();
+	ActivationBlockedTags.AddTag(AeyerjiTags::State_Dead);
+	ActivationBlockedTags.AddTag(AeyerjiTags::State_CrowdControl_Stunned);
 	ActivationBlockedTags.AddTag(AeyerjiTags::Cooldown_PrimaryAttack);
 
 	if (!DamageSetByCallerTag.IsValid())
 	{
 		static const FName DamageTagName(TEXT("SetByCaller.Damage.Instant"));
 		DamageSetByCallerTag = FGameplayTag::RequestGameplayTag(DamageTagName, /*ErrorIfNotFound=*/false);
+	}
+
+	if (!AilmentDamagePerSecondSetByCallerTag.IsValid())
+	{
+		static const FName AilmentDamageTagName(TEXT("SetByCaller.Damage.PerSecond"));
+		AilmentDamagePerSecondSetByCallerTag = FGameplayTag::RequestGameplayTag(AilmentDamageTagName, /*ErrorIfNotFound=*/false);
+	}
+
+	if (!AilmentDurationSetByCallerTag.IsValid())
+	{
+		static const FName AilmentDurationTagName(TEXT("SetByCaller.Duration"));
+		AilmentDurationSetByCallerTag = FGameplayTag::RequestGameplayTag(AilmentDurationTagName, /*ErrorIfNotFound=*/false);
 	}
 }
 
@@ -347,6 +363,7 @@ void UGA_PrimaryRangedBasic::HandleProjectileImpact(AActor* HitActor, const FHit
 	if (ShouldProcessServerLogic())
 	{
 		ApplyDamageToTarget(TargetData);
+		ApplyAilmentsToTargetData(TargetData);
 		BP_HandleRangedDamage(HitActor, TargetData);
 		BroadcastPrimaryAttackComplete();
 	}
@@ -410,6 +427,117 @@ void UGA_PrimaryRangedBasic::ApplyDamageToTarget(const FGameplayAbilityTargetDat
 	{
 		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("ApplyDamageToTarget: Spec built but no effects were applied."));
 	}
+}
+
+void UGA_PrimaryRangedBasic::ApplyAilmentsToTargetData(const FGameplayAbilityTargetDataHandle& TargetData)
+{
+	if (TargetData.Num() == 0 || AilmentEffectsByType.Num() == 0)
+	{
+		return;
+	}
+
+	const FGameplayAbilityActorInfo* ActorInfo = GetCurrentActorInfo();
+	const UAbilitySystemComponent* SourceASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+	const UAeyerjiAttributeSet* AttrSet = SourceASC ? SourceASC->GetSet<UAeyerjiAttributeSet>() : nullptr;
+	if (!AttrSet)
+	{
+		return;
+	}
+
+	FGameplayTagContainer SourceTags = GetAssetTags();
+	if (SourceASC)
+	{
+		FGameplayTagContainer OwnedTags;
+		SourceASC->GetOwnedGameplayTags(OwnedTags);
+		SourceTags.AppendTags(OwnedTags);
+	}
+
+	for (const TPair<FGameplayTag, TSoftClassPtr<UGameplayEffect>>& Pair : AilmentEffectsByType)
+	{
+		const FGameplayTag& AilmentTag = Pair.Key;
+		if (!AilmentTag.IsValid() || !SourceTags.HasTag(AilmentTag))
+		{
+			continue;
+		}
+
+		TSubclassOf<UGameplayEffect> AilmentClass = Pair.Value.Get();
+		if (!AilmentClass && Pair.Value.ToSoftObjectPath().IsValid())
+		{
+			AilmentClass = Pair.Value.LoadSynchronous();
+		}
+
+		if (!AilmentClass)
+		{
+			continue;
+		}
+
+		float AilmentAmount = 0.f;
+		float AilmentDuration = 0.f;
+		if (!ResolveAilmentMagnitudes(AilmentTag, AilmentAmount, AilmentDuration))
+		{
+			continue;
+		}
+
+		FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(AilmentClass, GetAbilityLevel());
+		if (!SpecHandle.IsValid() || !SpecHandle.Data.IsValid())
+		{
+			continue;
+		}
+
+		if (AilmentDamagePerSecondSetByCallerTag.IsValid())
+		{
+			SpecHandle.Data->SetSetByCallerMagnitude(AilmentDamagePerSecondSetByCallerTag, AilmentAmount);
+		}
+
+		if (AilmentDurationSetByCallerTag.IsValid())
+		{
+			SpecHandle.Data->SetSetByCallerMagnitude(AilmentDurationSetByCallerTag, AilmentDuration);
+		}
+
+		ApplyGameplayEffectSpecToTarget(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, SpecHandle, TargetData);
+	}
+}
+
+bool UGA_PrimaryRangedBasic::ResolveAilmentMagnitudes(const FGameplayTag& AilmentTypeTag, float& OutAmount, float& OutDuration) const
+{
+	OutAmount = 0.f;
+	OutDuration = 0.f;
+
+	if (!AilmentTypeTag.IsValid())
+	{
+		return false;
+	}
+
+	const UAbilitySystemComponent* SourceASC = GetCurrentActorInfo() ? GetCurrentActorInfo()->AbilitySystemComponent.Get() : nullptr;
+	const UAeyerjiAttributeSet* AttrSet = SourceASC ? SourceASC->GetSet<UAeyerjiAttributeSet>() : nullptr;
+	if (!AttrSet)
+	{
+		return false;
+	}
+
+	const FString TagString = AilmentTypeTag.ToString();
+	if (TagString.StartsWith(TEXT("AilmentType.Poison")))
+	{
+		OutAmount = AttrSet->GetPoisonAmount();
+		OutDuration = AttrSet->GetPoisonDuration();
+		return true;
+	}
+
+	if (TagString.StartsWith(TEXT("AilmentType.Trauma")))
+	{
+		OutAmount = AttrSet->GetTraumaAmount();
+		OutDuration = AttrSet->GetTraumaDuration();
+		return true;
+	}
+
+	if (TagString.StartsWith(TEXT("AilmentType.Corruption")))
+	{
+		OutAmount = AttrSet->GetCorruptionAmount();
+		OutDuration = AttrSet->GetCorruptionDuration();
+		return true;
+	}
+
+	return false;
 }
 
 bool UGA_PrimaryRangedBasic::BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecHandle) const

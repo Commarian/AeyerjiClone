@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "Abilities/GA_AeyerjiBase.h"
 #include "GameplayTagContainer.h"
-#include "Abilities/Blink/DA_Blink.h"
 #include "GABlink.generated.h"
 
 /**
@@ -29,10 +28,6 @@ protected:
 	/* -------- Tunables -------- */
 	UPROPERTY(EditDefaultsOnly, Category = "Blink|Tuning", meta=(ClampMin="0"))
 	float MaxBlinkDistance = 1000.f;
-
-	/** Optional data asset that defines range/mana/cooldown per blink variant. */
-	UPROPERTY(EditDefaultsOnly, Category="Blink|Tuning")
-	TObjectPtr<UDA_Blink> BlinkConfig = nullptr;
 
 	/* Optional local container for our cooldown tag */
 	UPROPERTY(EditDefaultsOnly, Category="Blink|Tags")

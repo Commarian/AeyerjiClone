@@ -111,6 +111,14 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatusBar|Resource")
     float MinResourceToShow = 0.5f;
 
+    /** Safety net for missed delegate events (e.g. respawn/load ordering). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatusBar|Runtime")
+    float PeriodicResyncInterval = 0.10f;
+
+    /** Test hook: performs one delayed pull after binding to help diagnose startup timing races. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatusBar|Runtime", meta=(ClampMin="0.0"))
+    float InitialDelayedSyncSeconds = 0.20f;
+
     // ----- GAS Binding -----
     UFUNCTION(BlueprintCallable, Category="Aeyerji|StatusBar")
     void BindToAttributes(UAbilitySystemComponent* InASC,
@@ -144,6 +152,7 @@ public:
     virtual bool BP_ShouldShowResource_Implementation(UAbilitySystemComponent* InASC);
 
 protected:
+    virtual void NativeOnInitialized() override;
     virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
     virtual void NativeDestruct() override;
 
@@ -189,6 +198,9 @@ private:
 
     float HealFlash = 0.f;
     float DmgFlash  = 0.f;
+    float ResyncAccumulator = 0.f;
+    bool bHasObservedHealthUpdate = false;
+    bool bHasObservedManaUpdate = false;
 
     // Helpers
     void OnHealthChanged(const FOnAttributeChangeData& Data);
@@ -218,4 +230,10 @@ private:
     void UpdateHPValueLabels();
     void UpdateManaValueLabels();
     void UpdateRegenLabels();
+    float GetDisplayedHealthValue(float CurrentHP, float MaxHP) const;
+    float GetDisplayedManaValue(float CurrentMana, float MaxMana) const;
+    void ScheduleDelayedInitialSync();
+    void RunDelayedInitialSync();
+
+    FTimerHandle InitialDelayedSyncTimer;
 };

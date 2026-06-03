@@ -8,8 +8,8 @@
 
 class UAbilitySystemComponent;
 class UGameplayAbility;
-class UAeyerjiAbilityData;
 class UTexture2D;
+struct FAeyerjiAbilityTableRow;
 
 /** Source widget requesting the ability tooltip (action bar vs picker). */
 UENUM(BlueprintType)
@@ -50,6 +50,14 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category="Ability|Cost")
 	float CooldownSeconds = 0.f;
 
+	/** Minimum character level required before this ability can be unlocked. */
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Progression")
+	int32 RequiredLevel = 1;
+
+	/** Whether this ability starts unlocked before progression gates are evaluated. */
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Progression")
+	bool bUnlockedByDefault = false;
+
 	UPROPERTY(BlueprintReadOnly, Category="Ability|UI")
 	EAbilityTooltipSource Source = EAbilityTooltipSource::ActionBar;
 
@@ -59,7 +67,6 @@ public:
 		const FAeyerjiAbilitySlot& Slot,
 		EAbilityTooltipSource Source = EAbilityTooltipSource::ActionBar);
 
-	/** Resolves the first UAeyerjiAbilityData* configured on the ability CDO (if any). */
-	static const UAeyerjiAbilityData* ResolveAbilityData(TSubclassOf<UGameplayAbility> AbilityClass);
+	/** Resolves the global ability table row for the supplied ability class or slot tag. */
+	static const FAeyerjiAbilityTableRow* ResolveAbilityRow(const FAeyerjiAbilitySlot& Slot);
 };
-

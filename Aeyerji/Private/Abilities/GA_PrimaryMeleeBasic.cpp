@@ -29,7 +29,9 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/EngineTypes.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "WorldCollision.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/HitResult.h"
@@ -79,6 +81,8 @@ UGA_PrimaryMeleeBasic::UGA_PrimaryMeleeBasic()
 
 		ActivationOwnedTags.AddTag(AeyerjiTags::Ability_Primary);
 		ActivationBlockedTags.Reset();
+		ActivationBlockedTags.AddTag(AeyerjiTags::State_Dead);
+		ActivationBlockedTags.AddTag(AeyerjiTags::State_CrowdControl_Stunned);
 		ActivationBlockedTags.AddTag(AeyerjiTags::Cooldown_PrimaryAttack);
 	}
 
@@ -86,6 +90,18 @@ UGA_PrimaryMeleeBasic::UGA_PrimaryMeleeBasic()
 	{
 		static const FName DamageTagName(TEXT("SetByCaller.Damage.Instant"));
 		DamageSetByCallerTag = FGameplayTag::RequestGameplayTag(DamageTagName, /*ErrorIfNotFound=*/false);
+	}
+
+	if (!AilmentDamagePerSecondSetByCallerTag.IsValid())
+	{
+		static const FName AilmentDamageTagName(TEXT("SetByCaller.Damage.PerSecond"));
+		AilmentDamagePerSecondSetByCallerTag = FGameplayTag::RequestGameplayTag(AilmentDamageTagName, /*ErrorIfNotFound=*/false);
+	}
+
+	if (!AilmentDurationSetByCallerTag.IsValid())
+	{
+		static const FName AilmentDurationTagName(TEXT("SetByCaller.Duration"));
+		AilmentDurationSetByCallerTag = FGameplayTag::RequestGameplayTag(AilmentDurationTagName, /*ErrorIfNotFound=*/false);
 	}
 
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("Constructed %s (BaselineAttackSpeed=%.2f DamageScalar=%.2f MinCooldown=%.3f)"),
@@ -104,6 +120,12 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 
 	AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
 	const UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+	AEnemyAIController* EnemyAI = ResolveEnemyAIController(ActorInfo);
+	AActor* RawTargetActor = EnemyAI ? EnemyAI->GetTargetActor() : nullptr;
+	const bool bFriendlyTargetBlocked = RawTargetActor && AvatarActor && !bAllowFriendlyDamage && AbilityTeamUtils::AreOnSameTeam(AvatarActor, RawTargetActor);
+	AActor* FilteredTargetActor = bFriendlyTargetBlocked ? nullptr : RawTargetActor;
+	const float InitialAttackRange = ResolveAttackRange();
+	const float InitialTargetDistance = (AvatarActor && RawTargetActor) ? FVector::Dist(AvatarActor->GetActorLocation(), RawTargetActor->GetActorLocation()) : -1.f;
 	const FString HandleStr      = Handle.ToString();
 	const FString TriggerTagStr  = TriggerEventData ? TriggerEventData->EventTag.ToString() : FString(TEXT("None"));
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("ActivateAbility -> Handle=%s Avatar=%s ASC=%s TriggerTag=%s PredictionKey=%d"),
@@ -112,17 +134,27 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 		ASC ? *GetNameSafe(ASC) : TEXT("None"),
 		*TriggerTagStr,
 		ActivationInfo.GetActivationPredictionKey().Current);
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: avatar=%s ai=%s rawTarget=%s target=%s friendlyBlocked=%s distance=%.1f attackRange=%.1f serverLogic=%s predicting=%s."),
+		*GetNameSafe(AvatarActor),
+		*GetNameSafe(EnemyAI),
+		*GetNameSafe(RawTargetActor),
+		*GetNameSafe(FilteredTargetActor),
+		bFriendlyTargetBlocked ? TEXT("true") : TEXT("false"),
+		InitialTargetDistance,
+		InitialAttackRange,
+		ShouldProcessServerLogic() ? TEXT("true") : TEXT("false"),
+		IsLocallyPredicting() ? TEXT("true") : TEXT("false"));
 
 	if (!CheckCost(Handle, ActorInfo))
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("ActivateAbility: CheckCost failed. Ending ability before execution."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: CheckCost failed. Ending ability before execution."));
 		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/true, /*bWasCancelled=*/true);
 		return;
 	}
 
 	if (!CheckCooldown(Handle, ActorInfo))
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("ActivateAbility: CheckCooldown failed. Ending ability before execution."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: CheckCooldown failed. Ending ability before execution."));
 		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/true, /*bWasCancelled=*/true);
 		return;
 	}
@@ -146,11 +178,37 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 		BaselineAttackSpeed);
 
 	StartupClickedTarget = ResolvePreferredClickedTarget(ActorInfo, /*MaxAgeSeconds=*/2.5f);
+	if (AvatarActor)
+	{
+		AActor* FacingTarget = FilteredTargetActor ? FilteredTargetActor : StartupClickedTarget.Get();
+		if (FacingTarget && FacingTarget != AvatarActor)
+		{
+			FVector ToTarget = FacingTarget->GetActorLocation() - AvatarActor->GetActorLocation();
+			ToTarget.Z = 0.f;
+			if (!ToTarget.IsNearlyZero())
+			{
+				const FRotator DesiredYaw(0.f, ToTarget.Rotation().Yaw, 0.f);
+				AvatarActor->SetActorRotation(DesiredYaw);
+				if (APawn* AvatarPawn = Cast<APawn>(AvatarActor))
+				{
+					if (AController* Controller = AvatarPawn->GetController())
+					{
+						Controller->SetControlRotation(DesiredYaw);
+					}
+				}
+			}
+		}
+	}
 
 	const int32 ComboCount = GetConfiguredComboCount(ActorInfo);
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: comboCount=%d nextComboIndex=%d startupClickedTarget=%s attackSpeed=%.3f."),
+		ComboCount,
+		NextComboIndex,
+		*GetNameSafe(StartupClickedTarget.Get()),
+		AttackSpeed);
 	if (ComboCount <= 0)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("ActivateAbility: No valid combo montages configured. Ending ability."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: No valid combo montages configured. Ending ability."));
 		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/true, /*bWasCancelled=*/true);
 		return;
 	}
@@ -165,7 +223,7 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 
 	if (!StartComboStage(StageIndexToPlay, ActorInfo, AttackSpeed))
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("ActivateAbility: StartComboStage failed. Ability will end."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: StartComboStage failed. Ability will end."));
 		if (ShouldProcessServerLogic())
 		{
 			UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("ActivateAbility: Server logic active, broadcasting completion before ending."));
@@ -175,6 +233,7 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 	}
 	else
 	{
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: StartComboStage succeeded for stage %d."), StageIndexToPlay);
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("ActivateAbility: Montage started successfully."));
 	}
 }
@@ -239,6 +298,7 @@ void UGA_PrimaryMeleeBasic::EndAbility(const FGameplayAbilitySpecHandle Handle,
 		MontageTask ? *GetNameSafe(MontageTask) : TEXT("None"),
 		DamagedActors.Num());
 
+	ClearMontageFailsafeTimer();
 	StopMontageTask();
 	ClearConeTraceTimer();
 
@@ -330,8 +390,8 @@ bool UGA_PrimaryMeleeBasic::CheckCooldown(const FGameplayAbilitySpecHandle Handl
 				Idx == 0 ? TEXT("") : TEXT(", "),
 				Durations[Idx]);
 		}
-		UE_LOG(LogPrimaryMeleeGA, Warning,
-			TEXT("CheckCooldown: owned=[%s] cooldownTags=[%s] durations=[%s]"),
+		UE_LOG(LogPrimaryMeleeGA, VeryVerbose,
+			TEXT("[BossPrimaryAttack] MeleeGA CheckCooldown: owned=[%s] cooldownTags=[%s] durations=[%s]"),
 			*OwnedTagStr,
 			*CooldownTagStr,
 			DurationStr.IsEmpty() ? TEXT("none") : *DurationStr);
@@ -343,8 +403,8 @@ bool UGA_PrimaryMeleeBasic::CheckCooldown(const FGameplayAbilitySpecHandle Handl
 		// Some setups stamp cooldown tags as infinite effects or loose tags; those should not hard-block attacks.
 		if (TimeRemaining > KINDA_SMALL_NUMBER)
 		{
-			UE_LOG(LogPrimaryMeleeGA, Warning,
-				TEXT("CheckCooldown: blocking (remaining=%.3f)."), TimeRemaining);
+			UE_LOG(LogPrimaryMeleeGA, VeryVerbose,
+				TEXT("[BossPrimaryAttack] MeleeGA CheckCooldown: blocking (remaining=%.3f)."), TimeRemaining);
 			return false;
 		}
 	}
@@ -363,7 +423,7 @@ bool UGA_PrimaryMeleeBasic::StartMontage(float AttackSpeed, UAnimMontage* Montag
 	UAnimMontage* Montage = MontageToPlay;
 	if (!Montage)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartMontage: Montage pointer null (AttackMontage asset missing)."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartMontage: Montage pointer null (AttackMontage asset missing)."));
 		return false;
 	}
 
@@ -371,14 +431,14 @@ bool UGA_PrimaryMeleeBasic::StartMontage(float AttackSpeed, UAnimMontage* Montag
 	UAnimInstance* AnimInst = Info ? Info->GetAnimInstance() : nullptr;
 	if (!AnimInst)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartMontage: No AnimInstance on avatar %s."),
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartMontage: No AnimInstance on avatar %s."),
 			*GetNameSafe(GetAvatarActorFromActorInfo()));
 		return false;
 	}
 
 	if (Montage->GetPlayLength() <= 0.f)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartMontage: Montage %s has zero length, refusing to play."),
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartMontage: Montage %s has zero length, refusing to play."),
 			*GetNameSafe(Montage));
 		return false;
 	}
@@ -393,18 +453,21 @@ bool UGA_PrimaryMeleeBasic::StartMontage(float AttackSpeed, UAnimMontage* Montag
 	MontageTask = UAbilityTask_PlayMontageAndWait::CreatePlayMontageAndWaitProxy(this, NAME_None, Montage, Rate);
 	if (!MontageTask)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartMontage: Failed to create montage task."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartMontage: Failed to create montage task."));
 		return false;
 	}
 
 	BindMontageDelegates(MontageTask);
 	MontageTask->ReadyForActivation();
+	ArmMontageFailsafe(Montage, Rate);
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartMontage: MontageTask %s ready for activation."), *GetNameSafe(MontageTask));
 	return true;
 }
 
 void UGA_PrimaryMeleeBasic::StopMontageTask()
 {
+	ClearMontageFailsafeTimer();
+
 	if (!MontageTask)
 	{
 		return;
@@ -414,6 +477,55 @@ void UGA_PrimaryMeleeBasic::StopMontageTask()
 		*GetNameSafe(MontageTask));
 	MontageTask->EndTask();
 	MontageTask = nullptr;
+}
+
+void UGA_PrimaryMeleeBasic::ArmMontageFailsafe(UAnimMontage* Montage, float PlayRate)
+{
+	ClearMontageFailsafeTimer();
+
+	if (!Montage)
+	{
+		return;
+	}
+
+	if (UWorld* World = GetWorld())
+	{
+		const float SafePlayRate = FMath::Max(PlayRate, KINDA_SMALL_NUMBER);
+		const float FailsafeDelay = FMath::Max(0.25f, (Montage->GetPlayLength() / SafePlayRate) + 0.25f);
+		World->GetTimerManager().SetTimer(MontageFailsafeTimerHandle, this, &UGA_PrimaryMeleeBasic::OnMontageFailsafeExpired, FailsafeDelay, false);
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartMontage: armed montage failsafe for %.3fs (montage=%s rate=%.3f)."),
+			FailsafeDelay,
+			*GetNameSafe(Montage),
+			SafePlayRate);
+	}
+}
+
+void UGA_PrimaryMeleeBasic::ClearMontageFailsafeTimer()
+{
+	if (UWorld* World = GetWorld())
+	{
+		if (MontageFailsafeTimerHandle.IsValid())
+		{
+			World->GetTimerManager().ClearTimer(MontageFailsafeTimerHandle);
+		}
+	}
+
+	MontageFailsafeTimerHandle.Invalidate();
+}
+
+void UGA_PrimaryMeleeBasic::OnMontageFailsafeExpired()
+{
+	MontageFailsafeTimerHandle.Invalidate();
+
+	if (!IsActive())
+	{
+		return;
+	}
+
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA MontageFailsafe: forcing finish for active ability handle=%s phase=%d."),
+		*CurrentSpecHandle.ToString(),
+		static_cast<int32>(CurrentPhase));
+	HandleMontageFinished(/*bWasCancelled=*/false);
 }
 
 void UGA_PrimaryMeleeBasic::ClearConeTraceTimer()
@@ -455,7 +567,7 @@ void UGA_PrimaryMeleeBasic::StartConeStrike()
 			AActor* EnemyTarget = ResolveEnemyTargetActor(CurrentActorInfo);
 			if (!EnemyTarget)
 			{
-				UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartConeStrike: Enemy has no valid target for single-target strike; ending ability."));
+				UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartConeStrike: Enemy has no valid target for single-target strike; ending ability."));
 				if (ShouldProcessServerLogic())
 				{
 					BroadcastPrimaryAttackComplete();
@@ -471,9 +583,11 @@ void UGA_PrimaryMeleeBasic::StartConeStrike()
 				const float PreferredRange = (AttackRange > 0.f) ? AttackRange * 1.75f : ConeTraceRangeFallback * 1.5f;
 				if (!TryBuildHitFromActor(InstigatorActor, EnemyTarget, PreferredRange, TargetHit))
 				{
-					UE_LOG(LogPrimaryMeleeGA, Warning,
-						TEXT("StartConeStrike: Enemy target %s out of range for single-target strike; ending ability."),
-						*GetNameSafe(EnemyTarget));
+					UE_LOG(LogPrimaryMeleeGA, Verbose,
+						TEXT("[BossPrimaryAttack] MeleeGA StartConeStrike: Enemy target %s out of range for single-target strike (distance=%.1f preferredRange=%.1f); ending ability."),
+						*GetNameSafe(EnemyTarget),
+						FVector::Dist(InstigatorActor->GetActorLocation(), EnemyTarget->GetActorLocation()),
+						PreferredRange);
 					if (ShouldProcessServerLogic())
 					{
 						BroadcastPrimaryAttackComplete();
@@ -489,10 +603,13 @@ void UGA_PrimaryMeleeBasic::StartConeStrike()
 	SetMovementLock(true);
 	SetCanBeCanceled(false);
 	ClearCancelWindowTimer();
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartConeStrike: entered hit window (phase=%d montageRate=%.3f)."),
+		static_cast<int32>(CurrentPhase),
+		CurrentMontagePlayRate);
 
 	if (!EnsureAbilityCommitted())
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartConeStrike: Commit failed; server will end ability, clients will wait for replication."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartConeStrike: Commit failed; server will end ability, clients will wait for replication."));
 		if (ShouldProcessServerLogic())
 		{
 			EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, /*bReplicateEndAbility=*/true, /*bWasCancelled=*/true);
@@ -671,6 +788,7 @@ void UGA_PrimaryMeleeBasic::ExecuteConeTraceSweep()
 		// Prefer weapon socket direction if available so the cone aligns with the actual swing.
 		if (const ACharacter* Character = Cast<ACharacter>(InstigatorActor))
 		{
+			bool bUsedWeaponSockets = false;
 			if (const USkeletalMeshComponent* Mesh = Character->GetMesh())
 			{
 				static const FName StartSocket(TEXT("WeaponRHandSocket"));
@@ -681,6 +799,16 @@ void UGA_PrimaryMeleeBasic::ExecuteConeTraceSweep()
 					const FVector End = Mesh->GetSocketLocation(EndSocket);
 					CachedHitOrigin = Start;
 					CachedHitForward = (End - Start);
+					bUsedWeaponSockets = true;
+				}
+				else if (CachedHitForward.IsNearlyZero())
+				{
+					// Fallback to mesh forward when the mesh is rotated relative to the capsule.
+					const FVector MeshForward = Mesh->GetForwardVector();
+					if (!bUsedWeaponSockets && !MeshForward.IsNearlyZero())
+					{
+						CachedHitForward = MeshForward;
+					}
 				}
 			}
 		}
@@ -938,8 +1066,121 @@ void UGA_PrimaryMeleeBasic::HandleServerDamage(const FGameplayAbilityTargetDataH
 		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("HandleServerDamage: Damage effect class invalid; skipping damage application."));
 	}
 
+	ApplyAilmentsToTargetData(TargetData);
+
 	BP_HandleMeleeDamage(TargetData);
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("HandleServerDamage: BP_HandleMeleeDamage dispatched."));
+}
+
+void UGA_PrimaryMeleeBasic::ApplyAilmentsToTargetData(const FGameplayAbilityTargetDataHandle& TargetData)
+{
+	if (TargetData.Num() == 0 || AilmentEffectsByType.Num() == 0)
+	{
+		return;
+	}
+
+	const FGameplayAbilityActorInfo* ActorInfo = GetCurrentActorInfo();
+	const UAbilitySystemComponent* SourceASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+	const UAeyerjiAttributeSet* AttrSet = SourceASC ? SourceASC->GetSet<UAeyerjiAttributeSet>() : nullptr;
+	if (!AttrSet)
+	{
+		return;
+	}
+
+	FGameplayTagContainer SourceTags = GetAssetTags();
+	if (SourceASC)
+	{
+		FGameplayTagContainer OwnedTags;
+		SourceASC->GetOwnedGameplayTags(OwnedTags);
+		SourceTags.AppendTags(OwnedTags);
+	}
+
+	for (const TPair<FGameplayTag, TSoftClassPtr<UGameplayEffect>>& Pair : AilmentEffectsByType)
+	{
+		const FGameplayTag& AilmentTag = Pair.Key;
+		if (!AilmentTag.IsValid() || !SourceTags.HasTag(AilmentTag))
+		{
+			continue;
+		}
+
+		TSubclassOf<UGameplayEffect> AilmentClass = Pair.Value.Get();
+		if (!AilmentClass && Pair.Value.ToSoftObjectPath().IsValid())
+		{
+			AilmentClass = Pair.Value.LoadSynchronous();
+		}
+
+		if (!AilmentClass)
+		{
+			continue;
+		}
+
+		float AilmentAmount = 0.f;
+		float AilmentDuration = 0.f;
+		if (!ResolveAilmentMagnitudes(AilmentTag, AilmentAmount, AilmentDuration))
+		{
+			continue;
+		}
+
+		FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(AilmentClass, GetAbilityLevel());
+		if (!SpecHandle.IsValid() || !SpecHandle.Data.IsValid())
+		{
+			continue;
+		}
+
+		if (AilmentDamagePerSecondSetByCallerTag.IsValid())
+		{
+			SpecHandle.Data->SetSetByCallerMagnitude(AilmentDamagePerSecondSetByCallerTag, AilmentAmount);
+		}
+
+		if (AilmentDurationSetByCallerTag.IsValid())
+		{
+			SpecHandle.Data->SetSetByCallerMagnitude(AilmentDurationSetByCallerTag, AilmentDuration);
+		}
+
+		ApplyGameplayEffectSpecToTarget(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, SpecHandle, TargetData);
+	}
+}
+
+bool UGA_PrimaryMeleeBasic::ResolveAilmentMagnitudes(const FGameplayTag& AilmentTypeTag, float& OutAmount, float& OutDuration) const
+{
+	OutAmount = 0.f;
+	OutDuration = 0.f;
+
+	if (!AilmentTypeTag.IsValid())
+	{
+		return false;
+	}
+
+	const UAbilitySystemComponent* SourceASC = GetCurrentActorInfo() ? GetCurrentActorInfo()->AbilitySystemComponent.Get() : nullptr;
+	const UAeyerjiAttributeSet* AttrSet = SourceASC ? SourceASC->GetSet<UAeyerjiAttributeSet>() : nullptr;
+	if (!AttrSet)
+	{
+		return false;
+	}
+
+	const FString TagString = AilmentTypeTag.ToString();
+	if (TagString.StartsWith(TEXT("AilmentType.Poisonous")))
+	{
+		OutAmount = AttrSet->GetPoisonAmount();
+		OutDuration = AttrSet->GetPoisonDuration();
+		return true;
+	}
+
+	if (TagString.StartsWith(TEXT("AilmentType.Traumatizing")))
+	{
+		OutAmount = AttrSet->GetTraumaAmount();
+		OutDuration = AttrSet->GetTraumaDuration();
+		return true;
+	}
+
+	if (TagString.StartsWith(TEXT("AilmentType.Corrupting")))
+	{
+		OutAmount = AttrSet->GetCorruptionAmount();
+		OutDuration = AttrSet->GetCorruptionDuration();
+		return true;
+	}
+
+	return false;
 }
 
 void UGA_PrimaryMeleeBasic::HandlePredictedFeedback(const FGameplayAbilityTargetDataHandle& TargetData)
@@ -989,6 +1230,8 @@ void UGA_PrimaryMeleeBasic::OnMontageCancelled()
 
 void UGA_PrimaryMeleeBasic::HandleMontageFinished(bool bWasCancelled)
 {
+	ClearMontageFailsafeTimer();
+
 	if (!IsActive())
 	{
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("HandleMontageFinished: Ability inactive, ignoring finish (Cancelled=%s)."),
@@ -1121,13 +1364,13 @@ float UGA_PrimaryMeleeBasic::ResolveAttackAngleDegrees() const
 	const UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
 	if (!ASC)
 	{
-		return 0.f;
+		return FMath::Clamp(ConeTraceAngleFallback, 0.f, 360.f);
 	}
 
 	const float Angle = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackAngleAttribute());
 	if (Angle <= KINDA_SMALL_NUMBER)
 	{
-		return 0.f;
+		return FMath::Clamp(ConeTraceAngleFallback, 0.f, 360.f);
 	}
 
 	return FMath::Clamp(Angle, 1.f, 360.f);
@@ -1154,7 +1397,6 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 		return;
 	}
 
-	// Flatten to ground plane so a downhill swing still fans horizontally.
 	FVector Forward = OverrideForward ? *OverrideForward : InstigatorActor->GetActorForwardVector();
 	Forward.Z = 0.f;
 	Forward = Forward.GetSafeNormal();
@@ -1164,21 +1406,19 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 	}
 
 	const FVector Origin = OverrideOrigin ? *OverrideOrigin : InstigatorActor->GetActorLocation();
-	const float HalfAngleRadians = FMath::DegreesToRadians(FMath::Clamp(AngleDegrees * 0.5f, 0.f, 180.f));
-
-	// Sweep a shallow arc from left to right to approximate a half-moon slash.
-	const int32 ArcSegments = FMath::Clamp(FMath::CeilToInt(FMath::Max(AngleDegrees, 40.f) / 15.f), 4, 16);
-	const float StepRadians = (ArcSegments > 1) ? (HalfAngleRadians * 2.f / (ArcSegments - 1)) : 0.f;
-	const float InnerRadius = Range * 0.15f; // start the sweep slightly ahead of the feet
-	const float SweepRadius = FMath::Max(55.f, Range * 0.18f);
+	const float HalfAngleDegrees = FMath::Clamp(AngleDegrees * 0.5f, 0.f, 180.f);
+	const float HalfAngleRadians = FMath::DegreesToRadians(HalfAngleDegrees);
+	const float MaxRangeSq = FMath::Square(Range);
+	const float CosThreshold = FMath::Cos(FMath::DegreesToRadians(HalfAngleDegrees));
 
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(PrimaryMeleeCone), false, InstigatorActor);
 	QueryParams.bTraceComplex = false;
 	QueryParams.bReturnPhysicalMaterial = false;
 	QueryParams.AddIgnoredActor(InstigatorActor);
 
-	const FCollisionShape SweepShape = FCollisionShape::MakeSphere(SweepRadius);
-	const FCollisionObjectQueryParams ObjectParams = FCollisionObjectQueryParams::AllObjects;
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
 	TSet<TWeakObjectPtr<AActor>> SeenActors;
 
 	if (bDrawConeTraceDebug)
@@ -1186,77 +1426,90 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 		const FVector DebugEnd = Origin + Forward * Range;
 		DrawDebugSphere(World, Origin, 8.f, 12, ConeTraceDebugColor, false, ConeTraceDebugDuration, 0, 1.f);
 		DrawDebugDirectionalArrow(World, Origin, DebugEnd, 30.f, ConeTraceDebugColor, false, ConeTraceDebugDuration, 0, 1.5f);
-		DrawDebugCone(World, Origin, Forward, Range, HalfAngleRadians, HalfAngleRadians, ArcSegments, ConeTraceDebugColor, false, ConeTraceDebugDuration, 0, 0.75f);
+
+		// Draw a flat wedge on the horizontal plane so the debug shape matches the actual cone test.
+		const int32 DebugSegments = 16;
+		FVector PreviousEdge = Origin + Forward.RotateAngleAxis(-HalfAngleDegrees, FVector::UpVector) * Range;
+		PreviousEdge.Z = Origin.Z;
+		for (int32 SegmentIdx = 1; SegmentIdx <= DebugSegments; ++SegmentIdx)
+		{
+			const float Alpha = static_cast<float>(SegmentIdx) / static_cast<float>(DebugSegments);
+			const float AngleOffset = FMath::Lerp(-HalfAngleDegrees, HalfAngleDegrees, Alpha);
+			FVector EdgePoint = Origin + Forward.RotateAngleAxis(AngleOffset, FVector::UpVector) * Range;
+			EdgePoint.Z = Origin.Z;
+
+			DrawDebugLine(World, Origin, EdgePoint, ConeTraceDebugColor, false, ConeTraceDebugDuration, 0, 0.75f);
+			DrawDebugLine(World, PreviousEdge, EdgePoint, ConeTraceDebugColor, false, ConeTraceDebugDuration, 0, 0.75f);
+			PreviousEdge = EdgePoint;
+		}
 	}
 
-	for (int32 SegmentIdx = 0; SegmentIdx < ArcSegments; ++SegmentIdx)
+	TArray<FOverlapResult> Overlaps;
+	if (!World->OverlapMultiByObjectType(
+		Overlaps,
+		Origin,
+		FQuat::Identity,
+		ObjectParams,
+		FCollisionShape::MakeSphere(Range),
+		QueryParams))
 	{
-		const float AngleOffset = -HalfAngleRadians + (SegmentIdx * StepRadians);
-		const FVector SampleDir = Forward.RotateAngleAxis(FMath::RadiansToDegrees(AngleOffset), FVector::UpVector).GetSafeNormal();
-		if (SampleDir.IsNearlyZero())
+		return;
+	}
+
+	for (const FOverlapResult& Overlap : Overlaps)
+	{
+		AActor* TargetActor = Overlap.GetActor();
+		if (!TargetActor || TargetActor == InstigatorActor || SeenActors.Contains(TargetActor))
 		{
 			continue;
 		}
 
-		const FVector Start = Origin + SampleDir * InnerRadius;
-		const FVector End   = Origin + SampleDir * Range;
+		FVector TargetPoint = TargetActor->GetActorLocation();
+		UPrimitiveComponent* TargetComponent = Overlap.Component.Get();
+		TryResolveTargetCollisionPoint(TargetActor, Origin, TargetPoint, TargetComponent);
 
-		TArray<FHitResult> SweepHits;
-		bool bSweepHit = false;
-		if (ConeTraceChannel == ECC_OverlapAll_Deprecated)
+		FVector ToTarget = TargetPoint - Origin;
+		ToTarget.Z = 0.f;
+
+		const float DistanceSq = ToTarget.SizeSquared();
+		if (DistanceSq > MaxRangeSq)
 		{
-			bSweepHit = World->SweepMultiByObjectType(
-				SweepHits,
-				Start,
-				End,
-				FQuat::Identity,
-				ObjectParams,
-				SweepShape,
-				QueryParams);
+			continue;
+		}
+
+		bool bInsideCone = false;
+		if (DistanceSq <= KINDA_SMALL_NUMBER)
+		{
+			bInsideCone = true;
 		}
 		else
 		{
-			const ECollisionChannel TraceChannel = static_cast<ECollisionChannel>(ConeTraceChannel.GetValue());
-			bSweepHit = World->SweepMultiByChannel(
-				SweepHits,
-				Start,
-				End,
-				FQuat::Identity,
-				TraceChannel,
-				SweepShape,
-				QueryParams);
+			ToTarget.Normalize();
+			bInsideCone = FVector::DotProduct(Forward, ToTarget) >= CosThreshold;
 		}
 
-		if (bDrawConeTraceDebug)
-		{
-			DrawDebugLine(World, Start, End, ConeTraceDebugColor, false, ConeTraceDebugDuration, 0, 1.f);
-		}
-
-		if (!bSweepHit)
+		if (!bInsideCone)
 		{
 			continue;
 		}
 
-		for (const FHitResult& Hit : SweepHits)
+		SeenActors.Add(TargetActor);
+
+		const FVector HitNormal = (DistanceSq <= KINDA_SMALL_NUMBER) ? -Forward : -ToTarget;
+		FHitResult Hit(TargetActor, TargetComponent, TargetPoint, HitNormal);
+		Hit.TraceStart = Origin;
+		Hit.TraceEnd = TargetPoint;
+		Hit.Location = TargetPoint;
+		Hit.ImpactPoint = TargetPoint;
+		Hit.ImpactNormal = HitNormal;
+		Hit.Normal = HitNormal;
+		Hit.Distance = FMath::Sqrt(FVector::DistSquared(Origin, TargetPoint));
+		Hit.bBlockingHit = true;
+		OutHits.Add(Hit);
+
+		if (bDrawConeTraceDebug)
 		{
-			AActor* TargetActor = Hit.GetActor();
-			if (!TargetActor || TargetActor == InstigatorActor)
-			{
-				continue;
-			}
-
-			if (SeenActors.Contains(TargetActor))
-			{
-				continue;
-			}
-
-			SeenActors.Add(TargetActor);
-			OutHits.Add(Hit);
-
-			if (bDrawConeTraceDebug)
-			{
-				DrawDebugPoint(World, Hit.ImpactPoint, 12.f, ConeTraceDebugColor, false, ConeTraceDebugDuration);
-			}
+			DrawDebugPoint(World, TargetPoint, 12.f, ConeTraceDebugColor, false, ConeTraceDebugDuration);
 		}
 	}
 }
@@ -1298,8 +1551,11 @@ bool UGA_PrimaryMeleeBasic::TryBuildHitFromActor(AActor* InstigatorActor, AActor
 	}
 
 	const FVector Origin = bCachedHitShapeValid ? CachedHitOrigin : InstigatorActor->GetActorLocation();
-	const FVector TargetLocation = TargetActor->GetActorLocation();
-	const float DistanceSq = FVector::DistSquared(Origin, TargetLocation);
+	FVector TargetLocation = TargetActor->GetActorLocation();
+	UPrimitiveComponent* TargetComponent = nullptr;
+	TryResolveTargetCollisionPoint(TargetActor, Origin, TargetLocation, TargetComponent);
+
+	const float DistanceSq = FVector::DistSquared2D(Origin, TargetLocation);
 	if (MaxRange > 0.f && DistanceSq > FMath::Square(MaxRange))
 	{
 		return false;
@@ -1313,7 +1569,6 @@ bool UGA_PrimaryMeleeBasic::TryBuildHitFromActor(AActor* InstigatorActor, AActor
 		Direction = (TargetLocation - Origin).GetSafeNormal();
 	}
 
-	UPrimitiveComponent* TargetComponent = TargetActor->FindComponentByClass<UPrimitiveComponent>();
 	OutHit = FHitResult(TargetActor, TargetComponent, TargetLocation, -Direction);
 	OutHit.TraceStart = Origin;
 	OutHit.TraceEnd = TargetLocation;
@@ -1325,6 +1580,53 @@ bool UGA_PrimaryMeleeBasic::TryBuildHitFromActor(AActor* InstigatorActor, AActor
 	OutHit.bBlockingHit = true;
 
 	return true;
+}
+
+bool UGA_PrimaryMeleeBasic::TryResolveTargetCollisionPoint(AActor* TargetActor, const FVector& QueryOrigin, FVector& OutTargetPoint, UPrimitiveComponent*& OutTargetComponent) const
+{
+	OutTargetPoint = TargetActor ? TargetActor->GetActorLocation() : FVector::ZeroVector;
+	OutTargetComponent = nullptr;
+
+	if (!TargetActor)
+	{
+		return false;
+	}
+
+	float BestDistanceSq = TNumericLimits<float>::Max();
+	TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents(TargetActor);
+	for (UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+	{
+		if (!PrimitiveComponent || !PrimitiveComponent->IsRegistered() || !PrimitiveComponent->IsCollisionEnabled())
+		{
+			continue;
+		}
+
+		if (PrimitiveComponent->GetCollisionObjectType() != ECC_Pawn)
+		{
+			continue;
+		}
+
+		FVector ClosestPoint = FVector::ZeroVector;
+		float DistanceSq = 0.f;
+		if (!PrimitiveComponent->GetSquaredDistanceToCollision(QueryOrigin, DistanceSq, ClosestPoint))
+		{
+			continue;
+		}
+
+		if (DistanceSq < BestDistanceSq)
+		{
+			BestDistanceSq = DistanceSq;
+			OutTargetPoint = ClosestPoint;
+			OutTargetComponent = PrimitiveComponent;
+		}
+	}
+
+	if (!OutTargetComponent)
+	{
+		OutTargetComponent = Cast<UPrimitiveComponent>(TargetActor->GetRootComponent());
+	}
+
+	return OutTargetComponent != nullptr;
 }
 
 FGameplayAbilityTargetDataHandle UGA_PrimaryMeleeBasic::MakeUniqueTargetData(const TArray<FHitResult>& Hits)
@@ -1404,7 +1706,10 @@ void UGA_PrimaryMeleeBasic::RemoveActivePhaseTag()
 
 	if (UAbilitySystemComponent* ASC = GetAeyerjiAbilitySystem(GetCurrentActorInfo()))
 	{
-		ASC->RemoveLooseGameplayTag(ActivePhaseTag);
+		if (ASC->HasMatchingGameplayTag(ActivePhaseTag))
+		{
+			ASC->RemoveLooseGameplayTag(ActivePhaseTag);
+		}
 	}
 
 	ActivePhaseTag = FGameplayTag();
@@ -1419,15 +1724,20 @@ bool UGA_PrimaryMeleeBasic::EnsureAbilityCommitted()
 
 	const bool bAuthority = ShouldProcessServerLogic();
 	const bool bPredicting = IsLocallyPredicting();
-	if (!bAuthority && !bPredicting)
+	if (!bAuthority)
 	{
+		if (bPredicting)
+		{
+			UE_LOG(LogPrimaryMeleeGA, VeryVerbose, TEXT("[BossPrimaryAttack] MeleeGA EnsureAbilityCommitted: skipping non-authority commit attempt on predicting client."));
+		}
+
 		bHasCommittedAtImpact = true;
 		return true;
 	}
 
 	if (!CurrentSpecHandle.IsValid() || !CurrentActorInfo)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("EnsureAbilityCommitted: Missing spec handle or actor info."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA EnsureAbilityCommitted: Missing spec handle or actor info."));
 		return false;
 	}
 
@@ -1440,7 +1750,7 @@ bool UGA_PrimaryMeleeBasic::EnsureAbilityCommitted()
 
 	const bool bCostOk = CheckCost(CurrentSpecHandle, CurrentActorInfo);
 	const bool bCooldownOk = CheckCooldown(CurrentSpecHandle, CurrentActorInfo);
-	UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("EnsureAbilityCommitted: CommitAbility failed (Authority=%s Predicting=%s PredKeyValid=%s CostOk=%s CooldownOk=%s)."),
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA EnsureAbilityCommitted: CommitAbility failed (Authority=%s Predicting=%s PredKeyValid=%s CostOk=%s CooldownOk=%s)."),
 		bAuthority ? TEXT("true") : TEXT("false"),
 		bPredicting ? TEXT("true") : TEXT("false"),
 		GetCurrentActivationInfo().GetActivationPredictionKey().IsValidKey() ? TEXT("true") : TEXT("false"),
@@ -1464,9 +1774,9 @@ void UGA_PrimaryMeleeBasic::BeginCancelWindow()
 
 	if (UWorld* World = GetWorld())
 	{
-		// The cancel window lets the player bail out early during wind-up; once it expires we treat the attack as locked-in.
+		// This startup timer delays the trace window while movement and cancellation stay locked for the full swing.
 		World->GetTimerManager().SetTimer(CancelWindowTimerHandle, this, &UGA_PrimaryMeleeBasic::OnCancelWindowExpired, CancelWindowDuration, false);
-		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("BeginCancelWindow: Armed cancel window for %.3fs."), CancelWindowDuration);
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("BeginCancelWindow: Armed locked startup window for %.3fs."), CancelWindowDuration);
 	}
 	else
 	{
@@ -1483,7 +1793,7 @@ void UGA_PrimaryMeleeBasic::OnCancelWindowExpired()
 		return;
 	}
 
-	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("OnCancelWindowExpired: Cancel window elapsed, locking movement and starting cone strike."));
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA OnCancelWindowExpired: startup window elapsed, starting cone strike."));
 	SetCanBeCanceled(false);
 	SetMovementLock(true);
 	StartConeStrike();
@@ -1524,7 +1834,7 @@ void UGA_PrimaryMeleeBasic::SetMovementLock(bool bEnable)
 		}
 		else
 		{
-			if (bMovementLocked || ASC->HasMatchingGameplayTag(MovementLockTag))
+			if (bMovementLocked && ASC->HasMatchingGameplayTag(MovementLockTag))
 			{
 				ASC->RemoveLooseGameplayTag(MovementLockTag);
 				UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("SetMovementLock: Removed movement lock tag."));
@@ -1817,14 +2127,14 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 {
 	if (!ActorInfo)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartComboStage: ActorInfo invalid."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartComboStage: ActorInfo invalid."));
 		return false;
 	}
 
 	const int32 ComboCount = GetConfiguredComboCount(ActorInfo);
 	if (ComboCount <= 0)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartComboStage: No valid combo montages available."));
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartComboStage: No valid combo montages available."));
 		return false;
 	}
 
@@ -1832,7 +2142,7 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 	UAnimMontage* MontageToPlay = ResolveComboMontage(ActorInfo, ClampedIndex);
 	if (!MontageToPlay)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartComboStage: Failed to resolve montage for combo index %d."), ClampedIndex);
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartComboStage: Failed to resolve montage for combo index %d."), ClampedIndex);
 		return false;
 	}
 
@@ -1847,8 +2157,8 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 	ClearCancelWindowTimer();
 	ClearConeTraceTimer();
 	SetAbilityPhase(EPrimaryMeleePhase::WindUp);
-	SetMovementLock(false);
-	SetCanBeCanceled(true);
+	SetMovementLock(true);
+	SetCanBeCanceled(false);
 	BeginCancelWindow();
 
 	const float FinalAttackSpeed = FMath::Max(AttackSpeed, kMinAttackSpeed);
@@ -1862,7 +2172,7 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 
 	if (!StartMontage(FinalAttackSpeed, MontageToPlay))
 	{
-		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("StartComboStage: StartMontage failed for combo index %d."), ClampedIndex);
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartComboStage: StartMontage failed for combo index %d."), ClampedIndex);
 		CurrentComboIndex = INDEX_NONE;
 		ComboStagesExecuted = PreviousStageCount;
 		return false;
@@ -1873,6 +2183,11 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartComboStage: Success (ComboStagesExecuted=%d NextComboIndex=%d)."),
 		ComboStagesExecuted,
+		NextComboIndex);
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartComboStage: success stage=%d comboCount=%d montage=%s nextComboIndex=%d."),
+		ClampedIndex,
+		ComboCount,
+		*GetNameSafe(MontageToPlay),
 		NextComboIndex);
 
 	return true;

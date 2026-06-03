@@ -3,7 +3,9 @@
 #include "Enemy/Tasks/STT_CycleOwnedAbilitiesTask.h"
 
 #include "AbilitySystemComponent.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Algo/RandomShuffle.h"
 #include "Enemy/EnemyAIController.h"
 #include "GameFramework/Pawn.h"

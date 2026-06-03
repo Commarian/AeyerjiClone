@@ -11,6 +11,7 @@
 #include "Attributes/GE_Regen_Periodic.h"
 #include "Attributes/AeyerjiStatTuning.h"
 #include "AeyerjiGameplayTags.h"
+#include "Enemy/EnemyParentNative.h"
 
 UAeyerjiStatEngineComponent::UAeyerjiStatEngineComponent()
 {
@@ -29,9 +30,92 @@ void UAeyerjiStatEngineComponent::BeginPlay()
         return; // server-only; attributes replicate down to clients
     }
 
-    SubscribeToPrimaries();
-    ReapplyDerivedEffect();
-    TryApplyRegen();
+    if (!Cast<AEnemyParentNative>(GetOwner()))
+    {
+        SubscribeToPrimaries();
+        ReapplyDerivedEffect();
+    }
+
+    // Enemies now use authored JSON values directly; keep regen support but skip runtime derived-stat mutation.
+    StartRegenTimer();
+}
+
+void UAeyerjiStatEngineComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(RegenTickHandle);
+    }
+
+    Super::EndPlay(EndPlayReason);
+}
+
+void UAeyerjiStatEngineComponent::StartRegenTimer()
+{
+    bRegenRetryQueued = false;
+
+    if (!GetOwner() || !GetOwner()->HasAuthority())
+    {
+        return;
+    }
+
+    UAbilitySystemComponent* ASC = GetASC();
+    if (!ASC
+        || !ASC->GetAvatarActor()
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPAttribute())
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute())
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPRegenAttribute())
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetManaAttribute())
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetManaMaxAttribute())
+        || !ASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetManaRegenAttribute()))
+    {
+        QueueRegenRetry();
+        return;
+    }
+
+    if (UWorld* World = GetWorld())
+    {
+        const float SafeInterval = FMath::Max(0.01f, RegenTickInterval);
+        World->GetTimerManager().SetTimer(RegenTickHandle, this, &UAeyerjiStatEngineComponent::TickRegeneration, SafeInterval, true);
+    }
+}
+
+void UAeyerjiStatEngineComponent::TickRegeneration()
+{
+    if (!GetOwner() || !GetOwner()->HasAuthority())
+    {
+        return;
+    }
+
+    UAbilitySystemComponent* ASC = GetASC();
+    if (!ASC)
+    {
+        return;
+    }
+
+    const float HP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
+    const float HPMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+    const float HPRegen = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPRegenAttribute());
+    if (HP > 0.f && HP < HPMax && HPRegen > 0.f)
+    {
+        const float HPDelta = FMath::Min(HPRegen * FMath::Max(0.01f, RegenTickInterval), HPMax - HP);
+        if (HPDelta > KINDA_SMALL_NUMBER)
+        {
+            ASC->ApplyModToAttributeUnsafe(UAeyerjiAttributeSet::GetHPAttribute(), EGameplayModOp::Additive, HPDelta);
+        }
+    }
+
+    const float Mana = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaAttribute());
+    const float ManaMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaMaxAttribute());
+    const float ManaRegen = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaRegenAttribute());
+    if (Mana < ManaMax && ManaRegen > 0.f)
+    {
+        const float ManaDelta = FMath::Min(ManaRegen * FMath::Max(0.01f, RegenTickInterval), ManaMax - Mana);
+        if (ManaDelta > KINDA_SMALL_NUMBER)
+        {
+            ASC->ApplyModToAttributeUnsafe(UAeyerjiAttributeSet::GetManaAttribute(), EGameplayModOp::Additive, ManaDelta);
+        }
+    }
 }
 
 void UAeyerjiStatEngineComponent::TryApplyRegen()
@@ -83,7 +167,7 @@ void UAeyerjiStatEngineComponent::QueueRegenRetry()
     {
         bRegenRetryQueued = true;
         FTimerHandle LocalHandle;
-        World->GetTimerManager().SetTimer(LocalHandle, this, &UAeyerjiStatEngineComponent::TryApplyRegen, 0.1f, false);
+        World->GetTimerManager().SetTimer(LocalHandle, this, &UAeyerjiStatEngineComponent::StartRegenTimer, 0.1f, false);
     }
 }
 
@@ -125,8 +209,6 @@ void UAeyerjiStatEngineComponent::SubscribeToPrimaries()
             .AddUObject(this, &UAeyerjiStatEngineComponent::OnPrimaryChanged);
         ASC->GetGameplayAttributeValueChangeDelegate(UAeyerjiAttributeSet::GetIntellectAttribute())
             .AddUObject(this, &UAeyerjiStatEngineComponent::OnPrimaryChanged);
-        ASC->GetGameplayAttributeValueChangeDelegate(UAeyerjiAttributeSet::GetAilmentAttribute())
-            .AddUObject(this, &UAeyerjiStatEngineComponent::OnPrimaryChanged);
     }
 }
 
@@ -162,7 +244,6 @@ void UAeyerjiStatEngineComponent::ReapplyDerivedEffect()
     const float Strength  = FMath::Max(0.f, Attr->GetStrength());
     const float Agility   = FMath::Max(0.f, Attr->GetAgility());
     const float Intellect = FMath::Max(0.f, Attr->GetIntellect());
-    const float Ailment   = FMath::Max(0.f, Attr->GetAilment());
 
     const float HpFromStr      = Strength  * Rules.StrengthToHP;
     const float ArmorFromStr   = Strength  * Rules.StrengthToArmor;
@@ -172,8 +253,6 @@ void UAeyerjiStatEngineComponent::ReapplyDerivedEffect()
     const float ManaFromInt    = FMath::Max(0.f, Intellect * Rules.IntellectToManaMax);
     const float ManaRegenFromInt = FMath::Max(0.f, Intellect * Rules.IntellectToManaRegen);
     const float HPRegenFromStr   = FMath::Max(0.f, Strength  * Rules.StrengthToHPRegen);
-    const float AilmentDPS     = FMath::Max(0.f, Ailment   * Rules.AilmentToDPS);
-    const float AilmentDur     = FMath::Max(0.f, Ailment   * Rules.AilmentToDuration);
 
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_HPMax,           HpFromStr);
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_Armor,           ArmorFromStr);
@@ -183,23 +262,24 @@ void UAeyerjiStatEngineComponent::ReapplyDerivedEffect()
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_ManaMax,         ManaFromInt);
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_ManaRegen,       ManaRegenFromInt);
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_HPRegen,         HPRegenFromStr);
-    SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_AilmentDPS,      AilmentDPS);
-    SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_AilmentDuration, AilmentDur);
 
     ActiveDerivedHandle = ASC->ApplyGameplayEffectSpecToSelf(*SH.Data.Get());
 }
 
 void UAeyerjiStatEngineComponent::StopRegeneration()
 {
-    if (!ActiveRegenHandle.IsValid())
+    if (UWorld* World = GetWorld())
     {
-        return;
+        World->GetTimerManager().ClearTimer(RegenTickHandle);
     }
 
-    if (UAbilitySystemComponent* ASC = GetASC())
+    if (ActiveRegenHandle.IsValid())
     {
-        ASC->RemoveActiveGameplayEffect(ActiveRegenHandle);
-    }
+        if (UAbilitySystemComponent* ASC = GetASC())
+        {
+            ASC->RemoveActiveGameplayEffect(ActiveRegenHandle);
+        }
 
-    ActiveRegenHandle.Invalidate();
+        ActiveRegenHandle.Invalidate();
+    }
 }

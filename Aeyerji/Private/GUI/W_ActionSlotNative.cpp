@@ -77,12 +77,10 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonDown(
 		const FGeometry& InGeometry,
 		const FPointerEvent& InMouseEvent)
 {
-	
-	static const FGameplayTag PotionRootTag = FGameplayTag::RequestGameplayTag(FName("Ability.Potion"));
 	bool bIsPotionSlot = false;
 	for (const FGameplayTag& Tag : StoredSlotData.Tag)
 	{
-		if (Tag.IsValid() && Tag.MatchesTag(PotionRootTag))
+		if (Tag.GetTagName().ToString().StartsWith(TEXT("Ability.Potion")))
 		{
 			bIsPotionSlot = true;
 			break;
@@ -104,6 +102,62 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonDown(
 	/* Optional: Detect drag with left mouse
 	   UWidgetBlueprintLibrary::DetectDragIfPressed(InMouseEvent, this, EKeys::LeftMouseButton); */
 	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
+}
+
+FReply UW_ActionSlotNative::NativeOnMouseButtonDoubleClick(
+	const FGeometry& InGeometry,
+	const FPointerEvent& InMouseEvent)
+{
+	bool bIsPotionSlot = false;
+	for (const FGameplayTag& Tag : StoredSlotData.Tag)
+	{
+		if (Tag.GetTagName().ToString().StartsWith(TEXT("Ability.Potion")))
+		{
+			bIsPotionSlot = true;
+			break;
+		}
+	}
+
+	if (!bIsPotionSlot && InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
+	{
+		OnSlotRightClicked.Broadcast(StoredSlotIndex);
+		return FReply::Handled();
+	}
+
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		OnSlotLeftClicked.Broadcast(this);
+		return FReply::Handled();
+	}
+
+	return Super::NativeOnMouseButtonDoubleClick(InGeometry, InMouseEvent);
+}
+
+FReply UW_ActionSlotNative::NativeOnMouseButtonUp(
+	const FGeometry& InGeometry,
+	const FPointerEvent& InMouseEvent)
+{
+	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		return FReply::Handled();
+	}
+
+	bool bIsPotionSlot = false;
+	for (const FGameplayTag& Tag : StoredSlotData.Tag)
+	{
+		if (Tag.GetTagName().ToString().StartsWith(TEXT("Ability.Potion")))
+		{
+			bIsPotionSlot = true;
+			break;
+		}
+	}
+
+	if (!bIsPotionSlot && InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
+	{
+		return FReply::Handled();
+	}
+
+	return Super::NativeOnMouseButtonUp(InGeometry, InMouseEvent);
 }
 
 void UW_ActionSlotNative::NativeOnMouseEnter(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)

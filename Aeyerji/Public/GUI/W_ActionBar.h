@@ -105,6 +105,7 @@ private:
 
 	void UpdateCooldowns();
 	bool TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem, UW_ActionSlotNative& SlotWidget) const;
+	void DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) const;
 	UAbilitySystemComponent* ResolveAbilitySystem();
 	void ResetCachedAbilitySystem();
 	/** Applies the configured default potion slot if the target slot is empty. */

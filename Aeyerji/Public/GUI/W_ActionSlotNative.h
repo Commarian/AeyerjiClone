@@ -110,6 +110,14 @@ protected:
         const FGeometry& InGeometry,
         const FPointerEvent& InMouseEvent) override;
 
+    virtual FReply NativeOnMouseButtonDoubleClick(
+        const FGeometry& InGeometry,
+        const FPointerEvent& InMouseEvent) override;
+
+    virtual FReply NativeOnMouseButtonUp(
+        const FGeometry& InGeometry,
+        const FPointerEvent& InMouseEvent) override;
+
 private:
 
     /** Loaded once; used as fallback when no specific ability icon yet. */

@@ -2,12 +2,16 @@
 
 #include "Items/ItemAffixDefinition.h"
 
+#include "Systems/AeyerjiDifficultyTuning.h"
+
 int32 UItemAffixDefinition::GetTotalWeight(int32 ItemLevel) const
 {
+	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
 	int32 Sum = 0;
 	for (const FAffixTier& Tier : Tiers)
 	{
-		if (ItemLevel >= Tier.MinItemLevel)
+		const int32 ClampedTierMinLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Tier.MinItemLevel);
+		if (ClampedItemLevel >= ClampedTierMinLevel)
 		{
 			Sum += FMath::Max(0, Tier.Weight);
 		}
@@ -17,6 +21,7 @@ int32 UItemAffixDefinition::GetTotalWeight(int32 ItemLevel) const
 
 const FAffixTier* UItemAffixDefinition::RollTier(FRandomStream& RNG, int32 ItemLevel) const
 {
+	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
 	const int32 TotalWeight = GetTotalWeight(ItemLevel);
 	if (TotalWeight <= 0 || Tiers.Num() == 0)
 	{
@@ -27,7 +32,8 @@ const FAffixTier* UItemAffixDefinition::RollTier(FRandomStream& RNG, int32 ItemL
 	int32 Accumulator = 0;
 	for (const FAffixTier& Tier : Tiers)
 	{
-		if (ItemLevel < Tier.MinItemLevel)
+		const int32 ClampedTierMinLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Tier.MinItemLevel);
+		if (ClampedItemLevel < ClampedTierMinLevel)
 		{
 			continue;
 		}

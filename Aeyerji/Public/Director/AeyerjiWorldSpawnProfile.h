@@ -131,7 +131,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="FixedPopulation|Spawning")
 	int32 Seed = 0;
 
-	/** Base elite chance applied to all fixed spawns. */
+	/** Base chance to pick an elite class from UEnemySpawnGroupDefinition::EliteEnemyTypes. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="FixedPopulation|Elites", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float BaseEliteChance = 0.12f;
 

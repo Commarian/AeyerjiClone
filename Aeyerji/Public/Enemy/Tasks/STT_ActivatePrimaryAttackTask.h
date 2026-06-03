@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GameplayAbilitySpec.h"
 #include "GameplayTagContainer.h"
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "STT_ActivatePrimaryAttackTask.generated.h"
@@ -11,6 +12,7 @@
 
 class UAbilitySystemComponent;
 struct FGameplayEventData;
+struct FAbilityEndedData;
 
 /**
  * StateTree Task that activates the pawn's primary attack ability via GAS.
@@ -33,6 +35,7 @@ private:
     void HandlePrimaryAttackCompleted(const FGameplayEventData* EventData);
     void RegisterCompletionListener(UAbilitySystemComponent* ASC);
     void UnregisterCompletionListener();
+    void HandleObservedAbilityEnded(const FAbilityEndedData& EndData);
 
     UPROPERTY(Transient)
     bool bRequestedActivation = false;
@@ -44,7 +47,20 @@ private:
     bool bPrimaryAttackCompleted = false;
     UPROPERTY(Transient)
     bool bRegisteredCompletionDelegate = false;
+    UPROPERTY(Transient)
+    bool bLoggedWaitingForActorInfo = false;
+    UPROPERTY(Transient)
+    bool bLoggedMissingPrimarySpec = false;
+    UPROPERTY(Transient)
+    bool bLoggedActivationFailure = false;
+    UPROPERTY(Transient)
+    bool bLoggedPrimarySpecSnapshot = false;
+    UPROPERTY(Transient)
+    float ObservedPrimaryActiveStartTime = -1.f;
+
+    FGameplayAbilitySpecHandle ObservedPrimarySpecHandle;
 
     FDelegateHandle PrimaryAttackCompletedHandle;
+    FDelegateHandle ObservedAbilityEndedHandle;
     TWeakObjectPtr<UAbilitySystemComponent> CachedASC;
 };

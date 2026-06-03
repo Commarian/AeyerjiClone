@@ -2,7 +2,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 struct AEYERJI_API FAeyerjiRagdollHelpers
 {

@@ -43,14 +43,19 @@ namespace Aeyerji::Detail
  * - Prints:   [SERVER] MyCharacter: Your message
  *             [CLIENT] BP_ActionBar_C_0: Refreshed slot %d
  */
-#define AJ_LOG(ObjPtr, Fmt, ...)                                                        \
+#define AJ_LOG_VERBOSITY(Verbosity, ObjPtr, Fmt, ...)                                   \
 do {                                                                                   \
 	const UObject* AjLogObj = Cast<const UObject>(ObjPtr);                          \
-	UE_LOG(LogAeyerji, Log, TEXT("[%s] %s: " Fmt),                                  \
+	UE_LOG(LogAeyerji, Verbosity, TEXT("[%s] %s: " Fmt),                            \
 		Aeyerji::Detail::GetSide(AjLogObj),                                         \
 		*Aeyerji::Detail::GetClass(AjLogObj),                                       \
 		##__VA_ARGS__);                                                             \
 } while (0)
+
+#define AJ_LOG(ObjPtr, Fmt, ...) AJ_LOG_VERBOSITY(Log, ObjPtr, Fmt, ##__VA_ARGS__)
+
+// Temporarily surfaced while diagnosing movement input/replication. Revert to VeryVerbose after the issue is isolated.
+#define AJ_LOG_VERY_VERBOSE(ObjPtr, Fmt, ...) AJ_LOG_VERBOSITY(Log, ObjPtr, Fmt, ##__VA_ARGS__)
 
 /** Convenience when you have no object context (compiles to STANDALONE). */
 #define AJ_LOG_STATIC(Fmt, ...) AJ_LOG(nullptr, Fmt, ##__VA_ARGS__)

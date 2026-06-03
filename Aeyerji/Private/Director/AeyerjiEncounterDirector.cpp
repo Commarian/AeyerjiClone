@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Aeyerji.
 #include "Director/AeyerjiEncounterDirector.h"
 
+#include "../../AeyerjiGameState.h"
 #include "Director/AeyerjiSpawnerGroup.h"
 #include "Director/AeyerjiSpawnRegion.h"
 #include "Director/AeyerjiWorldSpawnProfile.h"
@@ -8,7 +9,9 @@
 #include "Enemy/AeyerjiEnemyManagementBPFL.h"
 #include "Enemy/EnemyParentNative.h"
 #include "Enemy/AeyerjiEnemyArchetypeComponent.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "BrainComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Curves/CurveFloat.h"
@@ -16,11 +19,14 @@
 #include "NavigationSystem.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "HAL/IConsoleManager.h"
+#include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogEncounterDirector, Log, All);
 
@@ -47,6 +53,68 @@ namespace
 			ECVF_Default);
 		return *CVar;
 	}
+
+	FName ResolveBossObjectiveId(const AAeyerjiLevelDirector* LevelDirector)
+	{
+		if (!IsValid(LevelDirector))
+		{
+			return NAME_None;
+		}
+
+		if (*LevelDirector->BossPawnClass)
+		{
+			return LevelDirector->BossPawnClass->GetFName();
+		}
+
+		if (IsValid(LevelDirector->BossSpawner))
+		{
+			return LevelDirector->BossSpawner->GetFName();
+		}
+
+		if (IsValid(LevelDirector->BossSpawnMarker))
+		{
+			return LevelDirector->BossSpawnMarker->GetFName();
+		}
+
+		return NAME_None;
+	}
+
+	FName BuildObjectiveTextKey(const FAeyerjiObjectiveState& ObjectiveState)
+	{
+		if (ObjectiveState.bObjectiveComplete)
+		{
+			if (ObjectiveState.ObjectiveKind == EAeyerjiObjectiveKind::BossCleared)
+			{
+				return TEXT("Objective.BossCleared.Complete");
+			}
+
+			if (ObjectiveState.ObjectiveKind == EAeyerjiObjectiveKind::KillCount)
+			{
+				return TEXT("Objective.KillCount.Complete");
+			}
+		}
+
+		switch (ObjectiveState.ObjectiveKind)
+		{
+		case EAeyerjiObjectiveKind::KillCount:
+			return TEXT("Objective.KillCount.Active");
+		case EAeyerjiObjectiveKind::KillNamedBoss:
+			return ObjectiveState.bBossSpawned
+				? TEXT("Objective.KillNamedBoss.Active")
+				: TEXT("Objective.KillNamedBoss.Pending");
+		case EAeyerjiObjectiveKind::KillCountThenBoss:
+			return ObjectiveState.bPrimaryObjectiveComplete
+				? TEXT("Objective.KillCountThenBoss.BossPhase")
+				: TEXT("Objective.KillCountThenBoss.KillPhase");
+		case EAeyerjiObjectiveKind::BossCleared:
+			return ObjectiveState.bObjectiveComplete
+				? TEXT("Objective.BossCleared.Complete")
+				: TEXT("Objective.BossCleared.Active");
+		case EAeyerjiObjectiveKind::None:
+		default:
+			return TEXT("Objective.None");
+		}
+	}
 }
 
 TSubclassOf<AEnemyParentNative> UEnemySpawnGroupDefinition::ResolveEnemyClass() const
@@ -56,15 +124,65 @@ TSubclassOf<AEnemyParentNative> UEnemySpawnGroupDefinition::ResolveEnemyClass() 
 		return nullptr;
 	}
 
-	const int32 Index = FMath::RandHelper(EnemyTypes.Num());
-	return EnemyTypes[Index];
+	TArray<TSubclassOf<AEnemyParentNative>> ValidEnemyTypes;
+	for (TSubclassOf<AEnemyParentNative> EnemyClass : EnemyTypes)
+	{
+		if (*EnemyClass)
+		{
+			ValidEnemyTypes.Add(EnemyClass);
+		}
+	}
+
+	if (ValidEnemyTypes.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	const int32 Index = FMath::RandHelper(ValidEnemyTypes.Num());
+	return ValidEnemyTypes[Index];
+}
+
+TSubclassOf<AEnemyParentNative> UEnemySpawnGroupDefinition::ResolveEliteEnemyClass() const
+{
+	if (EliteEnemyTypes.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	TArray<TSubclassOf<AEnemyParentNative>> ValidEliteTypes;
+	for (TSubclassOf<AEnemyParentNative> EnemyClass : EliteEnemyTypes)
+	{
+		if (*EnemyClass)
+		{
+			ValidEliteTypes.Add(EnemyClass);
+		}
+	}
+
+	if (ValidEliteTypes.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	const int32 Index = FMath::RandHelper(ValidEliteTypes.Num());
+	return ValidEliteTypes[Index];
 }
 
 AAeyerjiEncounterDirector::AAeyerjiEncounterDirector()
 {
+	bReplicates = true;
+	bAlwaysRelevant = true;
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = true;
 	PrimaryActorTick.TickInterval = TickIntervalSeconds;
+}
+
+void AAeyerjiEncounterDirector::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AAeyerjiEncounterDirector, TotalToKill);
+	DOREPLIFETIME(AAeyerjiEncounterDirector, KilledCount);
+	DOREPLIFETIME(AAeyerjiEncounterDirector, bBossSpawned);
 }
 
 void AAeyerjiEncounterDirector::BeginPlay()
@@ -77,6 +195,11 @@ void AAeyerjiEncounterDirector::BeginPlay()
 	{
 		SetActorTickEnabled(false);
 		return;
+	}
+
+	if (bApplyDirectorDefinitionOnBeginPlay)
+	{
+		ApplyDirectorDefinition();
 	}
 
 	SetActorTickInterval(FMath::Max(0.f, TickIntervalSeconds));
@@ -98,6 +221,78 @@ void AAeyerjiEncounterDirector::BeginPlay()
 	{
 		LastEncounterLocation = GetActorLocation();
 	}
+}
+
+void AAeyerjiEncounterDirector::ApplyDirectorDefinition()
+{
+	if (!DirectorDefinition)
+	{
+		return;
+	}
+
+	if (DirectorDefinition->SpawnGroups.Num() > 0)
+	{
+		SpawnGroups = DirectorDefinition->SpawnGroups;
+	}
+
+	TickIntervalSeconds = FMath::Max(0.f, DirectorDefinition->TickIntervalSeconds);
+	MinDistanceBetweenEncounters = FMath::Max(0.f, DirectorDefinition->MinDistanceBetweenEncounters);
+	KillVelocitySpawnFloor = FMath::Max(0.f, DirectorDefinition->KillVelocitySpawnFloor);
+	KillVelocitySpawnCeil = FMath::Max(0.01f, DirectorDefinition->KillVelocitySpawnCeil);
+	MinDistanceAtSlow = FMath::Max(0.f, DirectorDefinition->MinDistanceAtSlow);
+	MinDistanceAtFast = FMath::Max(0.f, DirectorDefinition->MinDistanceAtFast);
+	MinDowntimeAtSlow = FMath::Max(0.f, DirectorDefinition->MinDowntimeAtSlow);
+	MinDowntimeAtFast = FMath::Max(0.f, DirectorDefinition->MinDowntimeAtFast);
+	KillVelocityWindowSeconds = FMath::Max(0.1f, DirectorDefinition->KillVelocityWindowSeconds);
+	MaxGroupsPerTrigger = FMath::Max(1, DirectorDefinition->MaxGroupsPerTrigger);
+	PostCombatDelaySeconds = FMath::Max(0.f, DirectorDefinition->PostCombatDelaySeconds);
+	MaxSpawnsPerTick = FMath::Max(1, DirectorDefinition->MaxSpawnsPerTick);
+	MinSpawnDistanceFromPlayer = FMath::Max(0.f, DirectorDefinition->MinSpawnDistanceFromPlayer);
+	bAvoidRecentPlayerPath = DirectorDefinition->bAvoidRecentPlayerPath;
+	RecentPathAvoidRadius = FMath::Max(0.f, DirectorDefinition->RecentPathAvoidRadius);
+	RecentPathSeconds = FMath::Max(0.1f, DirectorDefinition->RecentPathSeconds);
+	RecentPathSampleInterval = FMath::Max(0.1f, DirectorDefinition->RecentPathSampleInterval);
+	RecentPathMaxSamples = FMath::Max(1, DirectorDefinition->RecentPathMaxSamples);
+	bAvoidPlayerForwardSpawnCone = DirectorDefinition->bAvoidPlayerForwardSpawnCone;
+	ForwardSpawnConeDegrees = FMath::Clamp(DirectorDefinition->ForwardSpawnConeDegrees, 0.f, 180.f);
+	bUseLineOfSightForForwardCone = DirectorDefinition->bUseLineOfSightForForwardCone;
+	SpawnLocationSearchAttempts = FMath::Max(1, DirectorDefinition->SpawnLocationSearchAttempts);
+	GroundTraceUpOffset = FMath::Max(0.f, DirectorDefinition->GroundTraceUpOffset);
+	GroundTraceDownDistance = FMath::Max(10.f, DirectorDefinition->GroundTraceDownDistance);
+	SpawnGroundOffset = FMath::Max(0.f, DirectorDefinition->SpawnGroundOffset);
+	bEnableEnemyLODThrottling = DirectorDefinition->bEnableEnemyLODThrottling;
+	EnemyLODUpdateInterval = FMath::Max(0.05f, DirectorDefinition->EnemyLODUpdateInterval);
+	EnemyLODNearDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODNearDistance);
+	EnemyLODMidDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODMidDistance);
+	EnemyLODFarDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODFarDistance);
+	EnemyLODMidTickInterval = FMath::Max(0.f, DirectorDefinition->EnemyLODMidTickInterval);
+	EnemyLODFarTickInterval = FMath::Max(0.f, DirectorDefinition->EnemyLODFarTickInterval);
+	bEnableFixedClusterSleeping = DirectorDefinition->bEnableFixedClusterSleeping;
+	FixedClusterSleepDistance = FMath::Max(0.f, DirectorDefinition->FixedClusterSleepDistance);
+	FixedClusterWakeDistance = FMath::Max(0.f, DirectorDefinition->FixedClusterWakeDistance);
+	bDrawDebug = DirectorDefinition->bDrawDebug;
+	DebugLogIntervalSeconds = FMath::Max(0.1f, DirectorDefinition->DebugLogIntervalSeconds);
+
+	UE_LOG(LogEncounterDirector, Display, TEXT("EncounterDirector %s applied DirectorDefinition=%s SpawnGroups=%d."),
+		*GetNameSafe(this),
+		*GetNameSafe(DirectorDefinition),
+		SpawnGroups.Num());
+}
+
+FString AAeyerjiEncounterDirector::GetEncounterDirectorDebugString() const
+{
+	return FString::Printf(
+		TEXT("EncounterDirector=%s Definition=%s State=%s Groups=%d Active=%d Progress=%d/%d BossSpawned=%d FixedActive=%d FixedRemaining=%d"),
+		*GetNameSafe(this),
+		*GetNameSafe(DirectorDefinition),
+		*StaticEnum<EEncounterDirectorState>()->GetNameStringByValue(static_cast<int64>(DirectorState)),
+		SpawnGroups.Num(),
+		ActiveEnemyCount,
+		KilledCount,
+		TotalToKill,
+		bBossSpawned ? 1 : 0,
+		bFixedPopulationActive ? 1 : 0,
+		FixedPopulationRemaining);
 }
 
 void AAeyerjiEncounterDirector::RegisterExternalEnemy(AEnemyParentNative* Enemy, bool bEnterCombatState)
@@ -129,6 +324,36 @@ void AAeyerjiEncounterDirector::RegisterExternalEnemy(AEnemyParentNative* Enemy,
 	}
 }
 
+void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy)
+{
+	if (GetNetMode() == NM_Client || !IsValid(Enemy))
+	{
+		return;
+	}
+
+	for (const TWeakObjectPtr<AActor>& Tracked : LiveEnemies)
+	{
+		if (Tracked.Get() == Enemy)
+		{
+			return;
+		}
+	}
+
+	for (const TWeakObjectPtr<AActor>& Tracked : ProgressOnlyEnemies)
+	{
+		if (Tracked.Get() == Enemy)
+		{
+			return;
+		}
+	}
+
+	ProgressOnlyEnemies.Add(Enemy);
+	Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+	Enemy->OnEnemyDied.AddDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+	Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+	Enemy->OnDestroyed.AddDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+}
+
 bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProfile* Profile, AAeyerjiSpawnerGroup* SpawnManager, AAeyerjiLevelDirector* LevelDirector)
 {
 	if (GetNetMode() == NM_Client)
@@ -143,12 +368,14 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 	}
 
 	StopFixedWorldPopulation();
+	ResetProgress(0);
 	RefreshPlayerReference();
 
 	FixedSpawnProfile = Profile;
 	FixedPopulationSpawner = SpawnManager;
 	FixedPopulationLevelDirector = LevelDirector;
 	bSpawnedPopulationSpawner = false;
+	bFixedPopulationInitialSpawnComplete = false;
 
 	if (!FixedPopulationSpawner.IsValid())
 	{
@@ -192,6 +419,7 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 
 	PendingSpawnRequests.Reset();
 	BuildFixedPopulationPlan();
+	UpdateTotalToKill(FixedPopulationTarget);
 
 	if (FixedPopulationTarget <= 0 || FixedSpawnQueue.IsEmpty())
 	{
@@ -202,6 +430,7 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 	bFixedPopulationActive = true;
 	bFixedPopulationComplete = false;
 	EnterState(EEncounterDirectorState::InCombat);
+	PushObjectiveStateToGameState();
 
 	return true;
 }
@@ -222,6 +451,7 @@ void AAeyerjiEncounterDirector::StopFixedWorldPopulation()
 	}
 
 	bFixedPopulationActive = false;
+	bFixedPopulationInitialSpawnComplete = false;
 	bFixedPopulationComplete = false;
 	FixedSpawnQueue.Reset();
 	FixedClusterCenters.Reset();
@@ -247,6 +477,182 @@ void AAeyerjiEncounterDirector::StopFixedWorldPopulation()
 	FixedPopulationSpawner.Reset();
 	bSpawnedPopulationSpawner = false;
 	EnterState(EEncounterDirectorState::Idle);
+	PushObjectiveStateToGameState();
+}
+
+float AAeyerjiEncounterDirector::GetProgress01() const
+{
+	if (TotalToKill <= 0)
+	{
+		return 0.f;
+	}
+
+	return FMath::Clamp(static_cast<float>(KilledCount) / static_cast<float>(TotalToKill), 0.f, 1.f);
+}
+
+int32 AAeyerjiEncounterDirector::GetTotalToKill() const
+{
+	// Legacy objective widgets still divide by this value directly, so clamp the Blueprint-facing accessor.
+	return FMath::Max(TotalToKill, 1);
+}
+
+FAeyerjiObjectiveState AAeyerjiEncounterDirector::BuildObjectiveStateSnapshot(const AAeyerjiLevelDirector* LevelDirector, const AAeyerjiGameState* GameState) const
+{
+	FAeyerjiObjectiveState ObjectiveState;
+
+	const AAeyerjiLevelDirector* ResolvedLevelDirector = IsValid(LevelDirector) ? LevelDirector : ResolveObjectiveLevelDirector();
+	const AAeyerjiGameState* ResolvedGameState = IsValid(GameState)
+		? GameState
+		: (GetWorld() ? GetWorld()->GetGameState<AAeyerjiGameState>() : nullptr);
+
+	if (!IsValid(ResolvedLevelDirector) || !IsValid(ResolvedGameState))
+	{
+		return ObjectiveState;
+	}
+
+	const EAeyerjiRunState CurrentRunState = ResolvedGameState->GetRunState();
+	const EAeyerjiRunWinCondition WinCondition = ResolvedLevelDirector->GetRunWinCondition();
+	const bool bResolvedVictory = CurrentRunState == EAeyerjiRunState::BossDefeated
+		|| CurrentRunState == EAeyerjiRunState::ObjectiveComplete
+		|| (CurrentRunState == EAeyerjiRunState::RunComplete
+			&& ResolvedGameState->GetRunResults().Resolution == EAeyerjiRunResolution::Victory);
+
+	ObjectiveState.bPrimaryObjectiveComplete = ResolvedLevelDirector->IsPrimaryObjectiveComplete();
+	ObjectiveState.bObjectiveComplete = bResolvedVictory;
+	ObjectiveState.bBossSpawned = bBossSpawned;
+	ObjectiveState.BossId = ResolveBossObjectiveId(ResolvedLevelDirector);
+
+	const int32 EffectiveKillTarget = ResolvedLevelDirector->GetEffectiveObjectiveKillTargetRaw();
+	ObjectiveState.TotalToKill = EffectiveKillTarget > 0 ? EffectiveKillTarget : TotalToKill;
+	ObjectiveState.KilledCount = ObjectiveState.TotalToKill > 0
+		? FMath::Clamp(KilledCount, 0, ObjectiveState.TotalToKill)
+		: FMath::Max(0, KilledCount);
+
+	switch (WinCondition)
+	{
+	case EAeyerjiRunWinCondition::KillTarget:
+		ObjectiveState.ObjectiveKind = EAeyerjiObjectiveKind::KillCount;
+		ObjectiveState.Progress01 = ObjectiveState.TotalToKill > 0
+			? FMath::Clamp(static_cast<float>(ObjectiveState.KilledCount) / static_cast<float>(ObjectiveState.TotalToKill), 0.f, 1.f)
+			: (ObjectiveState.bObjectiveComplete ? 1.f : 0.f);
+		break;
+
+	case EAeyerjiRunWinCondition::KillTargetThenBoss:
+		if (ObjectiveState.bObjectiveComplete)
+		{
+			ObjectiveState.ObjectiveKind = EAeyerjiObjectiveKind::BossCleared;
+			ObjectiveState.Progress01 = 1.f;
+		}
+		else if (ObjectiveState.bPrimaryObjectiveComplete)
+		{
+			ObjectiveState.ObjectiveKind = EAeyerjiObjectiveKind::KillNamedBoss;
+			ObjectiveState.Progress01 = 0.f;
+		}
+		else
+		{
+			ObjectiveState.ObjectiveKind = EAeyerjiObjectiveKind::KillCountThenBoss;
+			ObjectiveState.Progress01 = ObjectiveState.TotalToKill > 0
+				? FMath::Clamp(static_cast<float>(ObjectiveState.KilledCount) / static_cast<float>(ObjectiveState.TotalToKill), 0.f, 1.f)
+				: 0.f;
+		}
+		break;
+
+	case EAeyerjiRunWinCondition::BossCleared:
+	default:
+		ObjectiveState.ObjectiveKind = ObjectiveState.bObjectiveComplete
+			? EAeyerjiObjectiveKind::BossCleared
+			: EAeyerjiObjectiveKind::KillNamedBoss;
+		ObjectiveState.Progress01 = ObjectiveState.bObjectiveComplete ? 1.f : 0.f;
+		break;
+	}
+
+	ObjectiveState.ObjectiveTextKey = BuildObjectiveTextKey(ObjectiveState);
+
+	const bool bRunStateRenderable = CurrentRunState == EAeyerjiRunState::InRun
+		|| CurrentRunState == EAeyerjiRunState::BossDefeated
+		|| CurrentRunState == EAeyerjiRunState::ObjectiveComplete
+		|| CurrentRunState == EAeyerjiRunState::RunComplete;
+	const bool bKillDataReady = WinCondition == EAeyerjiRunWinCondition::BossCleared || ObjectiveState.TotalToKill > 0;
+	bool bBossDataReady = true;
+
+	if (ObjectiveState.ObjectiveKind == EAeyerjiObjectiveKind::KillNamedBoss
+		|| ObjectiveState.ObjectiveKind == EAeyerjiObjectiveKind::BossCleared)
+	{
+		bBossDataReady = !ObjectiveState.BossId.IsNone();
+	}
+
+	ObjectiveState.bObjectiveReady = bRunStateRenderable
+		&& ResolvedGameState->GetWorldFlowPhase() == EAeyerjiWorldFlowPhase::Gameplay
+		&& bKillDataReady
+		&& bBossDataReady;
+
+	return ObjectiveState;
+}
+
+void AAeyerjiEncounterDirector::PushObjectiveStateToGameState()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	AAeyerjiGameState* GameState = World->GetGameState<AAeyerjiGameState>();
+	if (!IsValid(GameState))
+	{
+		return;
+	}
+
+	AAeyerjiLevelDirector* LevelDirector = ResolveObjectiveLevelDirector();
+	if (!IsValid(LevelDirector))
+	{
+		GameState->ClearObjectiveStateFromServer();
+		return;
+	}
+
+	GameState->SetObjectiveStateFromServer(BuildObjectiveStateSnapshot(LevelDirector, GameState));
+}
+
+void AAeyerjiEncounterDirector::SetBossSpawned(bool bInBossSpawned)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (bBossSpawned == bInBossSpawned)
+	{
+		return;
+	}
+
+	bBossSpawned = bInBossSpawned;
+	HandleProgressChanged();
+}
+
+AAeyerjiLevelDirector* AAeyerjiEncounterDirector::ResolveObjectiveLevelDirector() const
+{
+	if (AAeyerjiLevelDirector* LevelDirector = FixedPopulationLevelDirector.Get())
+	{
+		return LevelDirector;
+	}
+
+	if (UWorld* World = GetWorld())
+	{
+		for (TActorIterator<AAeyerjiLevelDirector> It(World); It; ++It)
+		{
+			if (AAeyerjiLevelDirector* LevelDirector = *It)
+			{
+				return LevelDirector;
+			}
+		}
+	}
+
+	return nullptr;
 }
 
 void AAeyerjiEncounterDirector::Tick(float DeltaSeconds)
@@ -707,6 +1113,41 @@ void AAeyerjiEncounterDirector::RemoveFixedClusterMember(int32 ClusterId, AActor
 	}
 }
 
+bool AAeyerjiEncounterDirector::RemoveProgressEnemy(AActor* Enemy)
+{
+	if (!Enemy)
+	{
+		return false;
+	}
+
+	bool bRemoved = false;
+	for (int32 Index = ProgressOnlyEnemies.Num() - 1; Index >= 0; --Index)
+	{
+		if (!ProgressOnlyEnemies[Index].IsValid())
+		{
+			ProgressOnlyEnemies.RemoveAtSwap(Index);
+			continue;
+		}
+
+		if (ProgressOnlyEnemies[Index].Get() == Enemy)
+		{
+			ProgressOnlyEnemies.RemoveAtSwap(Index);
+			bRemoved = true;
+		}
+	}
+
+	if (bRemoved)
+	{
+		if (AEnemyParentNative* TypedEnemy = Cast<AEnemyParentNative>(Enemy))
+		{
+			TypedEnemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+		}
+		Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+	}
+
+	return bRemoved;
+}
+
 void AAeyerjiEncounterDirector::UpdateKillWindow()
 {
 	if (KillTimestampHistory.IsEmpty())
@@ -740,6 +1181,104 @@ void AAeyerjiEncounterDirector::UpdateKillWindow()
 	{
 		CurrentKillVelocity = static_cast<float>(KillTimestampHistory.Num()) / KillVelocityWindowSeconds;
 	}
+}
+
+void AAeyerjiEncounterDirector::ResetProgress(int32 NewTotal)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	TotalToKill = FMath::Max(0, NewTotal);
+	KilledCount = 0;
+	bBossSpawned = false;
+	HandleProgressChanged();
+}
+
+void AAeyerjiEncounterDirector::UpdateTotalToKill(int32 NewTotal)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	const int32 ClampedTotal = FMath::Max(0, NewTotal);
+	if (TotalToKill == ClampedTotal)
+	{
+		return;
+	}
+
+	TotalToKill = ClampedTotal;
+	KilledCount = FMath::Clamp(KilledCount, 0, TotalToKill);
+	HandleProgressChanged();
+}
+
+void AAeyerjiEncounterDirector::IncrementKillCount()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	if (TotalToKill <= 0 || KilledCount >= TotalToKill)
+	{
+		return;
+	}
+
+	KilledCount++;
+	HandleProgressChanged();
+}
+
+void AAeyerjiEncounterDirector::HandleProgressChanged()
+{
+	if (LastBroadcastKilled == KilledCount && LastBroadcastTotal == TotalToKill && bLastBroadcastBossSpawned == bBossSpawned)
+	{
+		return;
+	}
+
+	LastBroadcastKilled = KilledCount;
+	LastBroadcastTotal = TotalToKill;
+	bLastBroadcastBossSpawned = bBossSpawned;
+
+	OnProgressChanged.Broadcast(GetProgress01(), KilledCount, TotalToKill);
+	PushObjectiveStateToGameState();
+}
+
+void AAeyerjiEncounterDirector::HandleProgressEnemyDied(AActor* DeadEnemy)
+{
+	if (!DeadEnemy)
+	{
+		return;
+	}
+
+	if (RemoveProgressEnemy(DeadEnemy))
+	{
+		IncrementKillCount();
+	}
+}
+
+void AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed(AActor* DestroyedActor)
+{
+	if (!DestroyedActor)
+	{
+		return;
+	}
+
+	if (RemoveProgressEnemy(DestroyedActor))
+	{
+		IncrementKillCount();
+	}
+}
+
+void AAeyerjiEncounterDirector::OnRep_ProgressData()
+{
+	HandleProgressChanged();
+}
+
+void AAeyerjiEncounterDirector::OnRep_BossSpawned()
+{
+	HandleProgressChanged();
 }
 
 void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
@@ -1175,6 +1714,7 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 		HandleFixedPopulationClusterDecrement(ClusterId);
 		FixedPopulationTarget = FMath::Max(0, FixedPopulationTarget - 1);
 		FixedPopulationRemaining = FMath::Max(0, FixedPopulationTarget - FixedPopulationSpawned);
+		UpdateTotalToKill(FixedPopulationTarget);
 	};
 
 	while (SpawnedThisTick < SpawnBudget && FixedSpawnQueue.Num() > 0)
@@ -1196,6 +1736,36 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 			continue;
 		}
 
+		bool bSpawnElite = false;
+
+		if (Request.bAllowElites)
+		{
+			float EliteChance = Profile->BaseEliteChance + Request.EliteChanceBonus;
+			EliteChance += FMath::Clamp(Request.DensityAlpha, 0.f, 1.f) * Profile->DensityEliteChanceScale;
+
+			if (Request.bDenseCluster)
+			{
+				EliteChance += Profile->DenseEliteChanceBonus;
+			}
+
+			EliteChance = FMath::Clamp(EliteChance, 0.f, Profile->EliteChanceCap);
+			bSpawnElite = FixedSpawnStream.FRand() <= EliteChance;
+		}
+
+		if (bSpawnElite)
+		{
+			TSubclassOf<AEnemyParentNative> EliteClass = Group->ResolveEliteEnemyClass();
+			if (*EliteClass)
+			{
+				EnemyClass = EliteClass;
+			}
+			else
+			{
+				// No explicit elite class was configured for this group, so skip elite promotion.
+				bSpawnElite = false;
+			}
+		}
+
 		const float HalfHeight = GetEnemyHalfHeight(EnemyClass);
 		const FFixedSpawnCluster* Cluster = FixedClusters.Find(Request.ClusterId);
 		const FBox RegionBounds = (Cluster && Cluster->bHasRegion) ? Cluster->RegionBounds : FBox(EForceInit::ForceInit);
@@ -1210,33 +1780,23 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 		EnemyTemplate.Count = 1;
 		EnemyTemplate.SpawnInterval = 0.0f;
 		EnemyTemplate.EnemyArchetypeTag = ResolveArchetypeTagFromClass(EnemyClass);
-
-		bool bSpawnElite = false;
-		int32 MinAffixes = Profile->BaseEliteMinAffixes;
-		int32 MaxAffixes = Profile->BaseEliteMaxAffixes;
-
-		if (Request.bAllowElites)
-		{
-			float EliteChance = Profile->BaseEliteChance + Request.EliteChanceBonus;
-			EliteChance += FMath::Clamp(Request.DensityAlpha, 0.f, 1.f) * Profile->DensityEliteChanceScale;
-
-			if (Request.bDenseCluster)
-			{
-				EliteChance += Profile->DenseEliteChanceBonus;
-				MinAffixes = Profile->DenseEliteMinAffixes;
-				MaxAffixes = Profile->DenseEliteMaxAffixes;
-			}
-
-			EliteChance = FMath::Clamp(EliteChance, 0.f, Profile->EliteChanceCap);
-			bSpawnElite = FixedSpawnStream.FRand() <= EliteChance;
-		}
-
 		EnemyTemplate.bIsElite = bSpawnElite;
 		if (bSpawnElite)
 		{
-			EnemyTemplate.MinEliteAffixes = FMath::Max(0, MinAffixes);
-			EnemyTemplate.MaxEliteAffixes = FMath::Max(EnemyTemplate.MinEliteAffixes, MaxAffixes);
+			// Elite pool classes are authored as final variants, so skip automatic elite multipliers/affixes.
+			EnemyTemplate.bSkipEliteAutoScaling = true;
 		}
+
+		UE_LOG(LogEncounterDirector, Log,
+			TEXT("FixedSpawn request: Director=%s ClusterId=%d Group=%s Class=%s Elite=%d SkipEliteAutoScaling=%d Density=%.2f EliteChanceBonus=%.2f"),
+			*GetNameSafe(this),
+			Request.ClusterId,
+			*GetNameSafe(Group),
+			*GetNameSafe(EnemyTemplate.EnemyClass),
+			EnemyTemplate.bIsElite ? 1 : 0,
+			EnemyTemplate.bSkipEliteAutoScaling ? 1 : 0,
+			Request.DensityAlpha,
+			Request.EliteChanceBonus);
 
 		const bool bApplyAggro = Profile->bApplyAggroOnSpawn;
 		AAeyerjiSpawnerGroup* Spawner = FixedPopulationSpawner.Get();
@@ -1274,6 +1834,11 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 		FixedPopulationSpawned++;
 		FixedPopulationRemaining = FMath::Max(0, FixedPopulationTarget - FixedPopulationSpawned);
 		SpawnedThisTick++;
+	}
+
+	if (FixedSpawnQueue.IsEmpty())
+	{
+		NotifyFixedPopulationInitialSpawnComplete();
 	}
 }
 
@@ -1574,6 +2139,25 @@ void AAeyerjiEncounterDirector::HandleFixedPopulationClusterDecrement(int32 Clus
 		bFixedPopulationComplete = true;
 		OnFixedPopulationCleared.Broadcast();
 	}
+}
+
+void AAeyerjiEncounterDirector::NotifyFixedPopulationInitialSpawnComplete()
+{
+	if (!bFixedPopulationActive || bFixedPopulationInitialSpawnComplete)
+	{
+		return;
+	}
+
+	bFixedPopulationInitialSpawnComplete = true;
+
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("Fixed population initial spawn complete on %s (Spawned=%d Remaining=%d Target=%d)"),
+		*GetNameSafe(this),
+		FixedPopulationSpawned,
+		FixedPopulationRemaining,
+		FixedPopulationTarget);
+
+	OnFixedPopulationInitialSpawnComplete.Broadcast(this);
 }
 
 FGameplayTag AAeyerjiEncounterDirector::ResolveArchetypeTagFromClass(TSubclassOf<AEnemyParentNative> EnemyClass) const
@@ -1995,6 +2579,14 @@ bool AAeyerjiEncounterDirector::SpawnSingleFromGroup(const UEnemySpawnGroupDefin
 	EnemyTemplate.SpawnInterval = 0.0f;
 	EnemyTemplate.EnemyArchetypeTag = ResolveArchetypeTagFromClass(EnemyClass);
 
+	UE_LOG(LogEncounterDirector, Log,
+		TEXT("DynamicSpawn request: Director=%s Group=%s Class=%s Radius=%.0f Location=%s"),
+		*GetNameSafe(this),
+		*GetNameSafe(Group),
+		*GetNameSafe(EnemyTemplate.EnemyClass),
+		Group->SpawnRadius,
+		*SpawnLocation.ToCompactString());
+
 	const FTransform SpawnTransform(SpawnRotation, SpawnLocation);
 	APawn* SpawnedPawn = UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 		this,
@@ -2202,6 +2794,8 @@ void AAeyerjiEncounterDirector::RegisterSpawnedEnemy(AEnemyParentNative* Enemy)
 		return;
 	}
 
+	RemoveProgressEnemy(Enemy);
+
 	LiveEnemies.Add(Enemy);
 	ActiveEnemyCount = LiveEnemies.Num();
 
@@ -2220,17 +2814,29 @@ void AAeyerjiEncounterDirector::HandleTrackedEnemyDied(AActor* DeadEnemy)
 		return;
 	}
 
+	bool bWasTracked = false;
 	for (int32 Index = LiveEnemies.Num() - 1; Index >= 0; --Index)
 	{
-		if (!LiveEnemies[Index].IsValid() || LiveEnemies[Index].Get() == DeadEnemy)
+		if (!LiveEnemies[Index].IsValid())
 		{
 			LiveEnemies.RemoveAtSwap(Index);
+			continue;
+		}
+
+		if (LiveEnemies[Index].Get() == DeadEnemy)
+		{
+			LiveEnemies.RemoveAtSwap(Index);
+			bWasTracked = true;
 		}
 	}
 
 	HandleFixedPopulationEnemyRemoved(DeadEnemy);
 	RemoveEnemyLODState(DeadEnemy);
-	RecordKillTimestamp();
+	if (bWasTracked)
+	{
+		RecordKillTimestamp();
+		IncrementKillCount();
+	}
 	ActiveEnemyCount = LiveEnemies.Num();
 
 	if (DirectorState == EEncounterDirectorState::InCombat && ActiveEnemyCount <= 0)
@@ -2246,16 +2852,28 @@ void AAeyerjiEncounterDirector::HandleTrackedEnemyDestroyed(AActor* DestroyedAct
 		return;
 	}
 
+	bool bWasTracked = false;
 	for (int32 Index = LiveEnemies.Num() - 1; Index >= 0; --Index)
 	{
-		if (!LiveEnemies[Index].IsValid() || LiveEnemies[Index].Get() == DestroyedActor)
+		if (!LiveEnemies[Index].IsValid())
 		{
 			LiveEnemies.RemoveAtSwap(Index);
+			continue;
+		}
+
+		if (LiveEnemies[Index].Get() == DestroyedActor)
+		{
+			LiveEnemies.RemoveAtSwap(Index);
+			bWasTracked = true;
 		}
 	}
 
 	HandleFixedPopulationEnemyRemoved(DestroyedActor);
 	RemoveEnemyLODState(DestroyedActor);
+	if (bWasTracked)
+	{
+		IncrementKillCount();
+	}
 	ActiveEnemyCount = LiveEnemies.Num();
 
 	if (DirectorState == EEncounterDirectorState::InCombat && ActiveEnemyCount <= 0)

@@ -55,7 +55,7 @@ public:
     EAeyerjiItemDragSource Source = EAeyerjiItemDragSource::Bag;
 
     UPROPERTY(BlueprintReadWrite, Category = "Aeyerji|Inventory")
-    EEquipmentSlot SourceEquipmentSlot = EEquipmentSlot::Offense;
+    EEquipmentSlot SourceEquipmentSlot = EEquipmentSlot::Assault;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Aeyerji|Inventory")
 	int32 SourceEquipmentSlotIndex = INDEX_NONE;

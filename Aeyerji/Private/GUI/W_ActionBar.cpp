@@ -2,6 +2,7 @@
 
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
+#include "Abilities/AeyerjiAbilityTuning.h"
 #include "Abilities/GameplayAbility.h"
 #include "GameplayAbilitySpec.h"
 #include "Aeyerji/AeyerjiPlayerController.h"
@@ -10,10 +11,23 @@
 #include "GUI/AbilityTooltipData.h"
 
 #include "Components/HorizontalBox.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/GameInstance.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
 #include "Kismet/GameplayStatics.h"
 #include "Logging/AeyerjiLog.h"
 #include "GameFramework/Pawn.h"
+
+namespace
+{
+	void ShowActionBarDebugMessage(const UObject* WorldContextObject, const FString& Message)
+	{
+		if (GEngine && IsValid(WorldContextObject))
+		{
+			GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red, Message);
+		}
+	}
+}
 
 UW_ActionBar::UW_ActionBar(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -147,6 +161,10 @@ void UW_ActionBar::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	if (CooldownTickInterval <= 0.f)
 	{
 		UpdateCooldowns();
+		if (CachedPS && CachedPS->IsProfileLoadApplied())
+		{
+			EnsureDefaultPotionSlot(CachedPS->GetActionBar());
+		}
 		return;
 	}
 
@@ -155,6 +173,11 @@ void UW_ActionBar::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	{
 		CooldownTickAccumulator = 0.f;
 		UpdateCooldowns();
+	}
+
+	if (CachedPS && CachedPS->IsProfileLoadApplied())
+	{
+		EnsureDefaultPotionSlot(CachedPS->GetActionBar());
 	}
 }/* -------------------- Context-menu & Ability Picker ---------------------- */
 void UW_ActionBar::HandleSlotRightClicked(int32 Index)
@@ -226,18 +249,7 @@ bool UW_ActionBar::ActivateSlotByIndex(int32 SlotIndex)
 			return true;
 		}
 
-		AJ_LOG(this, TEXT("ActivateSlotByIndex() PlayerState data failed, falling back (index %d)"), SlotIndex);
-	}
-
-	if (UW_ActionSlotNative *SlotWidget = GetSlotWidget(SlotIndex))
-
-	{
-
-		const bool bResult = ExecuteAbilitySlot(SlotWidget->StoredSlotData);
-
-		AJ_LOG(this, TEXT("ActivateSlotByIndex() widget fallback %s for %d"), bResult ? TEXT("succeeded") : TEXT("failed"), SlotIndex);
-
-		return bResult;
+		AJ_LOG(this, TEXT("ActivateSlotByIndex() PlayerState data failed for index %d"), SlotIndex);
 	}
 
 	AJ_LOG(this, TEXT("ActivateSlotByIndex() unable to resolve slot %d"), SlotIndex);
@@ -322,8 +334,6 @@ void UW_ActionBar::HandleSlotLeftClicked(UW_ActionSlotNative *MySlot)
 		return;
 	}
 
-	bool bExecutedFromPlayerState = false;
-
 	if (CachedPS && MySlot->StoredSlotIndex != INDEX_NONE)
 
 	{
@@ -336,7 +346,7 @@ void UW_ActionBar::HandleSlotLeftClicked(UW_ActionSlotNative *MySlot)
 
 			AJ_LOG(this, TEXT("HandleSlotLeftClicked() attempting PlayerState index %d"), MySlot->StoredSlotIndex);
 
-			bExecutedFromPlayerState = ExecuteAbilitySlot(Bar[MySlot->StoredSlotIndex]);
+			const bool bExecutedFromPlayerState = ExecuteAbilitySlot(Bar[MySlot->StoredSlotIndex]);
 
 			if (bExecutedFromPlayerState)
 
@@ -347,39 +357,14 @@ void UW_ActionBar::HandleSlotLeftClicked(UW_ActionSlotNative *MySlot)
 				return;
 			}
 
-			AJ_LOG(this, TEXT("HandleSlotLeftClicked() fallback to widget data (index %d)"), MySlot->StoredSlotIndex);
+			AJ_LOG(this, TEXT("HandleSlotLeftClicked() PlayerState data consumed but did not activate for index %d"), MySlot->StoredSlotIndex);
+			return;
 		}
 	}
 
-	if (!bExecutedFromPlayerState)
-
-	{
-
-		if (!CachedPS)
-
-		{
-
-			AJ_LOG(this, TEXT("HandleSlotLeftClicked() CachedPS missing - using widget data"));
-		}
-
-		else if (MySlot->StoredSlotIndex == INDEX_NONE)
-
-		{
-
-			AJ_LOG(this, TEXT("HandleSlotLeftClicked() slot index not initialised - using widget data"));
-		}
-
-		else if (!CachedPS->GetActionBar().IsValidIndex(MySlot->StoredSlotIndex))
-
-		{
-
-			AJ_LOG(this, TEXT("HandleSlotLeftClicked() index %d not in PlayerState bar - using widget data"), MySlot->StoredSlotIndex);
-		}
-
-		const bool bWidgetResult = ExecuteAbilitySlot(MySlot->StoredSlotData);
-
-		AJ_LOG(this, TEXT("HandleSlotLeftClicked() widget fallback %s"), bWidgetResult ? TEXT("succeeded") : TEXT("failed"));
-	}
+	AJ_LOG(this, TEXT("HandleSlotLeftClicked() no valid PlayerState slot (CachedPS=%s Index=%d)"),
+		*GetNameSafe(CachedPS),
+		MySlot->StoredSlotIndex);
 }
 
 bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
@@ -393,23 +378,35 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 	/* ---------- pause gate (time-dilation 1.0 == NOT paused) ---------- */
 	if (!FMath::IsNearlyEqual(UGameplayStatics::GetGlobalTimeDilation(GetWorld()), 1.f))
 	{
-		if (GEngine && IsValid(GetWorld()))
-		{
-			GEngine->AddOnScreenDebugMessage(
-				/*Key*/ -1, /*Time*/ 2.f, FColor::Red, TEXT("Game is Paused"));
-		}
+		ShowActionBarDebugMessage(this, TEXT("Game is Paused"));
 		return false; // abort - don't try to cast while paused
 	}
 
-	if (!SlotData.Tag.IsValid() && !SlotData.Class)
+	FAeyerjiAbilitySlot EffectiveSlotData = SlotData;
+	if (!EffectiveSlotData.Tag.IsEmpty())
+	{
+		FGameplayTagContainer NormalizedTags;
+		for (const FGameplayTag& Tag : EffectiveSlotData.Tag)
+		{
+			const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
+			if (NormalizedTag.IsValid())
+			{
+				NormalizedTags.AddTag(NormalizedTag);
+			}
+		}
+		EffectiveSlotData.Tag = NormalizedTags;
+	}
+
+	if (!EffectiveSlotData.Tag.IsValid() && !EffectiveSlotData.Class)
 	{
 		AJ_LOG(this, TEXT("ExecuteAbilitySlot() slot has no tag or class"));
+		ShowActionBarDebugMessage(this, TEXT("No ability in this slot"));
 		return false;
 	}
 
-	const FString TagString = SlotData.Tag.ToString();
-	const int32 TargetModeValue = static_cast<int32>(SlotData.TargetMode);
-	AJ_LOG(this, TEXT("ExecuteAbilitySlot() Tag=%s TargetMode=%d Level=%d"), *TagString, TargetModeValue, SlotData.Level);
+	const FString TagString = EffectiveSlotData.Tag.ToString();
+	const int32 TargetModeValue = static_cast<int32>(EffectiveSlotData.TargetMode);
+	AJ_LOG(this, TEXT("ExecuteAbilitySlot() Tag=%s TargetMode=%d Level=%d"), *TagString, TargetModeValue, EffectiveSlotData.Level);
 
 	/* ---------- find the owner's ASC ---------- */
 	UAbilitySystemComponent *ASC = nullptr;
@@ -424,13 +421,48 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 	if (!ASC)
 	{
 		AJ_LOG(this, TEXT("ExecuteAbilitySlot() ASC not found"));
+		ShowActionBarDebugMessage(this, TEXT("Ability system not ready"));
 		return false;
 	}
 
-	if (SlotData.Tag.IsValid())
+	bool bBlockedByCooldown = false;
+	bool bFoundMatchingAbility = false;
+	const FGameplayAbilityActorInfo* ActorInfo = ASC->AbilityActorInfo.Get();
+	if (ActorInfo)
+	{
+		for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
+		{
+			const UGameplayAbility* AbilityCDO = Spec.Ability;
+			if (!AbilityCDO)
+			{
+				continue;
+			}
+
+			const bool bMatchesClass = EffectiveSlotData.Class && AbilityCDO->GetClass() == EffectiveSlotData.Class;
+			const bool bMatchesTags = EffectiveSlotData.Tag.IsValid() && AbilityCDO->GetAssetTags().HasAny(EffectiveSlotData.Tag);
+			if (!bMatchesClass && !bMatchesTags)
+			{
+				continue;
+			}
+
+			bFoundMatchingAbility = true;
+			bBlockedByCooldown = !AbilityCDO->CheckCooldown(Spec.Handle, ActorInfo, nullptr);
+			break;
+		}
+	}
+
+	if (bBlockedByCooldown)
+	{
+		AJ_LOG(this, TEXT("ExecuteAbilitySlot() blocked by cooldown (Tag=%s Class=%s)"),
+			*TagString,
+			*GetNameSafe(EffectiveSlotData.Class));
+		ShowActionBarDebugMessage(this, TEXT("Ability is on cooldown"));
+		return false;
+	}
+
+	if (EffectiveSlotData.Tag.IsValid())
 	{
 		int32 MatchingSpecs = 0;
-		const FGameplayAbilityActorInfo* ActorInfo = ASC->AbilityActorInfo.Get();
 		for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
 		{
 			const UGameplayAbility* AbilityCDO = Spec.Ability;
@@ -440,7 +472,7 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 			}
 
 			const FGameplayTagContainer& AbilityAssetTags = AbilityCDO->GetAssetTags();
-			if (!AbilityAssetTags.HasAny(SlotData.Tag))
+			if (!AbilityAssetTags.HasAny(EffectiveSlotData.Tag))
 			{
 				continue;
 			}
@@ -468,6 +500,10 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 		if (MatchingSpecs == 0)
 		{
 			AJ_LOG(this, TEXT("ExecuteAbilitySlot() no owned abilities match tag %s"), *TagString);
+			if (!bFoundMatchingAbility)
+			{
+				ShowActionBarDebugMessage(this, TEXT("Ability not learned"));
+			}
 		}
 	}
 
@@ -495,7 +531,7 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 	};
 
 	/* ---------- Switch on targeting mode (Ground target etc.) ---------- */
-	switch (SlotData.TargetMode)
+	switch (EffectiveSlotData.TargetMode)
 	{
 	case EAeyerjiTargetMode::Instant:
 	{
@@ -507,7 +543,8 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 				const ENetMode NetMode = World->GetNetMode();
 				if (NetMode == NM_Client)
 				{
-					PC->Server_ActivateAbilityInstant(SlotData);
+					DrawAbilityDebugShape(EffectiveSlotData);
+					PC->Server_ActivateAbilityInstant(EffectiveSlotData);
 					return true;
 				}
 			}
@@ -515,17 +552,22 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 
 		bool bActivated = false;
 
-		if (SlotData.Tag.IsValid())
+		if (EffectiveSlotData.Tag.IsValid())
 		{
-			bActivated = ASC->TryActivateAbilitiesByTag(SlotData.Tag, /*bAllowRemoteActivation=*/true);
+			bActivated = ASC->TryActivateAbilitiesByTag(EffectiveSlotData.Tag, /*bAllowRemoteActivation=*/true);
 		}
 
-		if (!bActivated && SlotData.Class)
+		if (!bActivated && EffectiveSlotData.Class)
 		{
-			bActivated = ASC->TryActivateAbilityByClass(SlotData.Class, /*bAllowRemoteActivation=*/true);
+			bActivated = ASC->TryActivateAbilityByClass(EffectiveSlotData.Class, /*bAllowRemoteActivation=*/true);
 			AJ_LOG(this, TEXT("ExecuteAbilitySlot() TryActivateAbilityByClass %s (Class=%s)"),
 				bActivated ? TEXT("succeeded") : TEXT("failed"),
-				*GetNameSafe(SlotData.Class));
+				*GetNameSafe(EffectiveSlotData.Class));
+		}
+
+		if (bActivated)
+		{
+			DrawAbilityDebugShape(EffectiveSlotData);
 		}
 
 		CooldownTickAccumulator = CooldownTickInterval;
@@ -538,26 +580,30 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 	case EAeyerjiTargetMode::EnemyActor:
 	case EAeyerjiTargetMode::FriendlyActor:
 	{
-		if (IsAbilityOnCooldown(ASC, SlotData.Class))
+		if (IsAbilityOnCooldown(ASC, EffectiveSlotData.Class))
 		{
 			AJ_LOG(this, TEXT("ExecuteAbilitySlot() %s on cooldown, blocking targeting"),
-				*GetNameSafe(SlotData.Class));
+				*GetNameSafe(EffectiveSlotData.Class));
+			ShowActionBarDebugMessage(this, TEXT("Ability is on cooldown"));
 			return false;
 		}
 
 		if (auto *PC = GetOwningPlayer<AAeyerjiPlayerController>())
 		{
 			AJ_LOG(this, TEXT("ExecuteAbilitySlot() routing to targeting flow (Tag=%s Mode=%d)"), *TagString, TargetModeValue);
-			PC->BeginAbilityTargeting(SlotData);
+			DrawAbilityDebugShape(EffectiveSlotData);
+			PC->BeginAbilityTargeting(EffectiveSlotData);
 			return true;
 		}
 
 		AJ_LOG(this, TEXT("ExecuteAbilitySlot() PlayerController missing for targeting"));
+		ShowActionBarDebugMessage(this, TEXT("Player controller missing"));
 		return false;
 	}
 
 	default:
 		AJ_LOG(this, TEXT("ExecuteAbilitySlot() unrecognised TargetMode!"));
+		ShowActionBarDebugMessage(this, TEXT("Unsupported ability target mode"));
 		return false;
 	}
 }
@@ -566,17 +612,31 @@ void UW_ActionBar::HandleAbilityPicked(int32 SlotIndex, FAeyerjiAbilitySlot Pick
 {
 	AJ_LOG(this, "Ability picked for Slot %d (Icon=%s)", SlotIndex, *GetNameSafe(Pick.Icon));
 
+	if (!Pick.Tag.IsEmpty())
+	{
+		FGameplayTagContainer NormalizedTags;
+		for (const FGameplayTag& Tag : Pick.Tag)
+		{
+			const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
+			if (NormalizedTag.IsValid())
+			{
+				NormalizedTags.AddTag(NormalizedTag);
+			}
+		}
+		Pick.Tag = NormalizedTags;
+	}
+
 	if (APlayerController *PC = GetOwningPlayer())
 	{
 		if (AAeyerjiPlayerState *PS = PC->GetPlayerState<AAeyerjiPlayerState>())
 		{
-			if (TArray<FAeyerjiAbilitySlot> Bar = PS->GetActionBar(); Bar.IsValidIndex(SlotIndex))
+			if (PS->GetActionBar().IsValidIndex(SlotIndex))
 			{
-				Bar[SlotIndex] = Pick;
-				PS->Server_SetActionBar(Bar); // RPC + replication
+				Pick.CaptureStableReferences();
+				Pick.ResolveSavedReferences();
 
-				// Ask the server to grant the underlying GA once
-				CachedPS->Server_GrantAbilityFromSlot(Pick);
+				// Send only the edited slot so a stale client-side replicated bar cannot wipe other slots.
+				PS->Server_SetActionBarSlot(SlotIndex, Pick);
 
 				CooldownTickAccumulator = CooldownTickInterval;
 				UpdateCooldowns();
@@ -693,6 +753,97 @@ bool UW_ActionBar::TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem,
 	return true;
 }
 
+void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) const
+{
+	UWorld* World = GetWorld();
+	APawn* Pawn = CachedPS ? CachedPS->GetPawn() : nullptr;
+	if (!World || !Pawn || SlotData.Tag.IsEmpty())
+	{
+		return;
+	}
+
+	const FAeyerjiAbilityTableRow* Row = nullptr;
+
+	if (UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (const UAeyerjiAbilityTuningSubsystem* Tuning = GameInstance->GetSubsystem<UAeyerjiAbilityTuningSubsystem>())
+		{
+			for (const FGameplayTag& Tag : SlotData.Tag)
+			{
+				const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
+				if (NormalizedTag.IsValid())
+				{
+					Row = Tuning->FindAbilityRow(NormalizedTag);
+					if (Row)
+					{
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if (!Row)
+	{
+		const UDataTable* Table = UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable();
+		for (const FGameplayTag& Tag : SlotData.Tag)
+		{
+			const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
+			if (NormalizedTag.IsValid())
+			{
+				Row = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(Table, NormalizedTag);
+				if (Row)
+				{
+					break;
+				}
+			}
+		}
+	}
+
+	if (!Row)
+	{
+		return;
+	}
+
+	const FVector Origin = Pawn->GetActorLocation();
+	const FVector Forward = Pawn->GetActorForwardVector();
+	constexpr float LifeTime = 1.5f;
+	constexpr float Thickness = 2.f;
+
+	switch (Row->Shape)
+	{
+	case EAeyerjiAbilityTargetShape::OwnerCone:
+	{
+		const float Range = FMath::Max3(Row->MaxRange, Row->Radius, Row->PreviewRange);
+		if (Range > KINDA_SMALL_NUMBER)
+		{
+			const float HalfAngleRadians = FMath::DegreesToRadians(FMath::Clamp(Row->ArcAngleDegrees * 0.5f, 1.f, 179.f));
+			DrawDebugCone(World, Origin, Forward, Range, HalfAngleRadians, HalfAngleRadians, 32, FColor::Orange, false, LifeTime, 0, Thickness);
+		}
+		break;
+	}
+	case EAeyerjiAbilityTargetShape::OwnerRadius:
+	case EAeyerjiAbilityTargetShape::GroundRadius:
+	{
+		const float Radius = Row->Radius > KINDA_SMALL_NUMBER ? Row->Radius : Row->PreviewRange;
+		if (Radius > KINDA_SMALL_NUMBER)
+		{
+			DrawDebugSphere(World, Origin, Radius, 48, FColor::Cyan, false, LifeTime, 0, Thickness);
+		}
+		break;
+	}
+	case EAeyerjiAbilityTargetShape::SingleActor:
+	default:
+	{
+		const float Range = Row->MaxRange > KINDA_SMALL_NUMBER ? Row->MaxRange : Row->PreviewRange;
+		const FVector End = Origin + Forward * FMath::Max(100.f, Range);
+		DrawDebugLine(World, Origin, End, FColor::Yellow, false, LifeTime, 0, Thickness);
+		DrawDebugSphere(World, End, 50.f, 16, FColor::Yellow, false, LifeTime, 0, Thickness);
+		break;
+	}
+	}
+}
+
 UAbilitySystemComponent* UW_ActionBar::ResolveAbilitySystem()
 {
 	if (CachedAbilitySystem.IsValid())
@@ -746,9 +897,9 @@ void UW_ActionBar::ResetCachedAbilitySystem()
 bool UW_ActionBar::IsDefaultPotionSlotConfigured() const
 {
 	const bool bHasTag = !DefaultPotionSlot.Tag.IsEmpty();
-	const bool bHasClass = DefaultPotionSlot.Class != nullptr;
+	const bool bHasClass = DefaultPotionSlot.Class != nullptr || !DefaultPotionSlot.SavedAbilityClass.IsNull();
 
-	if (!bHasTag && !bHasClass && !DefaultPotionSlot.Icon)
+	if (!bHasTag && !bHasClass && !DefaultPotionSlot.Icon && DefaultPotionSlot.SavedIcon.IsNull())
 	{
 		return false;
 	}
@@ -768,7 +919,7 @@ bool UW_ActionBar::IsDefaultPotionSlotConfigured() const
 
 bool UW_ActionBar::IsAbilitySlotEmpty(const FAeyerjiAbilitySlot& SlotData) const
 {
-	return SlotData.Tag.IsEmpty() && SlotData.Class == nullptr;
+	return SlotData.Tag.IsEmpty() && SlotData.Class == nullptr && SlotData.SavedAbilityClass.IsNull();
 }
 
 UW_ActionSlotNative* UW_ActionBar::ResolvePotionSlotWidget()
@@ -829,6 +980,11 @@ void UW_ActionBar::EnsureDefaultPotionSlot(const TArray<FAeyerjiAbilitySlot>& Ne
 		return;
 	}
 
+	if (!CachedPS->IsProfileLoadApplied())
+	{
+		return;
+	}
+
 	if (!IsDefaultPotionSlotConfigured())
 	{
 		return;
@@ -853,11 +1009,10 @@ void UW_ActionBar::EnsureDefaultPotionSlot(const TArray<FAeyerjiAbilitySlot>& Ne
 		return;
 	}
 
-	TArray<FAeyerjiAbilitySlot> UpdatedBar = NewBar;
-	UpdatedBar[PotionSlotIndex] = DefaultPotionSlot;
-
 	bApplyingDefaultPotionSlot = true;
-	CachedPS->Server_SetActionBar(UpdatedBar);
-	CachedPS->Server_GrantAbilityFromSlot(DefaultPotionSlot);
+	FAeyerjiAbilitySlot NormalizedDefaultPotionSlot = DefaultPotionSlot;
+	NormalizedDefaultPotionSlot.CaptureStableReferences();
+	NormalizedDefaultPotionSlot.ResolveSavedReferences();
+	CachedPS->Server_SetActionBarSlot(PotionSlotIndex, NormalizedDefaultPotionSlot);
 	bApplyingDefaultPotionSlot = false;
 }

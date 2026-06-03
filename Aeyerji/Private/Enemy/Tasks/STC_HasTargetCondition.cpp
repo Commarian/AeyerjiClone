@@ -1,7 +1,9 @@
 // STC_HasTargetCondition.cpp
 #include "Enemy/Tasks/STC_HasTargetCondition.h"
 #include "Enemy/EnemyAIController.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "StateTreeExecutionContext.h"
 
 bool USTC_HasTargetCondition::TestCondition(FStateTreeExecutionContext& Context) const

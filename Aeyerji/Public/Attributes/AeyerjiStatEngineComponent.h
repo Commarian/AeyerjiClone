@@ -25,6 +25,7 @@ public:
 
 protected:
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:
     /** Removes any active regen gameplay effect, preventing further HP/Mana regen. */
@@ -37,6 +38,10 @@ private:
     void                            SubscribeToPrimaries();
     void                            ReapplyDerivedEffect();
     void                            OnPrimaryChanged(const FOnAttributeChangeData& Data);
+    // Starts the server-side resource regen timer once ASC attributes are ready.
+    void                            StartRegenTimer();
+    // Applies one regen tick from the current HPRegen/ManaRegen attribute values.
+    void                            TickRegeneration();
     // Applies the regen effect once the ASC and attributes are ready.
     void                            TryApplyRegen();
     // Queues a short retry if the regen effect cannot be applied yet.
@@ -54,5 +59,9 @@ private:
     mutable TWeakObjectPtr<const UAeyerjiAttributeSet> CachedAttr;
     FActiveGameplayEffectHandle                        ActiveDerivedHandle;
     FActiveGameplayEffectHandle                        ActiveRegenHandle;
+    FTimerHandle                                       RegenTickHandle;
     bool                                               bRegenRetryQueued = false;
+
+    UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Stats", meta=(ClampMin="0.01"))
+    float                                              RegenTickInterval = 0.1f;
 };

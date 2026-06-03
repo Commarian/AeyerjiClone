@@ -8,6 +8,7 @@
 #include "GameplayTagContainer.h"
 #include "Items/ItemTypes.h"
 #include "Items/ItemInstance.h"
+#include "Systems/AeyerjiSaveTypes.h"
 #include "TimerManager.h"
 
 #include "PlayerParentNative.generated.h"
@@ -55,6 +56,22 @@ public:
 	/** Client -> Server request to load the given SaveGame slot. */
 	UFUNCTION(Server, Reliable)
 	void Server_RequestLoadCharacter();
+
+	/** Client -> Server authoritative apply of the resolved local/cloud profile snapshot. */
+	UFUNCTION(Server, Reliable)
+	void Server_ApplyResolvedProfile(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, bool bHadPersistedData);
+
+	/** Begins a chunked profile snapshot upload from the owning client to the authoritative server pawn. */
+	UFUNCTION(Server, Reliable)
+	void Server_BeginResolvedProfileTransfer(const FAeyerjiSaveTransportHeader& Header, int32 TotalBytes, int32 ChunkSize, bool bHadPersistedData);
+
+	/** Adds one bounded profile payload chunk to the active upload. */
+	UFUNCTION(Server, Reliable)
+	void Server_SendResolvedProfileChunk(int32 ChunkIndex, const TArray<uint8>& ChunkBytes);
+
+	/** Finalizes the active upload and applies the reconstructed profile once. */
+	UFUNCTION(Server, Reliable)
+	void Server_FinalizeResolvedProfileTransfer();
 
 	/** Optional: server tells the owning client that loading finished. */
 	UFUNCTION(Client, Reliable)
@@ -116,7 +133,7 @@ protected:
 	TObjectPtr<UWeaponEquipmentComponent> WeaponEquipmentComponent = nullptr;
 
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void OnDeath_Implementation();
+	virtual void OnDeath_Implementation() override;
 
 	/* Optional: expose current health % to BP/UMG */
 	UFUNCTION(BlueprintPure, Category = "GAS")
@@ -132,6 +149,13 @@ protected:
 	uint8 TeamId = 0; // 0 = Players by convention
 
 private:
+	void BeginResolveAndSendProfile();
+	bool ApplyServerCachedProfile();
+	bool CaptureAndPushAuthoritativeProfile(const APawn* SourcePawn, EAeyerjiSaveCheckpointReason Reason, bool bBumpRevision);
+	void SendResolvedProfileToServer(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, bool bHadPersistedData);
+	bool ApplyResolvedProfilePayload(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, bool bHadPersistedData);
+	void ResetPendingProfileTransfer();
+
 	void QueueInitAbilityActorInfoRetry();
 	void CancelInitAbilityActorInfoRetry();
 	void RetryInitAbilityActorInfo();
@@ -154,4 +178,16 @@ private:
 	// Guards against repeated load RPCs and duplicate server loads.
 	bool bSaveLoadRequested = false;
 	bool bSaveLoaded = false;
+
+	static constexpr int32 ProfileTransportChunkSize = 48 * 1024;
+	static constexpr int32 LegacyProfileRpcWarningBytes = 60 * 1024;
+
+	FAeyerjiSaveTransportHeader PendingProfileTransferHeader;
+	TArray<uint8> PendingProfileTransferBytes;
+	TSet<int32> PendingProfileTransferReceivedChunks;
+	int32 PendingProfileTransferExpectedBytes = 0;
+	int32 PendingProfileTransferExpectedChunks = 0;
+	int32 PendingProfileTransferChunkSize = 0;
+	bool bPendingProfileTransferHadPersistedData = false;
+	bool bProfileTransferActive = false;
 };

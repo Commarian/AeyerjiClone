@@ -1,5 +1,4 @@
 #include "AeyerjiCharacter.h"
-#include "Abilities/AeyerjiRagdollHelpers.h"
 #include "Abilities/GA_Death.h" // your passive death GA
 #include "Abilities/GA_PrimaryMeleeBasic.h"
 #include "Aeyerji/AeyerjiPlayerController.h"
@@ -19,8 +18,14 @@
 #include "Kismet/GameplayStatics.h"
 #include "Logging/AeyerjiLog.h"
 #include "AeyerjiGameplayTags.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+#include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#include "BrainComponent.h"
 #include "Perception/AIPerceptionStimuliSourceComponent.h"
-#include "TimerManager.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
 
 TArray<TWeakObjectPtr<AAeyerjiCharacter>>
     AAeyerjiCharacter::CorpsesPendingCleanup;
@@ -37,6 +42,8 @@ AAeyerjiCharacter::AAeyerjiCharacter(
   AbilitySystemAeyerji->SetIsReplicated(true);
   AbilitySystemAeyerji->SetReplicationMode(
       EGameplayEffectReplicationMode::Mixed);
+  AttributeSetAeyerji =
+      CreateDefaultSubobject<UAeyerjiAttributeSet>(TEXT("AeyerjiAttributeSet"));
   bReplicates = true;
   bReplicateUsingRegisteredSubObjectList = true;
   // Compute & apply derived stats via GAS
@@ -50,8 +57,70 @@ AAeyerjiCharacter::AAeyerjiCharacter(
   {
     DeathAbilityClass = UGA_Death::StaticClass();
   }
+
+  if (USkeletalMeshComponent* MeshComponent = GetMesh())
+  {
+    MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    MeshComponent->SetCollisionResponseToAllChannels(ECR_Ignore);
+    MeshComponent->SetGenerateOverlapEvents(false);
+    MeshComponent->SetCanEverAffectNavigation(false);
+  }
 }
-void AAeyerjiCharacter::BeginPlay() { Super::BeginPlay(); }
+
+void AAeyerjiCharacter::OnConstruction(const FTransform& Transform)
+{
+  Super::OnConstruction(Transform);
+  RefreshCollisionCapsuleSize();
+  WarnOnScaledRootCapsule();
+}
+
+void AAeyerjiCharacter::BeginPlay() {
+  Super::BeginPlay();
+  RefreshCollisionCapsuleSize();
+  WarnOnScaledRootCapsule();
+}
+
+void AAeyerjiCharacter::RefreshCollisionCapsuleSize()
+{
+  UCapsuleComponent* Capsule = GetCapsuleComponent();
+  if (!Capsule)
+  {
+    return;
+  }
+
+  const float DesiredRadius =
+      (CollisionCapsuleRadius > 0.f) ? CollisionCapsuleRadius : Capsule->GetUnscaledCapsuleRadius();
+  const float DesiredHalfHeight =
+      (CollisionCapsuleHalfHeight > 0.f) ? CollisionCapsuleHalfHeight : Capsule->GetUnscaledCapsuleHalfHeight();
+
+  if (!FMath::IsNearlyEqual(Capsule->GetUnscaledCapsuleRadius(), DesiredRadius)
+      || !FMath::IsNearlyEqual(Capsule->GetUnscaledCapsuleHalfHeight(), DesiredHalfHeight))
+  {
+    Capsule->SetCapsuleSize(DesiredRadius, DesiredHalfHeight, /*bUpdateOverlaps=*/true);
+  }
+}
+
+void AAeyerjiCharacter::WarnOnScaledRootCapsule() const
+{
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+  const UCapsuleComponent* Capsule = GetCapsuleComponent();
+  if (!Capsule)
+  {
+    return;
+  }
+
+  const FVector CapsuleScale = Capsule->GetComponentScale();
+  if (!CapsuleScale.Equals(FVector::OneVector, KINDA_SMALL_NUMBER))
+  {
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("%s root capsule scale is %s. Prefer capsule size properties over component scale."),
+        *GetNameSafe(this),
+        *CapsuleScale.ToCompactString());
+  }
+#endif
+}
 /*void AAeyerjiCharacter::InitialiseAbilitySystem()
 {
         if (bASCInitialised || !AbilitySystemAeyerji) return;
@@ -157,6 +226,194 @@ void AAeyerjiCharacter::BindDeathEvent() {
     }
   }
 }
+
+void AAeyerjiCharacter::BindCrowdControlEvents()
+{
+  if (!AbilitySystemAeyerji)
+  {
+    return;
+  }
+
+  FOnGameplayEffectTagCountChanged& StunEvent =
+      AbilitySystemAeyerji->RegisterGameplayTagEvent(
+          AeyerjiTags::State_CrowdControl_Stunned,
+          EGameplayTagEventType::NewOrRemoved);
+
+  if (StunTagChangedHandle.IsValid())
+  {
+    StunEvent.Remove(StunTagChangedHandle);
+    StunTagChangedHandle.Reset();
+  }
+
+  StunTagChangedHandle =
+      StunEvent.AddUObject(this, &AAeyerjiCharacter::HandleStunTagChanged);
+
+  HandleStunTagChanged(
+      AeyerjiTags::State_CrowdControl_Stunned,
+      AbilitySystemAeyerji->GetTagCount(AeyerjiTags::State_CrowdControl_Stunned));
+}
+
+bool AAeyerjiCharacter::IsStunned() const
+{
+  return AbilitySystemAeyerji
+      && AbilitySystemAeyerji->HasMatchingGameplayTag(AeyerjiTags::State_CrowdControl_Stunned);
+}
+
+void AAeyerjiCharacter::HandleStunTagChanged(const FGameplayTag CallbackTag, int32 NewCount)
+{
+  if (CallbackTag != AeyerjiTags::State_CrowdControl_Stunned)
+  {
+    return;
+  }
+
+  if (NewCount > 0)
+  {
+    ApplyStunState();
+  }
+  else
+  {
+    ClearStunState();
+  }
+}
+
+void AAeyerjiCharacter::ApplyStunState()
+{
+  if (bStunStateApplied || bHasAppliedDeathState)
+  {
+    return;
+  }
+
+  bStunStateApplied = true;
+
+  AJ_LOG(this, TEXT("Stun applied: disabling movement/input and cancelling active abilities."));
+
+  if (UAbilitySystemComponent* ASC = GetAbilitySystemComponent())
+  {
+    if (HasAuthority())
+    {
+      ASC->CancelAbilities(nullptr, nullptr, nullptr);
+    }
+  }
+
+  if (UCharacterMovementComponent* MovementComponent = GetCharacterMovement())
+  {
+    PreStunMovementMode = MovementComponent->MovementMode;
+    PreStunCustomMovementMode = MovementComponent->CustomMovementMode;
+    bStunShouldRestoreMovement = MovementComponent->MovementMode != MOVE_None;
+
+    MovementComponent->StopMovementImmediately();
+    MovementComponent->DisableMovement();
+  }
+
+  if (AController* OwningController = GetController())
+  {
+    if (AAIController* AIController = Cast<AAIController>(OwningController))
+    {
+      AIController->StopMovement();
+
+      if (UBrainComponent* Brain = AIController->GetBrainComponent())
+      {
+        Brain->PauseLogic(TEXT("Stunned"));
+      }
+    }
+    else if (APlayerController* PlayerController = Cast<APlayerController>(OwningController))
+    {
+      PlayerController->StopMovement();
+      PlayerController->SetIgnoreMoveInput(true);
+      PlayerController->SetIgnoreLookInput(true);
+      bStunIgnoredControllerInput = true;
+    }
+  }
+
+  BP_OnStunStateChanged(true);
+}
+
+void AAeyerjiCharacter::ClearStunState()
+{
+  if (!bStunStateApplied)
+  {
+    return;
+  }
+
+  bStunStateApplied = false;
+
+  if (!bHasAppliedDeathState)
+  {
+    if (UCharacterMovementComponent* MovementComponent = GetCharacterMovement())
+    {
+      if (bStunShouldRestoreMovement)
+      {
+        MovementComponent->SetMovementMode(PreStunMovementMode, PreStunCustomMovementMode);
+      }
+    }
+
+    if (AController* OwningController = GetController())
+    {
+      if (AAIController* AIController = Cast<AAIController>(OwningController))
+      {
+        if (UBrainComponent* Brain = AIController->GetBrainComponent())
+        {
+          Brain->ResumeLogic(TEXT("StunEnded"));
+        }
+      }
+      else if (APlayerController* PlayerController = Cast<APlayerController>(OwningController))
+      {
+        if (bStunIgnoredControllerInput)
+        {
+          PlayerController->SetIgnoreMoveInput(false);
+          PlayerController->SetIgnoreLookInput(false);
+        }
+      }
+    }
+  }
+
+  bStunShouldRestoreMovement = false;
+  bStunIgnoredControllerInput = false;
+  AJ_LOG(this, TEXT("Stun cleared: restoring movement/input where appropriate."));
+  BP_OnStunStateChanged(false);
+}
+
+void AAeyerjiCharacter::EnsurePrimaryAttributeSetRegistered() {
+  if (!AbilitySystemAeyerji) {
+    return;
+  }
+
+  UAeyerjiAttributeSet *PrimarySet =
+      const_cast<UAeyerjiAttributeSet *>(AbilitySystemAeyerji->GetSet<UAeyerjiAttributeSet>());
+  if (!PrimarySet) {
+    if (AttributeSetAeyerji) {
+      AbilitySystemAeyerji->AddAttributeSetSubobject(AttributeSetAeyerji.Get());
+      PrimarySet = AttributeSetAeyerji.Get();
+    } else {
+      const FName AttributeSetName = MakeUniqueObjectName(this, UAeyerjiAttributeSet::StaticClass(), TEXT("AeyerjiAttributeSet"));
+      UAeyerjiAttributeSet *NewSet = NewObject<UAeyerjiAttributeSet>(this, UAeyerjiAttributeSet::StaticClass(), AttributeSetName);
+      AttributeSetAeyerji = NewSet;
+      AbilitySystemAeyerji->AddAttributeSetSubobject(NewSet);
+      PrimarySet = NewSet;
+    }
+  }
+
+  if (!PrimarySet) {
+    return;
+  }
+
+  AttributeSetAeyerji = PrimarySet;
+
+  TArray<UAttributeSet *> DuplicateSets;
+  for (UAttributeSet *Set : AbilitySystemAeyerji->GetSpawnedAttributes()) {
+    if (Set && Set->IsA(UAeyerjiAttributeSet::StaticClass()) && Set != PrimarySet) {
+      DuplicateSets.Add(Set);
+    }
+  }
+
+  for (UAttributeSet *Set : DuplicateSets) {
+    AbilitySystemAeyerji->RemoveSpawnedAttribute(Set);
+  }
+}
+
+void AAeyerjiCharacter::OnDeath_Implementation() {
+}
+
 /* ----------------------------- Death plumbing ----------------------------- */
 void AAeyerjiCharacter::ApplyDeathState(FAeyerjiDeathStateOptions Options) {
   const bool bWasAlreadyDead = bHasAppliedDeathState;
@@ -169,129 +426,68 @@ void AAeyerjiCharacter::ApplyDeathStateInternal(
     const FAeyerjiDeathStateOptions &Options)
 
 {
-
   if (bHasAppliedDeathState)
-
   {
-
     return;
   }
 
   bHasAppliedDeathState = true;
-
   SetCanBeDamaged(false);
 
+  // Mirror the gameplay dead state onto actor tags so systems without ASC
+  // access can still identify dead pawns immediately.
+  const FGameplayTag DeadTag = AeyerjiTags::State_Dead;
+  Tags.AddUnique(DeadTag.GetTagName());
+
   if (HasAuthority())
-
   {
-
     if (UAbilitySystemComponent *ASC = GetAbilitySystemComponent())
-
     {
-
-      ASC->AddLooseGameplayTag(
-          FGameplayTag::RequestGameplayTag(TEXT("State.Dead")));
+      if (!ASC->HasMatchingGameplayTag(DeadTag))
+      {
+        ASC->AddLooseGameplayTag(DeadTag);
+      }
     }
-
-    // Mirror the gameplay tag onto the actor Tag list so AI-side checks like
-    // Tags.Contains("State.Dead") work and replicate to clients.
-    const FGameplayTag DeadTag = AeyerjiTags::State_Dead;
-    Tags.AddUnique(DeadTag.GetTagName());
 
     if (UAIPerceptionStimuliSourceComponent *Stim =
             FindComponentByClass<UAIPerceptionStimuliSourceComponent>())
-
     {
-
       Stim->UnregisterFromPerceptionSystem();
     }
 
-    if (Options.bDetachAttachments)
-
-    {
-
-      DetachDestroyAttachedActors();
-    }
-
     if (Options.bRegisterCorpseForCleanup)
-
     {
-
       RegisterCorpseForCleanup();
     }
-
   }
-
-  else if (Options.bDetachAttachments)
-
+  if (Options.bDetachAttachments)
   {
-
-    TArray<AActor *> Attached;
-
-    GetAttachedActors(Attached, /*bResetArray=*/true);
-
-    for (AActor *Child : Attached)
-
-    {
-
-      if (!Child)
-
-      {
-
-        continue;
-      }
-
-      Child->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
-    }
+    DetachDestroyAttachedActors();
   }
 
   if (Options.bRemoveFloatingWidgets)
-
   {
-
     RemoveFloatingWidgets();
   }
 
   if (Options.bStopRegeneration)
-
   {
-
     StopRegeneration();
   }
 
-  if (UCapsuleComponent *Capsule = GetCapsuleComponent())
-
+  if (Options.bDisableControllerLogic)
   {
-
-    Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-
-    Capsule->SetGenerateOverlapEvents(false);
+    ShutdownControllerLogic();
   }
 
-  FAeyerjiRagdollHelpers::StartRagdoll(this, Options.Impulse,
-                                       Options.ImpulseWorldLocation,
-                                       Options.ImpulseBoneName);
-
-  if (USkeletalMeshComponent *MeshComponent = GetMesh())
-
+  if (Options.bDisableMovement)
   {
-
-    MeshComponent->SetCollisionProfileName(TEXT("Ragdoll"));
-
-    MeshComponent->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-
-    MeshComponent->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
-
-    MeshComponent->SetCollisionResponseToChannel(ECC_Visibility, ECR_Ignore);
-
-    MeshComponent->SetGenerateOverlapEvents(false);
+    StopMovementAndInput();
   }
 
-  if (Options.bDisableRagdollCollision)
-
+  if (Options.bDisableCollision)
   {
-
-    ScheduleRagdollCollisionDisable(Options.RagdollCollisionDisableDelay);
+    DisableDeathCollision();
   }
 }
 
@@ -374,53 +570,57 @@ void AAeyerjiCharacter::StopRegeneration()
   }
 }
 
-void AAeyerjiCharacter::ScheduleRagdollCollisionDisable(float DelaySeconds)
+void AAeyerjiCharacter::StopMovementAndInput()
 
 {
-
-  GetWorldTimerManager().ClearTimer(RagdollCollisionDisableHandle);
-
-  if (DelaySeconds <= KINDA_SMALL_NUMBER)
-
+  if (UCharacterMovementComponent *MovementComponent = GetCharacterMovement())
   {
-
-    DisableRagdollCollisionNow();
-
-    return;
+    MovementComponent->StopMovementImmediately();
+    MovementComponent->DisableMovement();
   }
 
-  GetWorldTimerManager().SetTimer(
-      RagdollCollisionDisableHandle, this,
-      &AAeyerjiCharacter::DisableRagdollCollisionNow, DelaySeconds, false);
+  if (APlayerController *PlayerController =
+          Cast<APlayerController>(GetController()))
+  {
+    DisableInput(PlayerController);
+  }
 }
 
-void AAeyerjiCharacter::DisableRagdollCollisionNow()
+void AAeyerjiCharacter::ShutdownControllerLogic()
 
 {
-
-  GetWorldTimerManager().ClearTimer(RagdollCollisionDisableHandle);
-
-  if (USkeletalMeshComponent *MeshComponent = GetMesh())
-
+  if (AAIController *AIController = Cast<AAIController>(GetController()))
   {
+    AIController->StopMovement();
+    AIController->ClearFocus(EAIFocusPriority::Gameplay);
 
-    const FTransform FinalPose = MeshComponent->GetComponentTransform();
-
-    if (UCapsuleComponent *Capsule = GetCapsuleComponent())
-
+    if (UBrainComponent *Brain = AIController->GetBrainComponent())
     {
-
-      Capsule->SetWorldLocationAndRotation(
-          FinalPose.GetLocation(), FinalPose.GetRotation().Rotator(), false,
-          nullptr, ETeleportType::TeleportPhysics);
+      Brain->StopLogic(TEXT("DeathState"));
     }
 
-    MeshComponent->SetSimulatePhysics(false);
+    if (UAIPerceptionComponent *Perception =
+            AIController->GetPerceptionComponent())
+    {
+      Perception->SetComponentTickEnabled(false);
+    }
+  }
+}
 
+void AAeyerjiCharacter::DisableDeathCollision()
+
+{
+  if (UCapsuleComponent *Capsule = GetCapsuleComponent())
+  {
+    Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    Capsule->SetCollisionResponseToAllChannels(ECR_Ignore);
+    Capsule->SetGenerateOverlapEvents(false);
+  }
+
+  if (USkeletalMeshComponent *MeshComponent = GetMesh())
+  {
     MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-
     MeshComponent->SetCollisionResponseToAllChannels(ECR_Ignore);
-
     MeshComponent->SetGenerateOverlapEvents(false);
   }
 
@@ -534,6 +734,7 @@ void AAeyerjiCharacter::HandleOutOfHealth(AActor *Victim, AActor *Killer, float 
              TEXT("HandleOutOfHealth expected self victim but got %s"),
              *GetNameSafe(Victim));
   BP_OnDeath(Killer, DamageTaken);
+  OnDeath_Implementation();
   FAeyerjiDeathStateOptions DeathOptions;
   ApplyDeathState(DeathOptions);
   if (HasAuthority() && AbilitySystemAeyerji)
@@ -568,10 +769,17 @@ void AAeyerjiCharacter::OnRep_Controller() {
   // InitialiseAbilitySystem();
 }
 void AAeyerjiCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason) {
+  if (AbilitySystemAeyerji && StunTagChangedHandle.IsValid())
+  {
+    AbilitySystemAeyerji->RegisterGameplayTagEvent(
+        AeyerjiTags::State_CrowdControl_Stunned,
+        EGameplayTagEventType::NewOrRemoved).Remove(StunTagChangedHandle);
+    StunTagChangedHandle.Reset();
+  }
+
   if (HasAuthority()) {
     UnregisterCorpseFromCleanup();
   }
-  GetWorldTimerManager().ClearTimer(RagdollCollisionDisableHandle);
   Super::EndPlay(EndPlayReason);
 }
 void AAeyerjiCharacter::DetachDestroyAttachedActors() {

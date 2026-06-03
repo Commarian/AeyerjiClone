@@ -65,6 +65,16 @@ public:
             float          AdditionalOffset = 2.f);
 
     /**
+     * Returns true when the pawn's collision fits at the supplied location.
+     * Uses the pawn capsule when available, otherwise falls back to actor bounds.
+     */
+    static bool IsTeleportLocationClear(
+            const UObject* WorldContextObject,
+            const FVector& Location,
+            const APawn*   Pawn,
+            float          CapsuleInflation = 0.f);
+
+    /**
      * Clamps a desired teleport target to the nearest navigable point within MaxRange and resolves a safe grounded location.
      * @param OriginLocation      Starting point (e.g., caster location) used to measure range
      * @param DesiredLocation     Raw desired target (e.g., mouse hit result)

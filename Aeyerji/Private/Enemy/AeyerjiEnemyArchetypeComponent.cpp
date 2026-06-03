@@ -148,6 +148,26 @@ void ApplyInitEffectsInternal(const TArchetypeData& Data, UAbilitySystemComponen
 	}
 }
 
+void SyncResourceValuesToCurrentMax(UAbilitySystemComponent& ASC)
+{
+	const FGameplayAttribute HPAttr = UAeyerjiAttributeSet::GetHPAttribute();
+	const FGameplayAttribute HPMaxAttr = UAeyerjiAttributeSet::GetHPMaxAttribute();
+	const FGameplayAttribute ManaAttr = UAeyerjiAttributeSet::GetManaAttribute();
+	const FGameplayAttribute ManaMaxAttr = UAeyerjiAttributeSet::GetManaMaxAttribute();
+
+	if (HPAttr.IsValid() && HPMaxAttr.IsValid())
+	{
+		const float MaxHP = FMath::Max(0.f, ASC.GetNumericAttribute(HPMaxAttr));
+		ASC.SetNumericAttributeBase(HPAttr, MaxHP);
+	}
+
+	if (ManaAttr.IsValid() && ManaMaxAttr.IsValid())
+	{
+		const float MaxMana = FMath::Max(0.f, ASC.GetNumericAttribute(ManaMaxAttr));
+		ASC.SetNumericAttributeBase(ManaAttr, MaxMana);
+	}
+}
+
 template <typename TArchetypeData>
 void AddTraitComponentsInternal(const TArchetypeData& Data, AActor* Owner)
 {
@@ -354,6 +374,11 @@ void UAeyerjiEnemyArchetypeComponent::ApplyArchetype()
 		ApplyInitEffects(*DataAsset, *ASC);
 		AddTraitComponents(*DataAsset);
 	}
+
+	// Enemy archetype defaults should leave spawned enemies at full current vitals.
+	SyncResourceValuesToCurrentMax(*ASC);
+	ASC->ForceReplication();
+	Owner->ForceNetUpdate();
 }
 
 void UAeyerjiEnemyArchetypeComponent::SetArchetypeData(UAeyerjiEnemyArchetypeData* NewData, bool bApplyImmediately)
@@ -498,6 +523,17 @@ TSubclassOf<UGameplayEffect> UAeyerjiEnemyArchetypeComponent::GetBasicAttackEffe
 
 	const UAeyerjiEnemyArchetypeData* Data = ResolveArchetypeData(false);
 	return Data ? Data->BasicAttackEffect : nullptr;
+}
+
+TSubclassOf<AActor> UAeyerjiEnemyArchetypeComponent::GetDeadBodyActorClass() const
+{
+	if (const FAeyerjiEnemyArchetypeEntry* LibraryEntry = ResolveArchetypeEntry(false))
+	{
+		return LibraryEntry->DeadBodyActorClass;
+	}
+
+	const UAeyerjiEnemyArchetypeData* Data = ResolveArchetypeData(false);
+	return Data ? Data->DeadBodyActorClass : nullptr;
 }
 
 void UAeyerjiEnemyArchetypeComponent::GetGrantedTags(FGameplayTagContainer& OutTags) const

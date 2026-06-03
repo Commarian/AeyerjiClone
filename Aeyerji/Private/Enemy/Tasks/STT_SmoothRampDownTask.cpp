@@ -1,8 +1,12 @@
 // STT_SmoothRampDownTask.cpp
 
 #include "Enemy/Tasks/STT_SmoothRampDownTask.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
 #include "AbilitySystemComponent.h"
 #include "StateTreeExecutionContext.h"
@@ -87,4 +91,3 @@ EStateTreeRunStatus USTT_SmoothRampDownTask::Tick(FStateTreeExecutionContext& Co
 
     return EStateTreeRunStatus::Running;
 }
-

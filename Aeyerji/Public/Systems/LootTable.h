@@ -125,34 +125,38 @@ struct AEYERJI_API FRarityScalingRow : public FTableRowBase
 	FText DisplayValue;
 };
 
-/** Weight entry for a specific item definition or id, scoped to a rarity bucket. */
+/** Weight entry for a specific item definition, scoped to a rarity bucket. */
 USTRUCT(BlueprintType)
 struct AEYERJI_API FLootTableEntry
 {
 	GENERATED_BODY()
 
-	/** Optional direct reference; if unset, ItemId will be used to resolve (safe for cooked bundles). */
+	/** Soft reference to the definition to drop; definition keys are derived from this asset path at runtime. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot")
 	TSoftObjectPtr<UItemDefinition> ItemDefinition;
 
-	/** Stable id for spawning and saves; also used when ItemDefinition is null. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot")
-	FName ItemId = NAME_None;
-
 	/**
-	 * Optional per-entry drop chance (0-1) evaluated before weight selection.
-	 * If no entries in the pool pass their DropChance, the entire roll is suppressed (no loot),
-	 * even if weights exist. Set to 1.0 to ensure the entry is eligible every roll.
+	 * Optional per-entry percent chance (0-100) evaluated before weight selection.
+	 * This is a gate: if the entry fails this roll, it is ignored entirely for that roll.
+	 * If no entries in the pool pass their PercentageChanceToDropInPool, the entire roll is suppressed (no loot),
+	 * even if weights exist. Set to 100 to ensure the entry is eligible every roll.
 	 * ULootService::RollLoot picks one item per call; call it multiple times if you want multiple drops.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float DropChance = 1.0f;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot", meta = (ClampMin = "0.0", ClampMax = "100.0", UIMin = "0.0", UIMax = "100.0"))
+	float PercentageChanceToDropInPool = 100.0f;
 
 	/** Rarity bucket this entry contributes to; must match the rolled rarity. If you roll a rarity with no entries > 0 weight, loot will be empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot")
 	EItemRarity Rarity = EItemRarity::Common;
 
-	/** Weighted chance within the rarity bucket; set to 0 to disable. Must be > 0 for the entry to be considered. */
+	/**
+	 * Relative selection weight AFTER the entry has already passed PercentageChanceToDropInPool and level gates.
+	 * Think of Weight as the tie-breaker among the eligible entries of the SAME rarity: higher weight means
+	 * "more likely compared to its siblings," not an absolute percent. For example, if three Common entries
+	 * pass the percent gate with weights 1, 2, and 7, their selection chances are 10%, 20%, and 70% respectively
+	 * (1 / (1+2+7), 2 / (1+2+7), 7 / (1+2+7)). If an entry fails the percent gate, its Weight is ignored.
+	 * Set Weight to 0 to disable the entry entirely.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot", meta = (ClampMin = "0.0"))
 	float Weight = 1.0f;
 
@@ -238,7 +242,7 @@ public:
 };
 
 /**
- * Reusable bundle of loot entries; reference from pools to avoid duplicating common sets.
+ * Reusable set of loot table entries for inclusion in multiple pools/tables.
  */
 UCLASS(BlueprintType)
 class AEYERJI_API UAeyerjiLootEntrySet : public UPrimaryDataAsset
@@ -246,6 +250,13 @@ class AEYERJI_API UAeyerjiLootEntrySet : public UPrimaryDataAsset
 	GENERATED_BODY()
 
 public:
+	/**
+	 * Optional top-level percent chance (0-100) for this entire set.
+	 * Rolled once per loot roll before evaluating Entries; if it fails, the set is skipped.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot", meta = (ClampMin = "0.0", ClampMax = "100.0", UIMin = "0.0", UIMax = "100.0"))
+	float OverallDropChance = 100.0f;
+
 	/** Entries contained in this reusable set. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Loot")
 	TArray<FLootTableEntry> Entries;

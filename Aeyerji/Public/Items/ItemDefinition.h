@@ -13,7 +13,7 @@ class UTexture2D;
 class UMaterialInterface;
 class UStaticMesh;
 class USkeletalMesh;
-class AAeyerjiWeaponActor;
+struct FSoftObjectPath;
 
 USTRUCT(BlueprintType)
 struct AEYERJI_API FItemRarityAffixRange
@@ -54,9 +54,6 @@ public:
 	virtual void PostLoad() override;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
-	FName ItemId;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	FText DisplayName;
 
 	/** Short flavor/functional description shown in UI tooltips. */
@@ -64,10 +61,19 @@ public:
 	FText Description;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
-	EItemCategory ItemCategory = EItemCategory::Offense;
+	EItemCategory ItemCategory = EItemCategory::Assault;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
-	EEquipmentSlot DefaultSlot = EEquipmentSlot::Offense;
+	EEquipmentSlot DefaultSlot = EEquipmentSlot::Assault;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item", meta = (ClampMin = "1", UIMin = "1"))
+	int32 RequiredLevel = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Corruption", meta = (MultiLine = "true"))
+	FText CorruptionPowerText;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Corruption", meta = (MultiLine = "true"))
+	FText CorruptionDrawbackText;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item")
 	FGameplayTagContainer ItemTags;
@@ -78,8 +84,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Stats")
 	TArray<FItemStatModifier> BaseModifiers;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Stats")
+	TArray<TObjectPtr<UItemAffixDefinition>> GuaranteedAffixes;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Affixes")
-	TArray<TObjectPtr<UItemAffixDefinition>> AffixPool;
+	TArray<TObjectPtr<UItemAffixDefinition>> OptionalAffixPool;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Effects")
 	TArray<FItemGrantedEffect> GrantedEffects;
@@ -129,17 +138,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Synergy", meta = (EditCondition = "bEnableEquipSynergy"))
 	TArray<FItemEquipSynergyColor> EquipSynergyColors;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Weapon", meta = (EditCondition = "ItemCategory == EItemCategory::Offense"))
-	TSubclassOf<AAeyerjiWeaponActor> WeaponActorClass;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Item|Weapon", meta = (EditCondition = "ItemCategory == EItemCategory::Offense"))
-	FWeaponEquipmentConfig WeaponConfig;
-
 	void GetAffixCountRange(EItemRarity Rarity, int32& OutMin, int32& OutMax) const;
 
 	/** Returns true if a synergy color exists for the given stack count and fills color + param. */
 	bool TryGetEquipSynergyColor(int32 StackCount, FLinearColor& OutColor, FName& OutColorParam) const;
 
+	/** Returns a stable asset-based key for this definition (derived from soft object path). */
+	UFUNCTION(BlueprintPure, Category = "Item")
+	FName GetDefinitionKey() const;
+
+	/** Returns a stable asset-based key for the provided definition (derived from soft object path). */
+	static FName MakeDefinitionKey(const UItemDefinition* Definition);
+
+	/** Returns a stable asset-based key from a soft object path. */
+	static FName MakeDefinitionKeyFromSoftPath(const FSoftObjectPath& DefinitionPath);
+
 	/** Returns the hard-coded preview material to use for a given item rarity (fallback: null). */
 	static UMaterialInterface* ResolvePreviewMaterial(EItemRarity Rarity);
+
+	UFUNCTION(BlueprintPure, Category = "Item")
+	bool IsCorruptionItem() const;
+
+	UFUNCTION(BlueprintPure, Category = "Item")
+	int32 GetEffectiveRequiredLevel() const;
 };

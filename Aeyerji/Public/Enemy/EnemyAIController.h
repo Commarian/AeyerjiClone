@@ -1,13 +1,16 @@
 ﻿// EnemyAIController.h
 #pragma once
 #include "CoreMinimal.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Components/StateTreeComponent.h"
 #include "EnemyAIController.generated.h"
 
 class UAIPerceptionComponent;
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
+struct FPropertyChangedEvent;
 
 UCLASS()
 class AEYERJI_API AEnemyAIController : public AAIController
@@ -33,20 +36,50 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "AI")
 	TObjectPtr<AActor> CurrentTarget;
 
+	/** Most recent hostile actor this AI positively tracked, even after CurrentTarget is cleared. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "AI")
+	TWeakObjectPtr<AActor> LastKnownTargetActor;
+
+	/** Cached world-space location used when chasing a target after losing direct perception. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "AI")
+	FVector LastKnownTargetLocation = FVector::ZeroVector;
+
+	/** Timestamp of the last successful last-known-target update. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "AI")
+	double LastKnownTargetTime = -1.0;
+
+	/** True while the controller has a usable last-known-target location cached. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "AI")
+	bool bHasLastKnownTarget = false;
+
 	// Accessor for target (used by tasks/conditions)
 	AActor* GetTargetActor() const { return CurrentTarget; }
 	// Accessor for home location
 	FVector GetHomeLocation() const { return HomeLocation; }
+	AActor* GetLastKnownTargetActor() const { return LastKnownTargetActor.Get(); }
+	const FVector& GetLastKnownTargetLocation() const { return LastKnownTargetLocation; }
+	double GetLastKnownTargetTime() const { return LastKnownTargetTime; }
+	bool HasLastKnownTarget() const { return bHasLastKnownTarget; }
+
+	void ClearLastKnownTarget();
 
     UFUNCTION(BlueprintCallable, Category="Targeting")
 	void SetTargetActor(AActor* NewTarget) { CurrentTarget = NewTarget;}
+
+	/** Validates and assigns a combat target, then optionally alerts nearby allies. */
+	bool TryAcquireTarget(AActor* NewTarget, bool bBroadcastAllyAlert);
 
 private:
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> TargetActor;
 
 protected:
+	virtual void PostLoad() override;
 	virtual void OnPossess(APawn* InPawn) override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
 
 	UFUNCTION()
 	void OnPerceptionUpdated(const TArray<AActor*>& Actors);   // keep
@@ -57,51 +90,58 @@ protected:
 
 
 private:
+	bool IsTargetValidForAcquisition(AActor* Candidate) const;
+	void RememberTargetLocation(AActor* Target);
+	/** Migrates old property-driven perception defaults into the authoritative sense configs. */
+	void ApplyLegacyPerceptionPropertyOverrides();
+	/** Mirrors the authoritative configs into hidden legacy fields so older serialized assets stay coherent. */
+	void SyncDeprecatedPerceptionPropertiesFromConfigs();
+
     /* We own perception so it's never null                                */
     UPROPERTY(VisibleAnywhere, Category="AI")
     TObjectPtr<UAIPerceptionComponent> Perception;
     
-    /** Sense configs are editable on BP so designers can tune directly. */
+    /** Authoritative sight config edited by Blueprint subclasses. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception", meta=(AllowPrivateAccess="true"), Instanced)
     TObjectPtr<UAISenseConfig_Sight> SightSenseConfig;
 
+    /** Authoritative hearing config edited by Blueprint subclasses. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception", meta=(AllowPrivateAccess="true"), Instanced)
     TObjectPtr<UAISenseConfig_Hearing> HearingSenseConfig;
 	
     uint8 TeamId = 1; 
 
-public:
-    /** Shared sight parameters for all enemies using this controller. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    /** Deprecated legacy settings retained only so older Blueprint defaults can migrate cleanly. */
+    UPROPERTY()
     float SightRadius = 1500.f;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    UPROPERTY()
     float LoseSightRadius = 2500.f;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    UPROPERTY()
     float PeripheralVisionAngleDegrees = 55.f;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    UPROPERTY()
     bool bDetectEnemies = true;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    UPROPERTY()
     bool bDetectFriendlies = false;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    UPROPERTY()
     bool bDetectNeutrals = false;
     
-    /** Hearing sense (optional) */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception|Hearing")
+    UPROPERTY()
     float HearingRange = 1800.f;
 
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception|Hearing")
+    UPROPERTY()
     float LoSHearingRange = 2400.f;
     
-    /** When true, the float properties above override the BP Sense Config subobjects at runtime. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Perception")
+    /** Deprecated migration flag from the old property-driven perception path. */
+    UPROPERTY()
     bool bOverridePerceptionWithProperties = false;
-    
-    /** Apply current UPROPERTY values to the sense configs at runtime. */
+
+public:
+    /** Reconfigures the live perception component from the authoritative sense configs. */
     UFUNCTION(BlueprintCallable, Category="AI|Perception")
     void ApplyPerceptionSettings();
     

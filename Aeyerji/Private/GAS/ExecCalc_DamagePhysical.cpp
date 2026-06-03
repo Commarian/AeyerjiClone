@@ -76,7 +76,8 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 	FGameplayTagContainer AssetTags;
 	Spec.GetAllAssetTags(AssetTags);
 	const bool bTaggedPhysical = AssetTags.HasTagExact(AeyerjiTags::DamageType_Physical);
-	const bool bClassIsPhysical = Spec.Def && Spec.Def->GetClass() == UGE_DamagePhysical::StaticClass();
+	// Accept subclasses so BP-derived damage effects still route through physical mitigation.
+	const bool bClassIsPhysical = Spec.Def && Spec.Def->IsA(UGE_DamagePhysical::StaticClass());
 	const bool bIsPhysical = bTaggedPhysical || bClassIsPhysical;
 
 	float FinalDamage = BaseDamage;

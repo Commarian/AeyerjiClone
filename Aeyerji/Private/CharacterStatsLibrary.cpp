@@ -9,8 +9,13 @@
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/Controller.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#include "GameFramework/PlayerController.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Blueprint/AIBlueprintHelperLibrary.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -28,13 +33,201 @@
 #include "Items/InventoryComponent.h"
 #include "Items/ItemDefinition.h"
 #include "Player/PlayerStatsTrackingComponent.h"
+#include "Systems/AeyerjiSaveManagerSubsystem.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/LootService.h"
+#include "Systems/AeyerjiWorldStateSubsystem.h"
 #include "Engine/AssetManager.h"
 #include "Engine/World.h"
 
 //This works together with @EAeyerjiStat in CharacterStatsLibrary.h
 namespace
 {
+	float GetDefaultDifficultySlider()
+	{
+		return UAeyerjiDifficultySettings::WorldTierToDifficultySlider(UAeyerjiDifficultySettings::GetNormalWorldTier());
+	}
+
+	int32 GetDefaultWorldTier()
+	{
+		return UAeyerjiDifficultySettings::GetNormalWorldTier();
+	}
+
+	bool IsAbilitySlotPersisted(const FAeyerjiAbilitySlot& Slot)
+	{
+		return Slot.HasPersistentIdentity();
+	}
+
+	int32 CountPersistedActionBarSlots(const TArray<FAeyerjiAbilitySlot>& ActionBar)
+	{
+		int32 Count = 0;
+		for (const FAeyerjiAbilitySlot& Slot : ActionBar)
+		{
+			if (IsAbilitySlotPersisted(Slot))
+			{
+				++Count;
+			}
+		}
+
+		return Count;
+	}
+
+	int32 CountResolvedAbilityClasses(const TArray<FAeyerjiAbilitySlot>& ActionBar)
+	{
+		int32 Count = 0;
+		for (const FAeyerjiAbilitySlot& Slot : ActionBar)
+		{
+			if (Slot.Class)
+			{
+				++Count;
+			}
+		}
+
+		return Count;
+	}
+
+	void NormalizeActionBarForPersistence(TArray<FAeyerjiAbilitySlot>& ActionBar)
+	{
+		for (FAeyerjiAbilitySlot& Slot : ActionBar)
+		{
+			Slot.CaptureStableReferences();
+			Slot.ResolveSavedReferences();
+		}
+	}
+
+	void LogActionBarPersistenceSnapshot(const TCHAR* Phase, const FString& SlotName, const TArray<FAeyerjiAbilitySlot>& ActionBar)
+	{
+		for (int32 Index = 0; Index < ActionBar.Num(); ++Index)
+		{
+			const FAeyerjiAbilitySlot& Slot = ActionBar[Index];
+			UE_LOG(LogTemp, Display,
+				TEXT("[AbilitySave] Phase=%s Slot=%s Index=%d Description=%s RuntimeClass=%s SavedClass=%s Tags=%s"),
+				Phase,
+				*SlotName,
+				Index,
+				*Slot.Description.ToString(),
+				*GetNameSafe(Slot.Class),
+				*Slot.SavedAbilityClass.ToSoftObjectPath().ToString(),
+				*Slot.Tag.ToString());
+		}
+	}
+
+	bool PreserveExistingActionBarIfCaptureIsEmpty(
+		UAeyerjiSaveGame* CapturedSave,
+		const TArray<FAeyerjiAbilitySlot>& ExistingActionBar,
+		const FName ExistingPassiveId,
+		const FString& SlotName)
+	{
+		if (!CapturedSave)
+		{
+			return false;
+		}
+
+		const int32 CapturedSlotCount = CountPersistedActionBarSlots(CapturedSave->ActionBar);
+		const int32 ExistingSlotCount = CountPersistedActionBarSlots(ExistingActionBar);
+		if (CapturedSlotCount > 0 || ExistingSlotCount <= 0)
+		{
+			return false;
+		}
+
+		UE_LOG(LogTemp, Warning,
+			TEXT("[AbilitySave] Preserving existing action bar for slot %s because the current runtime capture is empty during save."),
+			*SlotName);
+
+		CapturedSave->ActionBar = ExistingActionBar;
+		NormalizeActionBarForPersistence(CapturedSave->ActionBar);
+		if (CapturedSave->SelectedPassiveId.IsNone() && !ExistingPassiveId.IsNone())
+		{
+			CapturedSave->SelectedPassiveId = ExistingPassiveId;
+		}
+		return true;
+	}
+
+	bool CommitProfileThroughSaveManager(UAeyerjiSaveGame* Data, const AAeyerjiPlayerState* PS)
+	{
+		if (!Data || !PS)
+		{
+			return false;
+		}
+
+		UWorld* World = PS->GetWorld();
+		UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+		UAeyerjiSaveManagerSubsystem* SaveManager =
+			GameInstance ? GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>() : nullptr;
+		if (!SaveManager)
+		{
+			return false;
+		}
+
+		if (PS->HasAuthority())
+		{
+			return const_cast<AAeyerjiPlayerState*>(PS)->CommitPreparedCheckpointProfile(Data, EAeyerjiSaveCheckpointReason::Manual, /*bBumpRevision=*/true);
+		}
+
+		FAeyerjiSaveTransportHeader Header;
+		TArray<uint8> Bytes;
+		if (!SaveManager->PrepareProfileForServerCommit(const_cast<AAeyerjiPlayerState*>(PS), Data, /*bBumpRevision=*/true, Header, Bytes))
+		{
+			return false;
+		}
+
+		return SaveManager->CommitResolvedProfileForLocalOwner(Header, Bytes);
+	}
+
+	int32 DifficultySliderToUiWorldTier(const float Slider)
+	{
+		return UAeyerjiDifficultySettings::DifficultySliderToWorldTier(Slider);
+	}
+
+	void ApplySavedDifficultyToGameInstance(const UAeyerjiSaveGame* Data, UAeyerjiGameInstance* GI)
+	{
+		if (!GI)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("ApplySavedDifficultyToGameInstance: GI is null, cannot apply saved difficulty."));
+			return;
+		}
+
+		if (Data)
+		{
+			if (Data->bHasDifficultySelection && Data->bHasWorldTierSelection)
+			{
+				UE_LOG(LogTemp, Display,
+					TEXT("ApplySavedDifficultyToGameInstance: Save has both values. Preferring authoritative WorldTier=%d over legacy DifficultySlider=%.2f."),
+					Data->WorldTier,
+					Data->DifficultySlider);
+				GI->ApplySavedWorldTier(Data->WorldTier);
+				return;
+			}
+
+			if (Data->bHasWorldTierSelection)
+			{
+				UE_LOG(LogTemp, Display,
+					TEXT("ApplySavedDifficultyToGameInstance: Applying saved WorldTier=%d (bHasDifficulty=%d Difficulty=%.2f)."),
+					Data->WorldTier,
+					Data->bHasDifficultySelection ? 1 : 0,
+					Data->DifficultySlider);
+				GI->ApplySavedWorldTier(Data->WorldTier);
+				return;
+			}
+
+			if (Data->bHasDifficultySelection)
+			{
+				const int32 DerivedWorldTier = DifficultySliderToUiWorldTier(Data->DifficultySlider);
+				UE_LOG(LogTemp, Display,
+					TEXT("ApplySavedDifficultyToGameInstance: Legacy save missing WorldTier. Derived WorldTier=%d from DifficultySlider=%.2f."),
+					DerivedWorldTier,
+					Data->DifficultySlider);
+				GI->ApplySavedWorldTier(DerivedWorldTier);
+				return;
+			}
+
+			UE_LOG(LogTemp, Warning, TEXT("ApplySavedDifficultyToGameInstance: Save exists but has no difficulty/world-tier flags. Using default WorldTier=%d."), GetDefaultWorldTier());
+		}
+
+		UE_LOG(LogTemp, Display, TEXT("ApplySavedDifficultyToGameInstance: Applying default WorldTier=%d."), GetDefaultWorldTier());
+		GI->ApplySavedWorldTier(GetDefaultWorldTier());
+	}
+
 	FGameplayAttribute GetAttributeForAeyerjiStat(EAeyerjiStat Stat)
 	{
 		switch (Stat)
@@ -95,9 +288,23 @@ namespace
 
 		case EAeyerjiStat::Intellect:
 			return UAeyerjiAttributeSet::GetIntellectAttribute();
+		case EAeyerjiStat::PoisonAmount:
+			return UAeyerjiAttributeSet::GetPoisonAmountAttribute();
 
-		case EAeyerjiStat::Ailment:
-			return UAeyerjiAttributeSet::GetAilmentAttribute();
+		case EAeyerjiStat::PoisonDuration:
+			return UAeyerjiAttributeSet::GetPoisonDurationAttribute();
+
+		case EAeyerjiStat::TraumaAmount:
+			return UAeyerjiAttributeSet::GetTraumaAmountAttribute();
+
+		case EAeyerjiStat::TraumaDuration:
+			return UAeyerjiAttributeSet::GetTraumaDurationAttribute();
+
+		case EAeyerjiStat::CorruptionAmount:
+			return UAeyerjiAttributeSet::GetCorruptionAmountAttribute();
+
+		case EAeyerjiStat::CorruptionDuration:
+			return UAeyerjiAttributeSet::GetCorruptionDurationAttribute();
 
 		case EAeyerjiStat::CritChance:
 			return UAeyerjiAttributeSet::GetCritChanceAttribute();
@@ -119,12 +326,6 @@ namespace
 
 		case EAeyerjiStat::CooldownReduction:
 			return UAeyerjiAttributeSet::GetCooldownReductionAttribute();
-
-		case EAeyerjiStat::AilmentDPS:
-			return UAeyerjiAttributeSet::GetAilmentDPSAttribute();
-
-		case EAeyerjiStat::AilmentDuration:
-			return UAeyerjiAttributeSet::GetAilmentDurationAttribute();
 
 		case EAeyerjiStat::XP:
 			return UAeyerjiAttributeSet::GetXPAttribute();
@@ -333,72 +534,309 @@ static UAbilitySystemComponent *FindASCChecked(const AAeyerjiPlayerState *PS)
 	return nullptr; // should never hit
 }
 
-FString UCharacterStatsLibrary::MakeStableCharSlotName(const APlayerState *PS)
-
+static int32 MakeDifficultyKey(const float DifficultySlider)
 {
+	return FMath::Clamp(FMath::RoundToInt(DifficultySlider), 0, 1000);
+}
 
-	if (!PS)
-		return TEXT("UNKNOWN_Char");
-
-	if (const AAeyerjiPlayerState *AeyerjiPS = Cast<AAeyerjiPlayerState>(PS))
+static float ApplyRunBestTimeToSaveData(UAeyerjiSaveGame* Data, const FAeyerjiRunResults& Results)
+{
+	if (!Data)
 	{
-		const FString &OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
+		return 0.f;
+	}
+
+	const int32 DifficultyKey = MakeDifficultyKey(Results.DifficultySlider);
+	const bool bHasExisting = Data->BestRunTimeSecondsByDifficulty.Contains(DifficultyKey);
+	const float ExistingBest = Data->BestRunTimeSecondsByDifficulty.FindRef(DifficultyKey);
+	float BestTime = (bHasExisting && ExistingBest > 0.f) ? ExistingBest : 0.f;
+
+	if (Results.Resolution == EAeyerjiRunResolution::Victory && Results.RunTimeSeconds > 0.f)
+	{
+		if (BestTime <= 0.f || Results.RunTimeSeconds < BestTime)
+		{
+			BestTime = Results.RunTimeSeconds;
+			Data->BestRunTimeSecondsByDifficulty.Add(DifficultyKey, BestTime);
+		}
+	}
+
+	return BestTime;
+}
+
+static void AppendRecentRunRecord(UAeyerjiSaveGame* Data, const FAeyerjiRunResults& Results)
+{
+	if (!Data)
+	{
+		return;
+	}
+
+	FAeyerjiCompletedRunRecord NewRecord;
+	NewRecord.CompletedAtUtc = FDateTime::UtcNow();
+	NewRecord.Resolution = Results.Resolution;
+	NewRecord.RunTimeSeconds = Results.RunTimeSeconds;
+	NewRecord.UnitsKilled = Results.UnitsKilled;
+	NewRecord.UnitsKillTarget = Results.UnitsKillTarget;
+	NewRecord.DifficultySlider = Results.DifficultySlider;
+	NewRecord.SpeedBonusPercent = Results.SpeedBonusPercent;
+	NewRecord.CompletedZoneId = Results.CompletedZoneId;
+
+	Data->RecentRuns.Insert(NewRecord, 0);
+
+	constexpr int32 MaxRecentRuns = 20;
+	while (Data->RecentRuns.Num() > MaxRecentRuns)
+	{
+		Data->RecentRuns.RemoveAt(Data->RecentRuns.Num() - 1);
+	}
+}
+
+static bool GatherAeyerjiCharSaveData(
+	UAeyerjiSaveGame* Data,
+	const AAeyerjiPlayerState* PS,
+	const FString& Slot,
+	const APawn* SourcePawn = nullptr)
+{
+	if (!Data || !PS)
+	{
+		UE_LOG(LogTemp, Error, TEXT("SaveAeyerjiChar: Called with null Data or PlayerState. Aborting save."));
+		return false;
+	}
+
+	if (const UWorld* World = PS->GetWorld(); World && World->GetNetMode() == NM_Client)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SaveAeyerjiChar: Refusing client-side save for slot %s."), *Slot);
+		return false;
+	}
+
+	// Capture the current difficulty/world-tier selection for persistence.
+	Data->bHasDifficultySelection = false;
+	Data->bHasWorldTierSelection = false;
+	if (PS->GetWorld())
+	{
+		if (UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(PS->GetWorld()->GetGameInstance()))
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("SaveAeyerjiChar(Difficulty): GI pre-capture HasDiff=%d HasTier=%d Diff=%.2f Tier=%d"),
+				GI->HasDifficultySelection() ? 1 : 0,
+				GI->HasWorldTierSelection() ? 1 : 0,
+				GI->GetDifficultySlider(),
+				GI->GetWorldTier());
+
+			if (!GI->HasDifficultySelection() && !GI->HasWorldTierSelection())
+			{
+				UE_LOG(LogTemp, Warning, TEXT("SaveAeyerjiChar(Difficulty): GI has no selection flags; forcing default WorldTier=%d."), GetDefaultWorldTier());
+				GI->ApplySavedWorldTier(GetDefaultWorldTier());
+			}
+
+			if (GI->HasDifficultySelection() || GI->HasWorldTierSelection())
+			{
+				Data->DifficultySlider = GI->GetDifficultySlider();
+				Data->WorldTier = GI->GetWorldTier();
+				Data->bHasDifficultySelection = true;
+				Data->bHasWorldTierSelection = true;
+			}
+		}
+	}
+
+	// Keep save data deterministic even if no world context exists.
+	if (!Data->bHasDifficultySelection)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("SaveAeyerjiChar(Difficulty): Missing captured difficulty; defaulting to the WorldTier=%d slider alias."), GetDefaultWorldTier());
+		Data->DifficultySlider = GetDefaultDifficultySlider();
+		Data->bHasDifficultySelection = true;
+	}
+
+	if (!Data->bHasWorldTierSelection)
+	{
+		Data->WorldTier = DifficultySliderToUiWorldTier(Data->DifficultySlider);
+		Data->bHasWorldTierSelection = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("SaveAeyerjiChar(Difficulty): Missing captured world tier; derived Tier=%d from Difficulty=%.2f."),
+			Data->WorldTier,
+			Data->DifficultySlider);
+	}
+
+	UE_LOG(LogTemp, Display,
+		TEXT("SaveAeyerjiChar(Difficulty): Slot=%s SaveFlags(Diff=%d Tier=%d) SaveValues(Diff=%.2f Tier=%d)"),
+		*Slot,
+		Data->bHasDifficultySelection ? 1 : 0,
+		Data->bHasWorldTierSelection ? 1 : 0,
+		Data->DifficultySlider,
+		Data->WorldTier);
+
+	const APawn* Pawn = SourcePawn ? SourcePawn : PS->GetPawn();
+	if (Pawn)
+	{
+		if (UAeyerjiInventoryComponent* Inventory = Pawn->FindComponentByClass<UAeyerjiInventoryComponent>())
+		{
+			Data->Inventory = Inventory->BuildSaveData();
+			UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar: Captured inventory with %d items, %d placements"),
+				Data->Inventory.ItemSnapshots.Num(),
+				Data->Inventory.GridPlacements.Num());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("SaveAeyerjiChar: Pawn %s missing inventory component; skipping inventory save"), *GetNameSafe(Pawn));
+		}
+
+		if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Pawn))
+		{
+			if (const UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent())
+			{
+				for (UAttributeSet* Set : ASC->GetSpawnedAttributes())
+				{
+					if (UAeyerjiAttributeSet* AeyerjiSet = Cast<UAeyerjiAttributeSet>(Set))
+					{
+						UE_LOG(LogTemp, Log, TEXT("SaveAeyerjiChar: Found Attribute XP found '%f'"), AeyerjiSet->GetXP());
+						Data->Attributes.XP = AeyerjiSet->GetXP();
+						Data->Attributes.Level = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(AeyerjiSet->GetLevel()));
+					}
+				}
+			}
+		}
+	}
+
+	if (const UPlayerStatsTrackingComponent* StatsComp = PS->FindComponentByClass<UPlayerStatsTrackingComponent>())
+	{
+		StatsComp->ExtractLootStats(Data->LootStats);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("SaveAeyerjiChar: PlayerState %s missing PlayerStatsTrackingComponent; skipping loot stats save"), *GetNameSafe(PS));
+	}
+
+	UE_LOG(LogTemp, Display,
+		TEXT("SaveAeyerjiChar(LootPity): Slot=%s DropsSinceLastLegendary=%d TotalLegendariesDropped=%d TotalLegendariesPickedUp=%d WindowCount=%d LegendariesInWindow=%d"),
+		*Slot,
+		Data->LootStats.DropsSinceLastLegendary,
+		Data->LootStats.TotalLegendariesDropped,
+		Data->LootStats.TotalLegendariesPickedUp,
+		Data->LootStats.WindowCount,
+		Data->LootStats.LegendariesInWindow);
+
+	Data->WorldStateEntries.Reset();
+	if (const UWorld* World = PS->GetWorld())
+	{
+		if (const UAeyerjiWorldStateSubsystem* WorldStateSubsystem = UAeyerjiWorldStateSubsystem::Get(World))
+		{
+			WorldStateSubsystem->ExportPersistentCharacterState(FName(*Slot), Data->WorldStateEntries);
+		}
+	}
+
+	const TArray<FAeyerjiAbilitySlot> ExistingActionBar = Data->ActionBar;
+	const FName ExistingPassiveId = Data->SelectedPassiveId;
+	Data->ActionBar = PS->ActionBar;
+	NormalizeActionBarForPersistence(Data->ActionBar);
+	Data->SelectedPassiveId = PS->GetSelectedPassiveId();
+	const bool bPreservedExistingActionBar = PreserveExistingActionBarIfCaptureIsEmpty(Data, ExistingActionBar, ExistingPassiveId, Slot);
+
+	UE_LOG(LogTemp, Display,
+		TEXT("[AbilitySave] Slot=%s CapturedSlots=%d ResolvedClasses=%d Passive=%s PreservedExisting=%d"),
+		*Slot,
+		CountPersistedActionBarSlots(Data->ActionBar),
+		CountResolvedAbilityClasses(Data->ActionBar),
+		*Data->SelectedPassiveId.ToString(),
+		bPreservedExistingActionBar ? 1 : 0);
+	LogActionBarPersistenceSnapshot(TEXT("Captured"), Slot, Data->ActionBar);
+
+	UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar(BeforeWrite): Slot=%s PS=%s Pawn=%s DataXP=%f DataLevel=%d"),
+		*Slot,
+		*GetNameSafe(PS),
+		*GetNameSafe(Pawn),
+		Data->Attributes.XP,
+		Data->Attributes.Level);
+
+	UE_LOGFMT(LogTemp, Log,
+		"Saving to slot '{Slot}'. XP={XP}, Level={Level}. SaveGameName='{SaveGameName}', First item='{First}', Second item='{Second}'",
+		("Slot", Slot),
+		("XP", Data->Attributes.XP),
+		("Level", Data->Attributes.Level),
+		("SaveGameName", Data->GetName()),
+		("First", Data->ActionBar.Num() ? Data->ActionBar[0].Description.ToString() : TEXT("Empty")),
+		("Second", Data->ActionBar.Num() > 1 ? Data->ActionBar[1].Description.ToString() : TEXT("Empty")));
+
+	UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar(AfterGather): Slot=%s XP=%f Level=%d (FirstSlot=%s SecondSlot=%s)"),
+		*Slot,
+		Data->Attributes.XP,
+		Data->Attributes.Level,
+		Data->ActionBar.Num() ? *Data->ActionBar[0].Description.ToString() : TEXT("Empty"),
+		Data->ActionBar.Num() > 1 ? *Data->ActionBar[1].Description.ToString() : TEXT("Empty"));
+
+	return true;
+}
+
+bool UCharacterStatsLibrary::BuildAeyerjiSaveDataFromRuntime(
+	UAeyerjiSaveGame* Data,
+	const AAeyerjiPlayerState* PS,
+	const FString& Slot,
+	const APawn* SourcePawn)
+{
+	return GatherAeyerjiCharSaveData(Data, PS, Slot, SourcePawn);
+}
+
+FString UCharacterStatsLibrary::MakeStableOwnerKey(const APlayerState* PS)
+{
+	if (!PS)
+	{
+		return TEXT("UNKNOWN");
+	}
+
+	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PS))
+	{
+		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
 		if (!OverrideSlot.IsEmpty())
 		{
 			return OverrideSlot;
 		}
 	}
 
-	// Prefer stable online IDs if available.
-
-	const FUniqueNetIdRepl &NetId = PS->GetUniqueId();
-
+	const FUniqueNetIdRepl& NetId = PS->GetUniqueId();
 	if (NetId.IsValid())
-
 	{
-
-		const FUniqueNetId &Raw = *NetId.GetUniqueNetId();
-
+		const FUniqueNetId& Raw = *NetId.GetUniqueNetId();
 		if (!Raw.GetType().IsEqual(FName("NULL"), ENameCase::IgnoreCase))
-
 		{
-
 			const FString SafeNetId = FPaths::MakeValidFileName(Raw.ToString());
-
 			if (!SafeNetId.IsEmpty())
-
 			{
-
-				return SafeNetId + TEXT("_Char");
+				return SafeNetId;
 			}
 		}
 	}
 
-	// Development fallback: keep a deterministic per-machine slot.
-
 	const FString DevToken = GetLocalDevSlotToken();
-
 	if (!DevToken.IsEmpty())
-
 	{
-
-		return DevToken + TEXT("_Char");
+		return DevToken;
 	}
 
-	// Last resorts: player name or numeric id.
-
 	FString FallbackName = FPaths::MakeValidFileName(PS->GetPlayerName());
-
 	if (!FallbackName.IsEmpty())
-
 	{
-
-		return FallbackName + TEXT("_Char");
+		return FallbackName;
 	}
 
 	const int32 StableIndex = FMath::Max(0, PS->GetPlayerId());
+	return FString::Printf(TEXT("Player%d"), StableIndex);
+}
 
-	return FString::Printf(TEXT("Player%d_Char"), StableIndex);
+FString UCharacterStatsLibrary::MakeStableCharSlotName(const APlayerState *PS)
+
+{
+	if (!PS)
+	{
+		return TEXT("UNKNOWN_Char");
+	}
+
+	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PS))
+	{
+		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
+		if (!OverrideSlot.IsEmpty())
+		{
+			return OverrideSlot;
+		}
+	}
+
+	return MakeStableOwnerKey(PS) + TEXT("_Char");
 }
 
 UAeyerjiSaveGame *UCharacterStatsLibrary::LoadOrCreateAeyerjiSave(const FString &Slot, bool &bOutLoadedFromDisk)
@@ -512,7 +950,7 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 	{
 
-		UE_LOG(LogTemp, Warning, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Called with null Data. Aborting load."));
+		UE_LOG(LogTemp, Warning, TEXT("[ProfileLoad] Hydration=Failed Reason=NullSaveGame"));
 
 		return;
 	}
@@ -521,7 +959,7 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 	{
 
-		UE_LOG(LogTemp, Warning, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Called with null PlayerState. Aborting load."));
+		UE_LOG(LogTemp, Warning, TEXT("[ProfileLoad] Hydration=Failed Reason=NullPlayerState"));
 
 		return;
 	}
@@ -530,36 +968,86 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 	{
 
-		UE_LOG(LogTemp, Warning, TEXT("UCharacterStatsLibrary::LoadAeyerjiChar: Called with null ASC. Aborting load."));
+		UE_LOG(LogTemp, Warning, TEXT("[ProfileLoad] Hydration=Failed Reason=MissingASC PlayerState=%s"), *GetNameSafe(PS));
 
 		return;
 	}
 
+	const FString SlotName = UCharacterStatsLibrary::MakeStableCharSlotName(PS);
+	UE_LOG(LogTemp, Display,
+		TEXT("[ProfileLoad] Hydration=Begin Slot=%s Revision=%lld Level=%d XP=%.2f ActionBar=%d Passive=%s Items=%d Equipped=%d Grid=%d WorldFacts=%d"),
+		*SlotName,
+		Data->Revision,
+		Data->Attributes.Level,
+		Data->Attributes.XP,
+		Data->ActionBar.Num(),
+		*Data->SelectedPassiveId.ToString(),
+		Data->Inventory.ItemSnapshots.Num(),
+		Data->Inventory.EquippedItems.Num(),
+		Data->Inventory.GridPlacements.Num(),
+		Data->WorldStateEntries.Num());
+
+	UE_LOG(LogTemp, Display, TEXT("[ProfileLoad] HydrationPhase=1_DifficultyLootWorldMemory Slot=%s"), *SlotName);
 	// Restore persisted difficulty selection so UI sliders can reflect the saved choice.
 	if (PS->GetWorld())
 	{
 		if (UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(PS->GetWorld()->GetGameInstance()))
 		{
-			if (Data->bHasDifficultySelection)
-			{
-				GI->SetDifficultySlider(Data->DifficultySlider);
-			}
+			UE_LOG(LogTemp, Display,
+				TEXT("LoadAeyerjiChar(Difficulty): Slot=%s SaveFlags(Diff=%d Tier=%d) SaveValues(Diff=%.2f Tier=%d)"),
+				*UCharacterStatsLibrary::MakeStableCharSlotName(PS),
+				Data->bHasDifficultySelection ? 1 : 0,
+				Data->bHasWorldTierSelection ? 1 : 0,
+				Data->DifficultySlider,
+				Data->WorldTier);
+			ApplySavedDifficultyToGameInstance(Data, GI);
+			UE_LOG(LogTemp, Display,
+				TEXT("LoadAeyerjiChar(Difficulty): Applied GI values Difficulty=%.2f WorldTier=%d"),
+				GI->GetDifficultySlider(),
+				GI->GetWorldTier());
 		}
 	}
 
 	// Restore lifetime loot stats into the player state component if available.
+	bool bAppliedLootStatsToComponent = false;
 	if (UPlayerStatsTrackingComponent* StatsComp = PS->FindComponentByClass<UPlayerStatsTrackingComponent>())
 	{
 		StatsComp->LoadLootStats(Data->LootStats);
+		bAppliedLootStatsToComponent = true;
 	}
 	else
 	{
-		UE_LOG(LogTemp, Verbose, TEXT("LoadAeyerjiChar: PlayerState %s missing PlayerStatsTrackingComponent; skipping loot stats load"), *GetNameSafe(PS));
+		UE_LOG(LogTemp, Warning, TEXT("[ProfileLoad] MissingSubsystem=PlayerStatsTrackingComponent PlayerState=%s Detail=LootStatsNotApplied"), *GetNameSafe(PS));
+	}
+
+	UE_LOG(LogTemp, Display,
+		TEXT("LoadAeyerjiChar(LootPity): Slot=%s Applied=%d DropsSinceLastLegendary=%d TotalLegendariesDropped=%d TotalLegendariesPickedUp=%d WindowCount=%d LegendariesInWindow=%d"),
+		*UCharacterStatsLibrary::MakeStableCharSlotName(PS),
+		bAppliedLootStatsToComponent ? 1 : 0,
+		Data->LootStats.DropsSinceLastLegendary,
+		Data->LootStats.TotalLegendariesDropped,
+		Data->LootStats.TotalLegendariesPickedUp,
+		Data->LootStats.WindowCount,
+		Data->LootStats.LegendariesInWindow);
+
+	if (ASC->GetOwnerRole() == ROLE_Authority)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[ProfileLoad] HydrationPhase=2_CharacterWorldFacts Slot=%s Facts=%d"), *SlotName, Data->WorldStateEntries.Num());
+		if (UAeyerjiWorldStateSubsystem* WorldStateSubsystem = UAeyerjiWorldStateSubsystem::Get(PS))
+		{
+			WorldStateSubsystem->ImportPersistentCharacterState(FName(*UCharacterStatsLibrary::MakeStableCharSlotName(PS)), Data->WorldStateEntries);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("LoadAeyerjiChar: World state subsystem missing; character-scoped persistent facts were not imported."));
+		}
 	}
 
 	// Some older/new slots may not have been initialised with the fixed number of action bar entries.
 	// Pad the save data to match the current expected slot count so widgets and selections work.
 	const int32 ExpectedSlots = PS->ActionBar.Num();
+	NormalizeActionBarForPersistence(Data->ActionBar);
+	LogActionBarPersistenceSnapshot(TEXT("LoadedBeforeApply"), SlotName, Data->ActionBar);
 	if (ExpectedSlots > 0 && Data->ActionBar.Num() < ExpectedSlots)
 	{
 		const int32 OldNum = Data->ActionBar.Num();
@@ -581,9 +1069,9 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 	const float SavedXP = Data->Attributes.XP;
 
-	const int32 SavedLevel = FMath::Max(1, Data->Attributes.Level);
+	const int32 SavedLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Data->Attributes.Level);
 
-	UE_LOG(LogTemp, Log, TEXT("LoadAeyerjiChar: Restoring XP to %f, Level to %d"), SavedXP, SavedLevel);
+	UE_LOG(LogTemp, Display, TEXT("[ProfileLoad] HydrationPhase=3_LevelXP Slot=%s XP=%.2f Level=%d"), *SlotName, SavedXP, SavedLevel);
 
 	if (ASC->GetOwnerRole() == ROLE_Authority)
 
@@ -618,6 +1106,29 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 		ASC->SetNumericAttributeBase(RuntimeSet->GetXPAttribute(), ClampedXP);
 
+		if (UWorld* World = PS->GetWorld())
+		{
+			if (UGameInstance* GameInstance = World->GetGameInstance())
+			{
+				if (UAeyerjiSaveManagerSubsystem* SaveManager = GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>())
+				{
+					UAeyerjiSaveGame* CachedProfile = nullptr;
+					if (SaveManager->GetServerCachedProfile(PS, CachedProfile) && CachedProfile)
+					{
+						CachedProfile->Attributes.Level = SavedLevel;
+						CachedProfile->Attributes.XP = ClampedXP;
+						UE_LOG(LogTemp, Display,
+							TEXT("[ProfileXP] CacheSync Reason=Load PlayerState=%s Level=%d XP=%.2f XPMax=%.2f Revision=%lld"),
+							*GetNameSafe(PS),
+							CachedProfile->Attributes.Level,
+							CachedProfile->Attributes.XP,
+							RuntimeSet->GetXPMax(),
+							CachedProfile->Revision);
+					}
+				}
+			}
+		}
+
 		// Ensure any level-scaled infinite effects are up-to-date after load
 
 		if (Leveling)
@@ -626,29 +1137,19 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 			Leveling->ForceRefreshForCurrentLevel();
 		}
+
 	}
 
 	/* ---------- Restore any other replicated data ---------- */
 
 	if (ASC->GetOwnerRole() == ROLE_Authority)
 	{
-		PS->Server_SetActionBar_Implementation(Data->ActionBar);
-
-		for (const FAeyerjiAbilitySlot &Slot : Data->ActionBar)
-		{
-			if (!Slot.Class)
-			{
-				AJ_LOG(PS, TEXT("LoadAeyerjiChar: Slot %s has no Class; skipping ability grant"),
-					   *Slot.Description.ToString());
-				continue;
-			}
-
-			AJ_LOG(PS, TEXT("LoadAeyerjiChar: Granting ability %s from slot %s (Tag=%s)"),
-				   *Slot.Class->GetName(),
-				   *Slot.Description.ToString(),
-				   *Slot.Tag.ToString());
-			PS->Server_GrantAbilityFromSlot_Implementation(Slot);
-		}
+		PS->ApplyLoadedActionBar(Data->ActionBar);
+		UE_LOG(LogTemp, Display,
+			TEXT("[ProfileLoad] HydrationPhase=4_ActionBarPassive Slot=%s ActionBar=%d Passive=%s"),
+			*SlotName,
+			Data->ActionBar.Num(),
+			*Data->SelectedPassiveId.ToString());
 
 		if (!Data->SelectedPassiveId.IsNone())
 		{
@@ -658,12 +1159,37 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 		APawn *Pawn = PS->GetPawn();
 		if (UAeyerjiInventoryComponent *Inventory = Pawn ? Pawn->FindComponentByClass<UAeyerjiInventoryComponent>() : nullptr)
 		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[ProfileLoad] HydrationPhase=5_InventoryEquipment Slot=%s Inventory=%s Items=%d Equipped=%d Grid=%d"),
+				*SlotName,
+				*GetNameSafe(Inventory),
+				Data->Inventory.ItemSnapshots.Num(),
+				Data->Inventory.EquippedItems.Num(),
+				Data->Inventory.GridPlacements.Num());
 			Inventory->ApplySaveData(Data->Inventory);
 		}
 		else
 		{
-			AJ_LOG(PS, TEXT("LoadAeyerjiChar: No inventory component found while loading slot %s"), *PS->GetSaveSlotOverride());
+			UE_LOG(LogTemp, Warning,
+				TEXT("[ProfileLoad] MissingSubsystem=InventoryComponent Slot=%s Pawn=%s Items=%d Equipped=%d Grid=%d"),
+				*SlotName,
+				*GetNameSafe(Pawn),
+				Data->Inventory.ItemSnapshots.Num(),
+				Data->Inventory.EquippedItems.Num(),
+				Data->Inventory.GridPlacements.Num());
 		}
+
+		// Start loaded characters from a deterministic full-resource state after
+		// level, passive, and equipped item effects have rebuilt max values.
+		UE_LOG(LogTemp, Display, TEXT("[ProfileLoad] HydrationPhase=6_RefillRefresh Slot=%s"), *SlotName);
+		const float LoadedHPMax = ASC->GetNumericAttribute(RuntimeSet->GetHPMaxAttribute());
+		const float LoadedManaMax = ASC->GetNumericAttribute(RuntimeSet->GetManaMaxAttribute());
+		ASC->SetNumericAttributeBase(RuntimeSet->GetHPAttribute(), FMath::Max(0.f, LoadedHPMax));
+		ASC->SetNumericAttributeBase(RuntimeSet->GetManaAttribute(), FMath::Max(0.f, LoadedManaMax));
+
+		ASC->ForceReplication();
+		PS->ForceNetUpdate();
+		UE_LOG(LogTemp, Display, TEXT("[ProfileLoad] Hydration=Complete Slot=%s HPMax=%.2f ManaMax=%.2f"), *SlotName, LoadedHPMax, LoadedManaMax);
 	}
 }
 
@@ -678,147 +1204,73 @@ void UCharacterStatsLibrary::SaveAeyerjiChar(
 	const FString Slot)
 
 {
+	const TArray<FAeyerjiAbilitySlot> ExistingActionBar = Data ? Data->ActionBar : TArray<FAeyerjiAbilitySlot>();
+	const FName ExistingPassiveId = Data ? Data->SelectedPassiveId : NAME_None;
 
-	if (!Data || !PS)
-
+	if (!BuildAeyerjiSaveDataFromRuntime(Data, PS, Slot))
 	{
-
-		UE_LOG(LogTemp, Error, TEXT("SaveAeyerjiChar: Called with null Data or PlayerState. Aborting save."));
-
 		return;
 	}
 
-	// Capture the current difficulty slider for persistence.
-	Data->bHasDifficultySelection = false;
-	if (PS->GetWorld())
+	PreserveExistingActionBarIfCaptureIsEmpty(Data, ExistingActionBar, ExistingPassiveId, Slot);
+
+	if (CommitProfileThroughSaveManager(Data, PS))
 	{
-		if (const UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(PS->GetWorld()->GetGameInstance()))
-		{
-			if (GI->HasDifficultySelection())
-			{
-				Data->DifficultySlider = GI->GetDifficultySlider();
-				Data->bHasDifficultySelection = true;
-			}
-		}
+		UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar(Success): Slot=%s committed via save manager XP=%f Level=%d"),
+			*Slot,
+			Data->Attributes.XP,
+			Data->Attributes.Level);
+		return;
 	}
-
-	const APawn *Pawn = PS->GetPawn();
-
-	if (Pawn)
-
-	{
-
-		if (UAeyerjiInventoryComponent *Inventory = Pawn->FindComponentByClass<UAeyerjiInventoryComponent>())
-		{
-			Data->Inventory = Inventory->BuildSaveData();
-			UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar: Captured inventory with %d items, %d placements"),
-				   Data->Inventory.ItemSnapshots.Num(),
-				   Data->Inventory.GridPlacements.Num());
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("SaveAeyerjiChar: Pawn %s missing inventory component; skipping inventory save"), *GetNameSafe(Pawn));
-		}
-
-		if (const IAbilitySystemInterface *ASI = Cast<IAbilitySystemInterface>(Pawn))
-
-		{
-
-			if (const UAbilitySystemComponent *ASC = ASI->GetAbilitySystemComponent())
-
-			{
-
-				for (UAttributeSet *Set : ASC->GetSpawnedAttributes())
-
-				{
-
-					if (IsValid(Set) && Cast<UAeyerjiAttributeSet>(Set))
-
-					{
-
-						UAeyerjiAttributeSet *AeyerjiSet = Cast<UAeyerjiAttributeSet>(Set);
-
-						UE_LOG(LogTemp, Log, TEXT("SaveAeyerjiChar: Found Attribute XP found '%f'"), AeyerjiSet->GetXP());
-
-						Data->Attributes.XP = AeyerjiSet->GetXP();
-
-						Data->Attributes.Level = FMath::RoundToInt(AeyerjiSet->GetLevel());
-
-						Data->Attributes.Level = FMath::RoundToInt(AeyerjiSet->GetLevel());
-					}
-				}
-			}
-		}
-	}
-
-	if (const UPlayerStatsTrackingComponent* StatsComp = PS->FindComponentByClass<UPlayerStatsTrackingComponent>())
-	{
-		StatsComp->ExtractLootStats(Data->LootStats);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Verbose, TEXT("SaveAeyerjiChar: PlayerState %s missing PlayerStatsTrackingComponent; skipping loot stats save"), *GetNameSafe(PS));
-	}
-
-	// Save action bar data
-
-	Data->ActionBar = PS->ActionBar;
-	Data->SelectedPassiveId = PS->GetSelectedPassiveId();
-
-	UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar(BeforeWrite): Slot=%s PS=%s Pawn=%s DataXP=%f DataLevel=%d"),
-		   *Slot,
-		   *GetNameSafe(PS),
-		   *GetNameSafe(PS->GetPawn()),
-		   Data->Attributes.XP,
-		   Data->Attributes.Level);
-
-	FString FirstSlotName = PS->ActionBar.Num() ? PS->ActionBar[0].Description.ToString()
-
-												: TEXT("Empty");
-
-	FString SecondSlotName = PS->ActionBar.Num() ? PS->ActionBar[1].Description.ToString()
-
-												 : TEXT("Empty");
-
-	UE_LOGFMT(LogTemp, Log,
-
-			  "Saving to slot '{Slot}'. XP={XP}, Level={Level}. SaveGameName='{SaveGameName}', First item='{First}', Second item='{Second}'",
-
-			  ("Slot", Slot),
-
-			  ("XP", Data->Attributes.XP),
-
-			  ("Level", Data->Attributes.Level),
-
-			  ("SaveGameName", Data->GetName()),
-
-			  ("First", PS->ActionBar.Num() ? PS->ActionBar[0].Description.ToString() : TEXT("Empty")),
-
-			  ("Second", PS->ActionBar.Num() > 1 ? PS->ActionBar[1].Description.ToString() : TEXT("Empty")));
-
-	UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar(AfterGather): Slot=%s XP=%f Level=%d (FirstSlot=%s SecondSlot=%s)"),
-		   *Slot,
-		   Data->Attributes.XP,
-		   Data->Attributes.Level,
-		   PS->ActionBar.Num() ? *PS->ActionBar[0].Description.ToString() : TEXT("Empty"),
-		   PS->ActionBar.Num() > 1 ? *PS->ActionBar[1].Description.ToString() : TEXT("Empty"));
-
-	// If you ever introduce multiple characters per account,
-
-	// extend the struct with CharacterId etc.
 
 	if (!UGameplayStatics::SaveGameToSlot(Data, Slot, 0))
-
 	{
-
 		UE_LOG(LogTemp, Error, TEXT("Save failed for slot %s"), *Slot);
 	}
 	else
 	{
 		UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiChar(Success): Slot=%s saved XP=%f Level=%d"),
-			   *Slot,
-			   Data->Attributes.XP,
-			   Data->Attributes.Level);
+			*Slot,
+			Data->Attributes.XP,
+			Data->Attributes.Level);
+	}
+}
+
+void UCharacterStatsLibrary::SaveAeyerjiCharFromPawn(
+	UAeyerjiSaveGame* Data,
+	const AAeyerjiPlayerState* PS,
+	const FString& Slot,
+	const APawn* SourcePawn)
+{
+	const TArray<FAeyerjiAbilitySlot> ExistingActionBar = Data ? Data->ActionBar : TArray<FAeyerjiAbilitySlot>();
+	const FName ExistingPassiveId = Data ? Data->SelectedPassiveId : NAME_None;
+
+	if (!BuildAeyerjiSaveDataFromRuntime(Data, PS, Slot, SourcePawn))
+	{
+		return;
+	}
+
+	PreserveExistingActionBarIfCaptureIsEmpty(Data, ExistingActionBar, ExistingPassiveId, Slot);
+
+	if (CommitProfileThroughSaveManager(Data, PS))
+	{
+		UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiCharFromPawn(Success): Slot=%s committed via save manager XP=%f Level=%d"),
+			*Slot,
+			Data->Attributes.XP,
+			Data->Attributes.Level);
+		return;
+	}
+
+	if (!UGameplayStatics::SaveGameToSlot(Data, Slot, 0))
+	{
+		UE_LOG(LogTemp, Error, TEXT("Save failed for slot %s"), *Slot);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Display, TEXT("SaveAeyerjiCharFromPawn(Success): Slot=%s saved XP=%f Level=%d"),
+			*Slot,
+			Data->Attributes.XP,
+			Data->Attributes.Level);
 	}
 }
 
@@ -1150,7 +1602,20 @@ bool UCharacterStatsLibrary::HasPlayerPickedUpItemId(const AActor* Actor, FName 
 
 	if (UPlayerStatsTrackingComponent* Stats = GetPlayerStatsTracking(Actor))
 	{
-		return Stats->HasPickedUpItemId(ItemId);
+		if (Stats->HasPickedUpItemId(ItemId))
+		{
+			return true;
+		}
+
+		// Compatibility: normalize incoming keys through definition resolution.
+		if (const UItemDefinition* Definition = ResolveItemDefinitionByKey(nullptr, ItemId))
+		{
+			const FName CanonicalKey = Definition->GetDefinitionKey();
+			if (!CanonicalKey.IsNone() && CanonicalKey != ItemId)
+			{
+				return Stats->HasPickedUpItemId(CanonicalKey);
+			}
+		}
 	}
 
 	return false;
@@ -1178,55 +1643,74 @@ UItemDefinition* UCharacterStatsLibrary::GetDefinitionFromLootResult(const FLoot
 		return Result.ItemDefinition;
 	}
 
-	if (Result.ItemId != NAME_None)
+	if (Result.ItemDefinitionKey != NAME_None)
 	{
-		return ResolveItemDefinitionById(nullptr, Result.ItemId);
+		return ResolveItemDefinitionByKey(nullptr, Result.ItemDefinitionKey);
 	}
 
 	return nullptr;
 }
 
-UItemDefinition* UCharacterStatsLibrary::ResolveItemDefinitionById(UObject* WorldContextObject, FName ItemId)
+UItemDefinition* UCharacterStatsLibrary::ResolveItemDefinitionByKey(UObject* WorldContextObject, FName ItemDefinitionKey)
 {
-	if (ItemId.IsNone())
+	(void)WorldContextObject;
+
+	if (ItemDefinitionKey.IsNone())
 	{
 		return nullptr;
 	}
 
 	UAssetManager& Manager = UAssetManager::Get();
 	const FPrimaryAssetType AssetType(UItemDefinition::StaticClass()->GetFName());
+	const FString KeyString = ItemDefinitionKey.ToString();
+
+	// Preferred path: key is the full soft object path of the item definition asset.
+	const FSoftObjectPath DirectPath(KeyString);
+	if (DirectPath.IsValid())
+	{
+		if (UItemDefinition* Existing = Cast<UItemDefinition>(DirectPath.ResolveObject()))
+		{
+			return Existing;
+		}
+
+		if (UItemDefinition* Loaded = Cast<UItemDefinition>(Manager.GetStreamableManager().LoadSynchronous(DirectPath, false)))
+		{
+			return Loaded;
+		}
+	}
 
 	TArray<FPrimaryAssetId> AssetIds;
 	Manager.GetPrimaryAssetIdList(AssetType, AssetIds);
 
-	// First try asset name match (fast, avoids loads).
+	// Compatibility fallback: support keys that were authored as primary asset names.
 	for (const FPrimaryAssetId& Id : AssetIds)
 	{
-		if (Id.PrimaryAssetName == ItemId)
+		if (Id.PrimaryAssetName != ItemDefinitionKey)
 		{
-			if (UItemDefinition* Def = Cast<UItemDefinition>(Manager.GetPrimaryAssetObject(Id)))
-			{
-				return Def;
-			}
+			continue;
+		}
 
-			// Try a synchronous load if not resident yet.
-			const FSoftObjectPath Path = Manager.GetPrimaryAssetPath(Id);
-			if (Path.IsValid())
+		if (UItemDefinition* Def = Cast<UItemDefinition>(Manager.GetPrimaryAssetObject(Id)))
+		{
+			return Def;
+		}
+
+		const FSoftObjectPath Path = Manager.GetPrimaryAssetPath(Id);
+		if (Path.IsValid())
+		{
+			if (UItemDefinition* Loaded = Cast<UItemDefinition>(Manager.GetStreamableManager().LoadSynchronous(Path, false)))
 			{
-				if (UItemDefinition* Loaded = Cast<UItemDefinition>(Manager.GetStreamableManager().LoadSynchronous(Path, false)))
-				{
-					return Loaded;
-				}
+				return Loaded;
 			}
 		}
 	}
 
-	// Fallback: load candidates and compare their ItemId property.
+	// Final fallback: scan primary assets and compare their derived definition keys.
 	for (const FPrimaryAssetId& Id : AssetIds)
 	{
 		if (UItemDefinition* Def = Cast<UItemDefinition>(Manager.GetPrimaryAssetObject(Id)))
 		{
-			if (Def->ItemId == ItemId)
+			if (Def->GetDefinitionKey() == ItemDefinitionKey)
 			{
 				return Def;
 			}
@@ -1236,18 +1720,25 @@ UItemDefinition* UCharacterStatsLibrary::ResolveItemDefinitionById(UObject* Worl
 			const FSoftObjectPath Path = Manager.GetPrimaryAssetPath(Id);
 			if (Path.IsValid())
 			{
+				if (UItemDefinition::MakeDefinitionKeyFromSoftPath(Path) != ItemDefinitionKey)
+				{
+					continue;
+				}
+
 				if (UItemDefinition* Loaded = Cast<UItemDefinition>(Manager.GetStreamableManager().LoadSynchronous(Path, false)))
 				{
-					if (Loaded->ItemId == ItemId)
-					{
-						return Loaded;
-					}
+					return Loaded;
 				}
 			}
 		}
 	}
 
 	return nullptr;
+}
+
+UItemDefinition* UCharacterStatsLibrary::ResolveItemDefinitionById(UObject* WorldContextObject, FName ItemId)
+{
+	return ResolveItemDefinitionByKey(WorldContextObject, ItemId);
 }
 
 static UAbilitySystemComponent *GetAscFromActor(const AActor *Actor)
@@ -1436,31 +1927,109 @@ bool UCharacterStatsLibrary::IsWithinAttackRange(const AActor *SelfActor,
 
 bool UCharacterStatsLibrary::GetSavedDifficulty(const UObject* WorldContextObject, float& OutSlider, float& OutScale)
 {
-	OutSlider = 0.f;
-	OutScale = 0.f;
+	OutSlider = GetDefaultDifficultySlider();
+	OutScale = FMath::Clamp(OutSlider / UAeyerjiDifficultySettings::DifficultySliderMax, 0.f, 1.f);
 
 	if (!WorldContextObject)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("GetSavedDifficulty: WorldContextObject is null. Returning default %.2f."), OutSlider);
 		return false;
 	}
 
 	UWorld* World = WorldContextObject->GetWorld();
 	if (!World)
 	{
+		UE_LOG(LogTemp, Warning, TEXT("GetSavedDifficulty: World is null. Returning default %.2f."), OutSlider);
 		return false;
 	}
 
-	if (const UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(World->GetGameInstance()))
+	UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(World->GetGameInstance());
+	if (!GI)
 	{
-		if (GI->HasDifficultySelection())
+		UE_LOG(LogTemp, Warning, TEXT("GetSavedDifficulty: GameInstance is not UAeyerjiGameInstance. Returning default %.2f."), OutSlider);
+		return false;
+	}
+
+	UE_LOG(LogTemp, Display,
+		TEXT("GetSavedDifficulty: GI state before resolve HasDiff=%d HasTier=%d Diff=%.2f Tier=%d"),
+		GI->HasDifficultySelection() ? 1 : 0,
+		GI->HasWorldTierSelection() ? 1 : 0,
+		GI->GetDifficultySlider(),
+		GI->GetWorldTier());
+
+	if (!GI->HasDifficultySelection() && !GI->HasWorldTierSelection())
+	{
+		AAeyerjiPlayerState* LocalPS = nullptr;
+		if (APlayerController* LocalPC = UGameplayStatics::GetPlayerController(WorldContextObject, 0))
 		{
-			OutSlider = GI->GetDifficultySlider();
-			OutScale = GI->GetDifficultyScale();
+			LocalPS = LocalPC->GetPlayerState<AAeyerjiPlayerState>();
+		}
+
+		if (UAeyerjiSaveManagerSubsystem* SaveManager = World->GetGameInstance()->GetSubsystem<UAeyerjiSaveManagerSubsystem>())
+		{
+			UAeyerjiSaveGame* Data = nullptr;
+			if (SaveManager->GetCachedOrLocalProfileForOwner(Data, LocalPS) && Data)
+			{
+				UE_LOG(LogTemp, Display,
+					TEXT("GetSavedDifficulty: Loaded cached/local profile SaveFlags(Diff=%d Tier=%d) SaveValues(Diff=%.2f Tier=%d)"),
+					Data->bHasDifficultySelection ? 1 : 0,
+					Data->bHasWorldTierSelection ? 1 : 0,
+					Data->DifficultySlider,
+					Data->WorldTier);
+				ApplySavedDifficultyToGameInstance(Data, GI);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("GetSavedDifficulty: Failed to load cached/local profile. Applying default WorldTier=%d."), GetDefaultWorldTier());
+				GI->ApplySavedWorldTier(GetDefaultWorldTier());
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("GetSavedDifficulty: Save manager unavailable; applying default WorldTier=%d."), GetDefaultWorldTier());
+			GI->ApplySavedWorldTier(GetDefaultWorldTier());
+		}
+	}
+
+	OutSlider = GI->GetDifficultySlider();
+	OutScale = GI->GetDifficultyScale();
+	UE_LOG(LogTemp, Display, TEXT("GetSavedDifficulty: Returning Difficulty=%.2f Scale=%.3f WorldTier=%d"), OutSlider, OutScale, GI->GetWorldTier());
+	return true;
+}
+
+bool UCharacterStatsLibrary::GetSavedWorldTier(const UObject* WorldContextObject, int32& OutWorldTier)
+{
+	OutWorldTier = GetDefaultWorldTier();
+
+	float SavedSlider = GetDefaultDifficultySlider();
+	float SavedScale = 0.f;
+	if (!GetSavedDifficulty(WorldContextObject, SavedSlider, SavedScale))
+	{
+		OutWorldTier = DifficultySliderToUiWorldTier(SavedSlider);
+		UE_LOG(LogTemp, Warning, TEXT("GetSavedWorldTier: Difficulty lookup failed. Derived WorldTier=%d from Difficulty=%.2f."), OutWorldTier, SavedSlider);
+		return false;
+	}
+
+	if (!WorldContextObject)
+	{
+		OutWorldTier = DifficultySliderToUiWorldTier(SavedSlider);
+		UE_LOG(LogTemp, Warning, TEXT("GetSavedWorldTier: WorldContextObject is null after difficulty lookup. Derived WorldTier=%d."), OutWorldTier);
+		return true;
+	}
+
+	if (UWorld* World = WorldContextObject->GetWorld())
+	{
+		if (const UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(World->GetGameInstance()))
+		{
+			OutWorldTier = GI->GetWorldTier();
+			UE_LOG(LogTemp, Display, TEXT("GetSavedWorldTier: Returning authoritative WorldTier=%d (Difficulty=%.2f)."), OutWorldTier, GI->GetDifficultySlider());
 			return true;
 		}
 	}
 
-	return false;
+	OutWorldTier = DifficultySliderToUiWorldTier(SavedSlider);
+	UE_LOG(LogTemp, Warning, TEXT("GetSavedWorldTier: GI unavailable. Derived WorldTier=%d from Difficulty=%.2f."), OutWorldTier, SavedSlider);
+	return true;
 }
 
 bool UCharacterStatsLibrary::RecordBestRunTimeSecondsForDifficulty(const AAeyerjiPlayerState* PS, float RunTimeSeconds, float DifficultySlider)
@@ -1475,20 +2044,23 @@ bool UCharacterStatsLibrary::RecordBestRunTimeSecondsForDifficulty(const AAeyerj
 		return false;
 	}
 
-	const FString Slot = MakeStableCharSlotName(PS);
-	if (Slot.IsEmpty())
+	UAeyerjiSaveManagerSubsystem* SaveManager = PS->GetWorld()->GetGameInstance()->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
+	if (!SaveManager)
 	{
 		return false;
 	}
 
-	bool bLoadedExisting = false;
-	UAeyerjiSaveGame* Data = LoadOrCreateAeyerjiSave(Slot, bLoadedExisting);
-	if (!Data)
+	UAeyerjiSaveGame* Data = nullptr;
+	if (!SaveManager->GetServerCachedProfile(PS, Data) || !Data)
 	{
-		return false;
+		Data = SaveManager->CreateDefaultProfile(SaveManager->ResolveOwnerKey(PS), 1);
+		if (!Data)
+		{
+			return false;
+		}
 	}
 
-	const int32 DifficultyKey = FMath::Clamp(FMath::RoundToInt(DifficultySlider), 0, 1000);
+	const int32 DifficultyKey = MakeDifficultyKey(DifficultySlider);
 	const float ExistingBest = Data->BestRunTimeSecondsByDifficulty.FindRef(DifficultyKey);
 
 	const bool bHasExisting = Data->BestRunTimeSecondsByDifficulty.Contains(DifficultyKey) && ExistingBest > 0.f;
@@ -1499,7 +2071,51 @@ bool UCharacterStatsLibrary::RecordBestRunTimeSecondsForDifficulty(const AAeyerj
 	}
 
 	Data->BestRunTimeSecondsByDifficulty.Add(DifficultyKey, RunTimeSeconds);
-	return UGameplayStatics::SaveGameToSlot(Data, Slot, 0);
+	return const_cast<AAeyerjiPlayerState*>(PS)->CommitPreparedCheckpointProfile(Data, EAeyerjiSaveCheckpointReason::RunCompleted, /*bBumpRevision=*/true);
+}
+
+bool UCharacterStatsLibrary::RecordCompletedRunAndSaveCharacter(const AAeyerjiPlayerState* PS, const FAeyerjiRunResults& Results)
+{
+	if (!PS || !PS->GetWorld() || PS->GetWorld()->GetNetMode() == NM_Client)
+	{
+		return false;
+	}
+
+	UAeyerjiSaveManagerSubsystem* SaveManager = PS->GetWorld()->GetGameInstance()->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
+	if (!SaveManager)
+	{
+		return false;
+	}
+
+	UAeyerjiSaveGame* Data = nullptr;
+	if (!SaveManager->GetServerCachedProfile(PS, Data) || !Data)
+	{
+		Data = SaveManager->CreateDefaultProfile(SaveManager->ResolveOwnerKey(PS), 1);
+		if (!Data)
+		{
+			return false;
+		}
+	}
+
+	const FString Slot = MakeStableCharSlotName(PS);
+	if (!BuildAeyerjiSaveDataFromRuntime(Data, PS, Slot))
+	{
+		return false;
+	}
+
+	AppendRecentRunRecord(Data, Results);
+	const float BestTime = ApplyRunBestTimeToSaveData(Data, Results);
+
+	const bool bSaved = const_cast<AAeyerjiPlayerState*>(PS)->CommitPreparedCheckpointProfile(Data, EAeyerjiSaveCheckpointReason::RunCompleted, /*bBumpRevision=*/true);
+	UE_LOG(LogTemp, Display,
+		TEXT("RecordCompletedRunAndSaveCharacter: Slot=%s SaveResult=%d Result=%d Time=%.2f Best=%.2f RecentRuns=%d"),
+		*Slot,
+		bSaved ? 1 : 0,
+		static_cast<int32>(Results.Resolution),
+		Results.RunTimeSeconds,
+		BestTime,
+		Data->RecentRuns.Num());
+	return bSaved;
 }
 
 bool UCharacterStatsLibrary::GetBestRunTimeSecondsForDifficulty(const AAeyerjiPlayerState* PS, float DifficultySlider, float& OutBestRunTimeSeconds)
@@ -1511,20 +2127,36 @@ bool UCharacterStatsLibrary::GetBestRunTimeSecondsForDifficulty(const AAeyerjiPl
 		return false;
 	}
 
-	const FString Slot = MakeStableCharSlotName(PS);
-	if (Slot.IsEmpty() || !UGameplayStatics::DoesSaveGameExist(Slot, 0))
+	UWorld* World = PS->GetWorld();
+	if (!World || !World->GetGameInstance())
 	{
 		return false;
 	}
 
-	USaveGame* RawSave = UGameplayStatics::LoadGameFromSlot(Slot, 0);
-	const UAeyerjiSaveGame* Data = Cast<UAeyerjiSaveGame>(RawSave);
+	UAeyerjiSaveManagerSubsystem* SaveManager = World->GetGameInstance()->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
+	if (!SaveManager)
+	{
+		return false;
+	}
+
+	UAeyerjiSaveGame* MutableData = nullptr;
+	if (World->GetNetMode() != NM_Client)
+	{
+		SaveManager->GetServerCachedProfile(PS, MutableData);
+	}
+
+	if (!MutableData)
+	{
+		SaveManager->GetCachedOrLocalProfileForOwner(MutableData, PS);
+	}
+
+	const UAeyerjiSaveGame* Data = MutableData;
 	if (!Data)
 	{
 		return false;
 	}
 
-	const int32 DifficultyKey = FMath::Clamp(FMath::RoundToInt(DifficultySlider), 0, 1000);
+	const int32 DifficultyKey = MakeDifficultyKey(DifficultySlider);
 	const float* Found = Data->BestRunTimeSecondsByDifficulty.Find(DifficultyKey);
 	if (!Found || *Found <= 0.f)
 	{

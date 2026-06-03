@@ -1,5 +1,6 @@
 #include "Systems/AeyerjiGameplayEventSubsystem.h"
 
+#include "Systems/AeyerjiWorldStateSubsystem.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
 
@@ -62,11 +63,48 @@ void UAeyerjiGameplayEventSubsystem::BroadcastEvent(const FGameplayTag& EventTag
 	}
 }
 
+void UAeyerjiGameplayEventSubsystem::RecordEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload, const EAeyerjiWorldStatePersistence Persistence, const EAeyerjiWorldStateReplication Replication)
+{
+	(void)Payload;
+
+	if (!EventTag.IsValid())
+	{
+		return;
+	}
+
+	if (UAeyerjiWorldStateSubsystem* WorldStateSubsystem = UAeyerjiWorldStateSubsystem::Get(this))
+	{
+		WorldStateSubsystem->MarkEventHappened(EventTag, NAME_None, Persistence, Replication);
+	}
+}
+
+void UAeyerjiGameplayEventSubsystem::BroadcastAndRecordEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload, const EAeyerjiWorldStatePersistence Persistence, const EAeyerjiWorldStateReplication Replication)
+{
+	BroadcastEvent(EventTag, Payload);
+	RecordEvent(EventTag, Payload, Persistence, Replication);
+}
+
 void UAeyerjiGameplayEventSubsystem::BroadcastGameplayEvent(UObject* WorldContextObject, FGameplayTag EventTag, const FGameplayEventData& Payload)
 {
 	if (UAeyerjiGameplayEventSubsystem* Subsystem = Get(WorldContextObject))
 	{
 		Subsystem->BroadcastEvent(EventTag, Payload);
+	}
+}
+
+void UAeyerjiGameplayEventSubsystem::RecordGameplayEvent(UObject* WorldContextObject, FGameplayTag EventTag, const FGameplayEventData& Payload, const EAeyerjiWorldStatePersistence Persistence, const EAeyerjiWorldStateReplication Replication)
+{
+	if (UAeyerjiGameplayEventSubsystem* Subsystem = Get(WorldContextObject))
+	{
+		Subsystem->RecordEvent(EventTag, Payload, Persistence, Replication);
+	}
+}
+
+void UAeyerjiGameplayEventSubsystem::BroadcastAndRecordGameplayEvent(UObject* WorldContextObject, FGameplayTag EventTag, const FGameplayEventData& Payload, const EAeyerjiWorldStatePersistence Persistence, const EAeyerjiWorldStateReplication Replication)
+{
+	if (UAeyerjiGameplayEventSubsystem* Subsystem = Get(WorldContextObject))
+	{
+		Subsystem->BroadcastAndRecordEvent(EventTag, Payload, Persistence, Replication);
 	}
 }
 

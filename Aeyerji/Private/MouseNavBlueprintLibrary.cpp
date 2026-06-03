@@ -3,7 +3,7 @@
 #include "NavigationSystem.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
-#include "DrawDebugHelpers.h"
+#include "GameFramework/SpectatorPawn.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "Components/PrimitiveComponent.h"
@@ -11,6 +11,64 @@
 #include "CollisionShape.h"
 #include "CollisionQueryParams.h"
 #include "NavigationPath.h"
+
+bool UMouseNavBlueprintLibrary::IsTeleportLocationClear(
+        const UObject* WorldContextObject,
+        const FVector& Location,
+        const APawn*   Pawn,
+        float          CapsuleInflation)
+{
+	if (!WorldContextObject || !Pawn)
+	{
+		return false;
+	}
+
+	UWorld* World = WorldContextObject->GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	float CapsuleRadius = 0.f;
+	float CapsuleHalfHeight = 0.f;
+	if (const UCapsuleComponent* Capsule = Pawn->FindComponentByClass<UCapsuleComponent>())
+	{
+		CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+		CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+	}
+	else
+	{
+		FVector Origin;
+		FVector Extents;
+		Pawn->GetActorBounds(true, Origin, Extents);
+		CapsuleRadius = FMath::Max(Extents.X, Extents.Y);
+		CapsuleHalfHeight = Extents.Z;
+	}
+
+	CapsuleRadius += FMath::Max(0.f, CapsuleInflation);
+	CapsuleHalfHeight += FMath::Max(0.f, CapsuleInflation);
+	if (CapsuleRadius <= KINDA_SMALL_NUMBER || CapsuleHalfHeight <= KINDA_SMALL_NUMBER)
+	{
+		return true;
+	}
+
+	const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(IsTeleportLocationClear), false, Pawn);
+	Params.AddIgnoredActor(Pawn);
+
+	FCollisionObjectQueryParams ObjectParams;
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
+	ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
+	ObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody);
+	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+
+	return !World->OverlapAnyTestByObjectType(
+		Location,
+		FQuat::Identity,
+		ObjectParams,
+		CapsuleShape,
+		Params);
+}
 
 EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
 		const UObject*      WorldContextObject,
@@ -36,7 +94,25 @@ EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
 	{
 		if (AAeyerjiPlayerController* AyerPC = Cast<AAeyerjiPlayerController>(PlayerController))
 		{
-			AyerPC->ReportMouseNavContextToServer(Result, Nav, Cursor, Pawn);
+			APawn* PawnToReport = Pawn;
+			if (PawnToReport)
+			{
+				const bool bReportablePawn =
+					PawnToReport->GetIsReplicated() &&
+					!PawnToReport->IsPlayerControlled() &&
+					!PawnToReport->IsA<ASpectatorPawn>();
+
+				if (!bReportablePawn)
+				{
+					PawnToReport = nullptr;
+					if (Result == EMouseNavResult::ClickedPawn)
+					{
+						Result = EMouseNavResult::NavLocation;
+					}
+				}
+			}
+
+			AyerPC->ReportMouseNavContextToServer(Result, Nav, Cursor, PawnToReport);
 		}
 	};
 
@@ -110,35 +186,58 @@ EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
 	const FVector TraceStart = WorldOrigin;
 	const FVector TraceEnd = TraceStart + WorldDir * 100000.f;
 
-	// Step 1: pawn-only object trace
-	FCollisionObjectQueryParams PawnParams;
-	PawnParams.AddObjectTypesToQuery(ECC_Pawn);
-
 	FHitResult Hit;
-	for (int32 Pass = 0; Pass < 4; ++Pass)
+	bool bSkipGenericPawnTrace = false;
+	if (AAeyerjiPlayerController* AyerPC = Cast<AAeyerjiPlayerController>(PlayerController))
 	{
-		if (!World->LineTraceSingleByObjectType(Hit, TraceStart, TraceEnd, PawnParams, Params))
+		bSkipGenericPawnTrace = true;
+
+		FHitResult SharedAttackHit;
+		if (AyerPC->ResolveAttackTargetUnderCursor(SharedAttackHit))
 		{
+			if (APawn* HitPawn = Cast<APawn>(SharedAttackHit.GetActor()))
+			{
+				OutNavLocation = HitPawn->GetActorLocation();
+				OutCursorLocation = SharedAttackHit.ImpactPoint;
+				OutPawn = HitPawn;
+
+				ReportToServer(EMouseNavResult::ClickedPawn, OutNavLocation, OutCursorLocation, HitPawn);
+				return EMouseNavResult::ClickedPawn;
+			}
+		}
+	}
+
+	// Step 1: pawn-only object trace for non-Aeyerji controllers that do not share the custom resolver.
+	if (!bSkipGenericPawnTrace)
+	{
+		FCollisionObjectQueryParams PawnParams;
+		PawnParams.AddObjectTypesToQuery(ECC_Pawn);
+
+		for (int32 Pass = 0; Pass < 4; ++Pass)
+		{
+			if (!World->LineTraceSingleByObjectType(Hit, TraceStart, TraceEnd, PawnParams, Params))
+			{
+				break;
+			}
+
+			if (ShouldIgnoreActor(Hit.GetActor()))
+			{
+				Params.AddIgnoredActor(Hit.GetActor());
+				continue;
+			}
+
+			if (APawn* HitPawn = Cast<APawn>(Hit.GetActor()))
+			{
+				OutNavLocation = HitPawn->GetActorLocation();
+				OutCursorLocation = Hit.Location;
+				OutPawn = HitPawn;
+
+				ReportToServer(EMouseNavResult::ClickedPawn, OutNavLocation, OutCursorLocation, HitPawn);
+				return EMouseNavResult::ClickedPawn;
+			}
+
 			break;
 		}
-
-		if (ShouldIgnoreActor(Hit.GetActor()))
-		{
-			Params.AddIgnoredActor(Hit.GetActor());
-			continue;
-		}
-
-		if (APawn* HitPawn = Cast<APawn>(Hit.GetActor()))
-		{
-			OutNavLocation = HitPawn->GetActorLocation();
-			OutCursorLocation = Hit.Location;
-			OutPawn = HitPawn;
-
-			ReportToServer(EMouseNavResult::ClickedPawn, OutNavLocation, OutCursorLocation, HitPawn);
-			return EMouseNavResult::ClickedPawn;
-		}
-
-		break;
 	}
 
 	// Step 2: fallback visibility trace for ground hits
@@ -165,11 +264,6 @@ EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
 			DesiredPoint, Projected, FVector(ExtentXY, ExtentXY, ExtentZ)))
 	{
 		OutNavLocation = Projected.Location;
-
-#if WITH_EDITOR
-		DrawDebugSphere(PlayerController->GetWorld(), OutNavLocation,
-				        25.f, 12, FColor::Green, false, 0.25f);
-#endif
 		ReportToServer(EMouseNavResult::NavLocation, OutNavLocation, OutCursorLocation, nullptr);
 		return EMouseNavResult::NavLocation;
 	}
@@ -353,39 +447,11 @@ bool UMouseNavBlueprintLibrary::GetClosestNavigableLocationInRange(
 
 	if (Pawn)
 	{
-		if (const UCapsuleComponent* Capsule = Pawn->FindComponentByClass<UCapsuleComponent>())
+		if (!IsTeleportLocationClear(WorldContextObject, OutTeleportLocation, Pawn))
 		{
-			const float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
-			const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
-			if (CapsuleRadius > KINDA_SMALL_NUMBER && CapsuleHalfHeight > KINDA_SMALL_NUMBER)
-			{
-				if (UWorld* OverlapWorld = World)
-				{
-					const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight);
-					FCollisionQueryParams Params(SCENE_QUERY_STAT(BlinkSafeCheck), false, Pawn);
-					Params.AddIgnoredActor(Pawn);
-
-					FCollisionObjectQueryParams ObjectParams;
-					ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
-					ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
-					ObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody);
-					ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
-
-					const bool bOverlaps = OverlapWorld->OverlapAnyTestByObjectType(
-						OutTeleportLocation,
-						FQuat::Identity,
-						ObjectParams,
-						CapsuleShape,
-						Params);
-
-					if (bOverlaps)
-					{
-						OutNavLocation = FVector::ZeroVector;
-						OutTeleportLocation = FVector::ZeroVector;
-						return false;
-					}
-				}
-			}
+			OutNavLocation = FVector::ZeroVector;
+			OutTeleportLocation = FVector::ZeroVector;
+			return false;
 		}
 	}
 
@@ -517,7 +583,7 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 	OutTeleportLocation.X = NavLocation.X;
 	OutTeleportLocation.Y = NavLocation.Y;
 
-	return true;
+	return !Pawn || IsTeleportLocationClear(WorldContextObject, OutTeleportLocation, Pawn);
 }
 
 

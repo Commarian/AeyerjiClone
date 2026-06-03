@@ -13,6 +13,8 @@ class UGridPanel;
 class UW_ItemTile;
 class UW_EquipmentSlot;
 class UWidget;
+class UTexture2D;
+class UMaterialInterface;
 
 /** Native logic for the replicated inventory bag grid. */
 UCLASS()
@@ -21,6 +23,8 @@ class AEYERJI_API UW_InventoryBag_Native : public UUserWidget
 	GENERATED_BODY()
 
 public:
+	UW_InventoryBag_Native(const FObjectInitializer& ObjectInitializer);
+
 	/** Manual bind from HUDs if auto-binding via owning pawn is not enough. */
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|UI")
 	void BindToPlayer(APlayerParentNative* Player);
@@ -79,6 +83,10 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|UI")
 	void BP_OnInventoryItemStateChanged(const FInventoryItemChangeEvent& EventData);
 
+	/** Lets the inventory BP update optional lane panels, headings, or lock overlays when level-gated slots change. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|UI")
+	void BP_OnEquipmentSlotUnlocksChanged(int32 PlayerLevel, int32 NormalLaneSlots, int32 CorruptionSlots, bool bCorruptionUnlocked);
+
 	/** Designers implement these to spawn/dismiss their tooltip widget. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|UI|Tooltip")
 	void BP_ShowItemTooltip(const FAeyerjiItemTooltipData& TooltipData, FVector2D ScreenPosition, UWidget* SourceWidget);
@@ -89,6 +97,10 @@ protected:
 	/** Grid panel defined in UMG. Replace UniformGrid with GridPanel named GridPanel_Items. */
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UGridPanel> GridPanel_Items = nullptr;
+
+	/** Optional Corruption lane container; hidden until Corruption unlocks at level 50. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> CorruptionBorder = nullptr;
 
 	/** Tile widget class; defaults to the native item tile. */
 	UPROPERTY(EditAnywhere, Category = "Aeyerji|UI")
@@ -101,6 +113,22 @@ protected:
 	/** Padding between tiles. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|UI")
 	FMargin CellPadding = FMargin(2.f);
+
+	/** Padding applied to the inside image layer of generated inventory grid tiles. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|UI")
+	FMargin InventoryTileIconPadding = FMargin(8.5f);
+
+	/** Padding applied to the border layer of generated inventory grid tiles. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|UI")
+	FMargin InventoryTileBorderPadding = FMargin(0.f);
+
+	/** Icon used for empty inventory bag cells. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|UI")
+	TObjectPtr<UTexture2D> EmptyInventorySlotIcon = nullptr;
+
+	/** Generic border material used by empty inventory grid cells and as item-tile fallback. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|UI")
+	TObjectPtr<UMaterialInterface> InventoryTileGenericBorderMaterial = nullptr;
 
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|UI")
 	void SetCellSize(FVector2D NewCellSize);
@@ -127,6 +155,10 @@ private:
 	UFUNCTION()
 	void HandleInventoryItemStateChanged(const FInventoryItemChangeEvent& EventData);
 
+	UFUNCTION()
+	void HandleEquipmentSlotUnlocksChanged(int32 PlayerLevel, int32 NormalLaneSlots, int32 CorruptionSlots, bool bCorruptionUnlocked);
+
+	void RefreshCorruptionLaneVisibility(bool bCorruptionUnlocked);
 	void RefreshRegisteredEquipmentSlots();
 	void ClearEquipmentSlotBindings();
 	void DiscoverEquipmentSlots();

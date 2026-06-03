@@ -2,7 +2,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AbilitySystemInterface.h"
 #include "GenericTeamAgentInterface.h"
 #include "Abilities/GameplayAbility.h"
@@ -14,6 +16,8 @@
 #include "Perception/AISenseConfig_Sight.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Components/OutlineHighlightComponent.h"
+#include "Inventory/AeyerjiInventoryBPFL.h"
+#include "Systems/LootService.h"
 
 #include "EnemyParentNative.generated.h"
 
@@ -41,8 +45,8 @@ class AEYERJI_API AEnemyParentNative : public AAeyerjiCharacter, public IGeneric
 public:
 	
 	/* IGenericTeamAgentInterface */
-	virtual FGenericTeamId GetGenericTeamId() const override { return TeamId; }
-	virtual void SetGenericTeamId(const FGenericTeamId& NewID) override { TeamId = NewID; }
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(TeamId); }
+	virtual void SetGenericTeamId(const FGenericTeamId& NewID) override;
 
 
 	/* IAbilitySystemInterface */
@@ -76,7 +80,7 @@ protected:
 	void GiveStartupAbilitiesAndEffects();
 
 	/* --------- Death hook (Blueprint-extendable) --------- */
-	virtual void OnDeath_Implementation();
+	virtual void OnDeath_Implementation() override;
 
 	/* ====== DESIGN-TIME LISTS ====== */
 
@@ -130,6 +134,12 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category="Enemy|AI")
 	bool IsAlive(FGameplayTag DeathTag = FGameplayTag()) const;
 
+	/** Alerts nearby allies about a freshly acquired hostile target (server only). */
+	void NotifyNearbyAlliesOfTarget(AActor* Target);
+
+	/** Applies an ally-generated alert without re-broadcasting it to a second ring. */
+	void ReceiveAllyAlert(AActor* Target, const AEnemyParentNative* Notifier);
+
 	/** Updates the active team tag and pushes it to the ASC (server only). */
 	void SetActiveTeamTag(const FGameplayTag& NewTag);
 
@@ -162,6 +172,10 @@ public:
 	FGameplayTag GetScalingSourceTag() const { return CachedScalingSourceTag; }
 
 	void SetScalingSnapshot(int32 InLevel, float InDifficultyScale, const FGameplayTag& InSourceTag);
+
+	/** Server-only authoritative normal enemy death reward hook. Returns false when disabled or no loot was spawned. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Enemy|Loot")
+	bool TrySpawnEnemyDeathRewards(AActor* RewardInstigator = nullptr);
 	
 	bool IsHoverTargetComponent(const UPrimitiveComponent* Component) const;
 
@@ -192,13 +206,33 @@ protected:
 	TObjectPtr<UCapsuleComponent> ClickTargetCapsule;
 
 	UPROPERTY(EditDefaultsOnly, Category="Enemy|Targeting")
-	bool bAutoSizeClickTargetCapsule = true;
+	bool bAutoSizeClickTargetCapsule = false;
 
 	UPROPERTY(EditDefaultsOnly, Category="Enemy|Targeting", meta=(ClampMin="1.0"))
 	float ClickTargetRadiusScale = 1.35f;
 
 	UPROPERTY(EditDefaultsOnly, Category="Enemy|Targeting", meta=(ClampMin="1.0"))
 	float ClickTargetHalfHeightScale = 1.20f;
+
+	/** Manual click-target capsule radius in cm when auto-size is disabled; 0 falls back to the root capsule radius. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Targeting", meta=(ClampMin="0.0", Units="cm", EditCondition="!bAutoSizeClickTargetCapsule", EditConditionHides))
+	float ManualClickTargetRadius = 0.f;
+
+	/** Manual click-target capsule half-height in cm when auto-size is disabled; 0 falls back to the root capsule half-height. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Targeting", meta=(ClampMin="0.0", Units="cm", EditCondition="!bAutoSizeClickTargetCapsule", EditConditionHides))
+	float ManualClickTargetHalfHeight = 0.f;
+
+	/** Manual relative offset applied to the click-target capsule when auto-size is disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Targeting", meta=(EditCondition="!bAutoSizeClickTargetCapsule", EditConditionHides))
+	FVector ManualClickTargetRelativeLocation = FVector::ZeroVector;
+
+	/** Nearby allies inside this radius are alerted when this enemy directly acquires a hostile target. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|AI|Alert", meta=(ClampMin="0.0", Units="cm"))
+	float AllyAlertRadius = 800.f;
+
+	/** When true, allies only wake if navigation can reach them from this enemy. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|AI|Alert")
+	bool bRequireNavigableAllyAlertPath = true;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Archetype")
 	TObjectPtr<UAeyerjiEnemyArchetypeComponent> ArchetypeComponent;
@@ -208,6 +242,30 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Progression")
 	TObjectPtr<UAeyerjiRewardConfigComponent> RewardConfigComponent;
+
+	/** Enables normal enemy loot on this pawn. Bosses/special encounters should leave this off and use StateTree reward tasks. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Loot")
+	bool bSpawnNormalDeathLoot = false;
+
+	/** When true, DeathLootMultiDropConfig is used; otherwise a single ULootService roll is spawned. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Loot", meta=(EditCondition="bSpawnNormalDeathLoot"))
+	bool bUseDeathLootMultiDrop = false;
+
+	/** Base context for normal enemy death loot. Level, difficulty, source tag, and player actor are filled from runtime when unset. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Loot", meta=(EditCondition="bSpawnNormalDeathLoot"))
+	FLootContext DeathLootContext;
+
+	/** Optional multi-drop config for normal enemy death loot. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Loot", meta=(EditCondition="bSpawnNormalDeathLoot && bUseDeathLootMultiDrop"))
+	FLootMultiDropConfig DeathLootMultiDropConfig;
+
+	/** Controls whether the death drop is only for the credited player or distributed to all players. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Loot", meta=(EditCondition="bSpawnNormalDeathLoot"))
+	EItemDropDistributionMode DeathLootDropMode = EItemDropDistributionMode::DropOnlyForInstigator;
+
+	/** Runtime guard against duplicate loot rolls if death is reported by multiple systems. */
+	UPROPERTY(Transient)
+	bool bDeathRewardsRolled = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy|Highlight")
 	TArray<TObjectPtr<UPrimitiveComponent>> AdditionalHighlightPrimitives;
@@ -268,9 +326,20 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Scaling")
 	FGameplayTag CachedScalingSourceTag;
 
+	/** Recent target used to suppress duplicate ally-alert broadcasts from repeated perception updates. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AActor> LastAlertedTarget;
+
+	/** World time of the last ally-alert broadcast for duplicate suppression. */
+	UPROPERTY(Transient)
+	double LastAlertBroadcastTime = -1.0;
+
 	UFUNCTION()
 	void HandleMeshBeginCursorOver(UPrimitiveComponent* TouchedComponent);
 
 	UFUNCTION()
 	void HandleMeshEndCursorOver(UPrimitiveComponent* TouchedComponent);
+
+private:
+	bool HasNavigableAlertPathTo(const AEnemyParentNative* OtherEnemy) const;
 };

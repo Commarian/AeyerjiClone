@@ -16,14 +16,11 @@ struct FAeyerjiPrimaryToDerivedTuning
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float StrengthToArmor       = 1.0f;   // +1 Armor per Strength
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float AgilityToDodgeChance  = 0.1f;   // +0.1 dodge chance per Agility (0..1 range)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float AgilityToAttackSpeed  = 1.0f;   // +1 attacks/sec per Agility
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float AgilityToAttackSpeed  = 1.0f;   // +1 attack-speed rating per Agility (100 == 1 attack/sec)
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float IntellectToSpellPower = 1.0f;   // +1 spell power per Intellect
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float IntellectToManaMax    = 2.0f;   // +2 mana per Intellect
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float IntellectToManaRegen  = 0.1f;   // +0.1 mana/sec per Intellect
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float AilmentToDPS          = 0.1f;   // +0.1 DPS per Ailment
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float AilmentToDuration     = 0.05f;  // +0.05 seconds per Ailment
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Tuning") float StrengthToHPRegen     = 0.1f;   // +0.1 HP/sec per Strength
 };

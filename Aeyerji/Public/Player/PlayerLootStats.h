@@ -2,9 +2,43 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "Items/ItemTypes.h"
 
 #include "PlayerLootStats.generated.h"
+
+/**
+ * Persistent memory for a named pity group such as boss uniques, set pieces, or progression keys.
+ */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiLootPityMemory
+{
+	GENERATED_BODY()
+
+	/** Designer/system key for this pity bucket. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	FGameplayTag PityGroup;
+
+	/** Failed attempts since the last success in this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	int32 AttemptsSinceLastSuccess = 0;
+
+	/** Total attempts recorded for this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	int32 TotalAttempts = 0;
+
+	/** Total successful drops recorded for this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	int32 TotalSuccesses = 0;
+
+	/** Most recent successful item definition key for this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	FName LastDroppedItemDefinitionKey = NAME_None;
+
+	/** Most recent source tag that recorded this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	FGameplayTag LastSourceTag;
+};
 
 /**
  * Lifetime loot tracking data used for pity logic and analytics.
@@ -64,9 +98,13 @@ struct AEYERJI_API FPlayerLootStats
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Rolling")
 	int32 LegendariesInWindow = 0;
 
-	/** Optional per-item pickup counts keyed by item identifier. */
+	/** Optional per-item pickup counts keyed by asset-derived item definition key. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Stats")
 	TMap<FName, int32> ItemsPickedUpById;
+
+	/** Persistent named pity memories keyed by designer-facing gameplay tags. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	TArray<FAeyerjiLootPityMemory> PityMemories;
 
 	/** Clears all counters back to zero. */
 	void Reset()
@@ -84,6 +122,66 @@ struct AEYERJI_API FPlayerLootStats
 		LegendariesInWindow = 0;
 
 		ItemsPickedUpById.Reset();
+		PityMemories.Reset();
+	}
+
+	/** Finds a named pity memory record, or null when the group has not been recorded yet. */
+	const FAeyerjiLootPityMemory* FindPityMemory(const FGameplayTag& PityGroup) const
+	{
+		if (!PityGroup.IsValid())
+		{
+			return nullptr;
+		}
+
+		for (const FAeyerjiLootPityMemory& Memory : PityMemories)
+		{
+			if (Memory.PityGroup == PityGroup)
+			{
+				return &Memory;
+			}
+		}
+
+		return nullptr;
+	}
+
+	/** Finds or creates a named pity memory record. */
+	FAeyerjiLootPityMemory& FindOrAddPityMemory(const FGameplayTag& PityGroup)
+	{
+		for (FAeyerjiLootPityMemory& Memory : PityMemories)
+		{
+			if (Memory.PityGroup == PityGroup)
+			{
+				return Memory;
+			}
+		}
+
+		FAeyerjiLootPityMemory& NewMemory = PityMemories.AddDefaulted_GetRef();
+		NewMemory.PityGroup = PityGroup;
+		return NewMemory;
+	}
+
+	/** Records one attempt in a named pity bucket. Success resets the miss counter. */
+	void RecordPityAttempt(const FGameplayTag& PityGroup, bool bSuccess, FName ItemDefinitionKey = NAME_None, const FGameplayTag& SourceTag = FGameplayTag())
+	{
+		if (!PityGroup.IsValid())
+		{
+			return;
+		}
+
+		FAeyerjiLootPityMemory& Memory = FindOrAddPityMemory(PityGroup);
+		++Memory.TotalAttempts;
+		Memory.LastSourceTag = SourceTag;
+
+		if (bSuccess)
+		{
+			Memory.AttemptsSinceLastSuccess = 0;
+			++Memory.TotalSuccesses;
+			Memory.LastDroppedItemDefinitionKey = ItemDefinitionKey;
+		}
+		else
+		{
+			++Memory.AttemptsSinceLastSuccess;
+		}
 	}
 
 	/** Adds a new drop result into the rolling window and maintains counters. */

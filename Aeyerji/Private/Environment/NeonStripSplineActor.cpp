@@ -150,7 +150,8 @@ void ANeonStripSplineActor::BuildMeshes()
         const FVector StartTan = Spline->GetTangentAtSplinePoint(i, ESplineCoordinateSpace::Local);
         const FVector EndTan   = Spline->GetTangentAtSplinePoint(NextIndex, ESplineCoordinateSpace::Local);
 
-        USplineMeshComponent* SplineMesh = NewObject<USplineMeshComponent>(this);
+        const FName SplineMeshName = MakeUniqueObjectName(this, USplineMeshComponent::StaticClass(), TEXT("NeonStripSplineMesh"));
+        USplineMeshComponent* SplineMesh = NewObject<USplineMeshComponent>(this, USplineMeshComponent::StaticClass(), SplineMeshName);
         SplineMesh->CreationMethod = EComponentCreationMethod::UserConstructionScript;
         SplineMesh->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
         SplineMesh->RegisterComponent();
@@ -192,7 +193,8 @@ void ANeonStripSplineActor::BuildLights()
 
     auto CreateRectLightAt = [this](const FVector& LocalPos, const FVector& LocalTangent)
     {
-        URectLightComponent* Rect = NewObject<URectLightComponent>(this);
+        const FName RectLightName = MakeUniqueObjectName(this, URectLightComponent::StaticClass(), TEXT("NeonRectLight"));
+        URectLightComponent* Rect = NewObject<URectLightComponent>(this, URectLightComponent::StaticClass(), RectLightName);
         Rect->CreationMethod = EComponentCreationMethod::UserConstructionScript;
         Rect->AttachToComponent(this->RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
         Rect->RegisterComponent();
@@ -217,7 +219,8 @@ void ANeonStripSplineActor::BuildLights()
 
     auto CreatePointLightAt = [this](const FVector& LocalPos)
     {
-        UPointLightComponent* Pt = NewObject<UPointLightComponent>(this);
+        const FName PointLightName = MakeUniqueObjectName(this, UPointLightComponent::StaticClass(), TEXT("NeonPointLight"));
+        UPointLightComponent* Pt = NewObject<UPointLightComponent>(this, UPointLightComponent::StaticClass(), PointLightName);
         Pt->CreationMethod = EComponentCreationMethod::UserConstructionScript;
         Pt->AttachToComponent(this->RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
         Pt->RegisterComponent();

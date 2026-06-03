@@ -6,6 +6,8 @@
 #include "Components/Image.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Components/TextBlock.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
+#include "TimerManager.h"
 
 bool UW_AeyerjiStatusBar::BP_ShouldShowResource_Implementation(UAbilitySystemComponent* /*ASC*/)
 {
@@ -17,6 +19,43 @@ void UW_AeyerjiStatusBar::BindToAttributes(UAbilitySystemComponent* InASC,
                                            FGameplayAttribute InHealth, FGameplayAttribute InMaxHealth,
                                            FGameplayAttribute InMana,   FGameplayAttribute InMaxMana)
 {
+    UAbilitySystemComponent* OldASC = ASC.Get();
+    const FGameplayAttribute OldHealthAttr = HealthAttr;
+    const FGameplayAttribute OldMaxHealthAttr = MaxHealthAttr;
+    const FGameplayAttribute OldManaAttr = ManaAttr;
+    const FGameplayAttribute OldMaxManaAttr = MaxManaAttr;
+    const FGameplayAttribute OldXPAttr = XPAttr;
+    const FGameplayAttribute OldXPMaxAttr = XPMaxAttr;
+    const FGameplayAttribute OldLevelAttr = LevelAttr;
+    const FGameplayAttribute OldHPRegenAttr = HPRegenAttr;
+    const FGameplayAttribute OldManaRegenAttr = ManaRegenAttr;
+
+    if (OldASC)
+    {
+        if (HealthChangedHandle.IsValid() && OldHealthAttr.IsValid())       { OldASC->GetGameplayAttributeValueChangeDelegate(OldHealthAttr).Remove(HealthChangedHandle); }
+        if (MaxHealthChangedHandle.IsValid() && OldMaxHealthAttr.IsValid()) { OldASC->GetGameplayAttributeValueChangeDelegate(OldMaxHealthAttr).Remove(MaxHealthChangedHandle); }
+        if (ManaChangedHandle.IsValid() && OldManaAttr.IsValid())           { OldASC->GetGameplayAttributeValueChangeDelegate(OldManaAttr).Remove(ManaChangedHandle); }
+        if (MaxManaChangedHandle.IsValid() && OldMaxManaAttr.IsValid())     { OldASC->GetGameplayAttributeValueChangeDelegate(OldMaxManaAttr).Remove(MaxManaChangedHandle); }
+        if (XPChangedHandle.IsValid() && OldXPAttr.IsValid())               { OldASC->GetGameplayAttributeValueChangeDelegate(OldXPAttr).Remove(XPChangedHandle); }
+        if (MaxXPChangedHandle.IsValid() && OldXPMaxAttr.IsValid())         { OldASC->GetGameplayAttributeValueChangeDelegate(OldXPMaxAttr).Remove(MaxXPChangedHandle); }
+        if (LevelChangedHandle.IsValid() && OldLevelAttr.IsValid())         { OldASC->GetGameplayAttributeValueChangeDelegate(OldLevelAttr).Remove(LevelChangedHandle); }
+        if (HPRegenChangedHandle.IsValid() && OldHPRegenAttr.IsValid())     { OldASC->GetGameplayAttributeValueChangeDelegate(OldHPRegenAttr).Remove(HPRegenChangedHandle); }
+        if (ManaRegenChangedHandle.IsValid() && OldManaRegenAttr.IsValid()) { OldASC->GetGameplayAttributeValueChangeDelegate(OldManaRegenAttr).Remove(ManaRegenChangedHandle); }
+    }
+
+    HealthChangedHandle.Reset();
+    MaxHealthChangedHandle.Reset();
+    ManaChangedHandle.Reset();
+    MaxManaChangedHandle.Reset();
+    XPChangedHandle.Reset();
+    MaxXPChangedHandle.Reset();
+    LevelChangedHandle.Reset();
+    HPRegenChangedHandle.Reset();
+    ManaRegenChangedHandle.Reset();
+    ResyncAccumulator = 0.f;
+    bHasObservedHealthUpdate = false;
+    bHasObservedManaUpdate = false;
+
     ASC            = InASC;
     HealthAttr     = InHealth;
     MaxHealthAttr  = InMaxHealth;
@@ -31,18 +70,13 @@ void UW_AeyerjiStatusBar::BindToAttributes(UAbilitySystemComponent* InASC,
     // Visibility pass for resource
     UpdateResourceVisibility();
 
-    // Unbind previous (if any)
+    // Bind delegates for current ASC.
     if (ASC.IsValid())
     {
-        if (HealthChangedHandle.IsValid())    { ASC->GetGameplayAttributeValueChangeDelegate(HealthAttr).Remove(HealthChangedHandle); }
-        if (MaxHealthChangedHandle.IsValid()) { ASC->GetGameplayAttributeValueChangeDelegate(MaxHealthAttr).Remove(MaxHealthChangedHandle); }
-        if (ManaChangedHandle.IsValid())      { ASC->GetGameplayAttributeValueChangeDelegate(ManaAttr).Remove(ManaChangedHandle); }
-        if (MaxManaChangedHandle.IsValid())   { ASC->GetGameplayAttributeValueChangeDelegate(MaxManaAttr).Remove(MaxManaChangedHandle); }
-
-        HealthChangedHandle    = ASC->GetGameplayAttributeValueChangeDelegate(HealthAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnHealthChanged);
-        MaxHealthChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(MaxHealthAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnMaxHealthChanged);
-        ManaChangedHandle      = ASC->GetGameplayAttributeValueChangeDelegate(ManaAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnManaChanged);
-        MaxManaChangedHandle   = ASC->GetGameplayAttributeValueChangeDelegate(MaxManaAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnMaxManaChanged);
+        if (HealthAttr.IsValid())    { HealthChangedHandle    = ASC->GetGameplayAttributeValueChangeDelegate(HealthAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnHealthChanged); }
+        if (MaxHealthAttr.IsValid()) { MaxHealthChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(MaxHealthAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnMaxHealthChanged); }
+        if (ManaAttr.IsValid())      { ManaChangedHandle      = ASC->GetGameplayAttributeValueChangeDelegate(ManaAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnManaChanged); }
+        if (MaxManaAttr.IsValid())   { MaxManaChangedHandle   = ASC->GetGameplayAttributeValueChangeDelegate(MaxManaAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnMaxManaChanged); }
     }
 
     // Push initial percents
@@ -56,6 +90,40 @@ void UW_AeyerjiStatusBar::BindToAttributes(UAbilitySystemComponent* InASC,
     // Initial numeric labels (optional)
     UpdateHPValueLabels();
     UpdateManaValueLabels();
+    ScheduleDelayedInitialSync();
+}
+
+void UW_AeyerjiStatusBar::NativeOnInitialized()
+{
+    Super::NativeOnInitialized();
+
+    // Start from a deterministic full state before ASC binding/replication catches up.
+    HealthTarget = HealthMain = HealthGhost = 1.f;
+    ManaTarget = ManaMain = ManaGhost = 1.f;
+    XPTarget = XPMain = XPGhost = 1.f;
+    HealthGhostHold = 0.f;
+    ManaGhostHold = 0.f;
+    XPGhostHold = 0.f;
+    HealFlash = 0.f;
+    DmgFlash = 0.f;
+    ResyncAccumulator = 0.f;
+    bHasObservedHealthUpdate = false;
+    bHasObservedManaUpdate = false;
+
+    if (HealthBar)       HealthBar->SetPercent(HealthMain);
+    if (HealthBar_Ghost) HealthBar_Ghost->SetPercent(HealthGhost);
+    if (ManaBar)         ManaBar->SetPercent(ManaMain);
+    if (ManaBar_Ghost)   ManaBar_Ghost->SetPercent(ManaGhost);
+    if (XPBar)           XPBar->SetPercent(XPMain);
+    if (XPBar_Ghost)     XPBar_Ghost->SetPercent(XPGhost);
+    if (ImgHealFlash)    ImgHealFlash->SetRenderOpacity(0.f);
+    if (ImgDamageFlash)  ImgDamageFlash->SetRenderOpacity(0.f);
+
+    UpdateColors();
+    UpdateResourceVisibility();
+    UpdateHPValueLabels();
+    UpdateManaValueLabels();
+    UpdateXPLabel();
 }
 
 void UW_AeyerjiStatusBar::BindToAttributesWithXP(UAbilitySystemComponent* InASC,
@@ -70,11 +138,8 @@ void UW_AeyerjiStatusBar::BindToAttributesWithXP(UAbilitySystemComponent* InASC,
 
     if (ASC.IsValid())
     {
-        if (XPChangedHandle.IsValid())      { ASC->GetGameplayAttributeValueChangeDelegate(XPAttr).Remove(XPChangedHandle); }
-        if (MaxXPChangedHandle.IsValid())   { ASC->GetGameplayAttributeValueChangeDelegate(XPMaxAttr).Remove(MaxXPChangedHandle); }
-
-        XPChangedHandle    = ASC->GetGameplayAttributeValueChangeDelegate(XPAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnXPChanged);
-        MaxXPChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(XPMaxAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnMaxXPChanged);
+        if (XPAttr.IsValid())    { XPChangedHandle    = ASC->GetGameplayAttributeValueChangeDelegate(XPAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnXPChanged); }
+        if (XPMaxAttr.IsValid()) { MaxXPChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(XPMaxAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnMaxXPChanged); }
     }
 
     // Initialize XP visuals
@@ -97,31 +162,40 @@ void UW_AeyerjiStatusBar::BindToAttributesWithXPAndLevel(UAbilitySystemComponent
     LevelAttr = InLevel;
     if (ASC.IsValid())
     {
-        if (LevelChangedHandle.IsValid()) { ASC->GetGameplayAttributeValueChangeDelegate(LevelAttr).Remove(LevelChangedHandle); }
-        LevelChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(LevelAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnLevelChanged);
+        if (LevelAttr.IsValid())
+        {
+            LevelChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(LevelAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnLevelChanged);
+        }
     }
     UpdateLevelLabel();
 }
 
 void UW_AeyerjiStatusBar::NativeDestruct()
 {
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(InitialDelayedSyncTimer);
+    }
+
     if (ASC.IsValid())
     {
-        if (HealthChangedHandle.IsValid())    ASC->GetGameplayAttributeValueChangeDelegate(HealthAttr).Remove(HealthChangedHandle);
-        if (MaxHealthChangedHandle.IsValid()) ASC->GetGameplayAttributeValueChangeDelegate(MaxHealthAttr).Remove(MaxHealthChangedHandle);
-        if (ManaChangedHandle.IsValid())      ASC->GetGameplayAttributeValueChangeDelegate(ManaAttr).Remove(ManaChangedHandle);
-        if (MaxManaChangedHandle.IsValid())   ASC->GetGameplayAttributeValueChangeDelegate(MaxManaAttr).Remove(MaxManaChangedHandle);
-        if (XPChangedHandle.IsValid())        ASC->GetGameplayAttributeValueChangeDelegate(XPAttr).Remove(XPChangedHandle);
-        if (MaxXPChangedHandle.IsValid())     ASC->GetGameplayAttributeValueChangeDelegate(XPMaxAttr).Remove(MaxXPChangedHandle);
-        if (LevelChangedHandle.IsValid())     ASC->GetGameplayAttributeValueChangeDelegate(LevelAttr).Remove(LevelChangedHandle);
-        if (HPRegenChangedHandle.IsValid())    ASC->GetGameplayAttributeValueChangeDelegate(HPRegenAttr).Remove(HPRegenChangedHandle);
-        if (ManaRegenChangedHandle.IsValid())  ASC->GetGameplayAttributeValueChangeDelegate(ManaRegenAttr).Remove(ManaRegenChangedHandle);
+        if (HealthChangedHandle.IsValid() && HealthAttr.IsValid())       ASC->GetGameplayAttributeValueChangeDelegate(HealthAttr).Remove(HealthChangedHandle);
+        if (MaxHealthChangedHandle.IsValid() && MaxHealthAttr.IsValid()) ASC->GetGameplayAttributeValueChangeDelegate(MaxHealthAttr).Remove(MaxHealthChangedHandle);
+        if (ManaChangedHandle.IsValid() && ManaAttr.IsValid())           ASC->GetGameplayAttributeValueChangeDelegate(ManaAttr).Remove(ManaChangedHandle);
+        if (MaxManaChangedHandle.IsValid() && MaxManaAttr.IsValid())     ASC->GetGameplayAttributeValueChangeDelegate(MaxManaAttr).Remove(MaxManaChangedHandle);
+        if (XPChangedHandle.IsValid() && XPAttr.IsValid())               ASC->GetGameplayAttributeValueChangeDelegate(XPAttr).Remove(XPChangedHandle);
+        if (MaxXPChangedHandle.IsValid() && XPMaxAttr.IsValid())         ASC->GetGameplayAttributeValueChangeDelegate(XPMaxAttr).Remove(MaxXPChangedHandle);
+        if (LevelChangedHandle.IsValid() && LevelAttr.IsValid())         ASC->GetGameplayAttributeValueChangeDelegate(LevelAttr).Remove(LevelChangedHandle);
+        if (HPRegenChangedHandle.IsValid() && HPRegenAttr.IsValid())     ASC->GetGameplayAttributeValueChangeDelegate(HPRegenAttr).Remove(HPRegenChangedHandle);
+        if (ManaRegenChangedHandle.IsValid() && ManaRegenAttr.IsValid()) ASC->GetGameplayAttributeValueChangeDelegate(ManaRegenAttr).Remove(ManaRegenChangedHandle);
     }
+    ResyncAccumulator = 0.f;
     Super::NativeDestruct();
 }
 
 void UW_AeyerjiStatusBar::OnHealthChanged(const FOnAttributeChangeData& /*Data*/)
 {
+    bHasObservedHealthUpdate = true;
     const float OldNorm = HealthTarget;
     RecalculateTargets();
 
@@ -151,6 +225,7 @@ void UW_AeyerjiStatusBar::OnMaxHealthChanged(const FOnAttributeChangeData& /*Dat
 
 void UW_AeyerjiStatusBar::OnManaChanged(const FOnAttributeChangeData& /*Data*/)
 {
+    bHasObservedManaUpdate = true;
     const float OldNorm = ManaTarget;
     RecalculateTargets();
 
@@ -220,8 +295,8 @@ void UW_AeyerjiStatusBar::RecalculateTargets()
     const float CurXP  = bHasXP ? ASC->GetNumericAttribute(XPAttr)    : 0.f;
     const float MaxXP  = bHasXP ? ASC->GetNumericAttribute(XPMaxAttr) : 1.f;
 
-    HealthTarget = FMath::Clamp(SafeDiv(CurHP, MaxHP), 0.f, 1.f);
-    ManaTarget   = FMath::Clamp(SafeDiv(CurMP, MaxMP), 0.f, 1.f);
+    HealthTarget = FMath::Clamp(SafeDiv(GetDisplayedHealthValue(CurHP, MaxHP), MaxHP), 0.f, 1.f);
+    ManaTarget   = FMath::Clamp(SafeDiv(GetDisplayedManaValue(CurMP, MaxMP), MaxMP), 0.f, 1.f);
     XPTarget     = FMath::Clamp(SafeDiv(CurXP, MaxXP), 0.f, 1.f);
     UpdateXPLabel();
     UpdateHPValueLabels();
@@ -237,6 +312,23 @@ float UW_AeyerjiStatusBar::SafeDiv(float Numerator, float Denominator)
 void UW_AeyerjiStatusBar::NativeTick(const FGeometry& MyGeometry, float Dt)
 {
     Super::NativeTick(MyGeometry, Dt);
+
+    if (ASC.IsValid())
+    {
+        // Always pull live values so late replication or missed initial delegates cannot leave stale bars on screen.
+        RecalculateTargets();
+
+        if (PeriodicResyncInterval > 0.f)
+        {
+            ResyncAccumulator += Dt;
+            if (ResyncAccumulator >= PeriodicResyncInterval)
+            {
+                ResyncAccumulator = FMath::Fmod(ResyncAccumulator, PeriodicResyncInterval);
+                UpdateResourceVisibility();
+                UpdateColors();
+            }
+        }
+    }
 
     // HEALTH smoothing
     const bool bHealthDamage = HealthTarget < HealthMain;
@@ -383,13 +475,28 @@ bool UW_AeyerjiStatusBar::AutoDetectUsesResource() const
 void UW_AeyerjiStatusBar::UpdateXPLabel()
 {
     if (!ASC.IsValid() || !XPText) return;
-    if (!(XPAttr.IsValid() && XPMaxAttr.IsValid())) return;
+    if (!(XPAttr.IsValid() && XPMaxAttr.IsValid()))
+    {
+        XPText->SetVisibility(ESlateVisibility::Collapsed);
+        return;
+    }
+
+    if (LevelAttr.IsValid())
+    {
+        const int32 CurrentLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(ASC->GetNumericAttribute(LevelAttr)));
+        if (CurrentLevel >= UAeyerjiDifficultySettings::GetMaxGameplayLevel())
+        {
+            XPText->SetVisibility(ESlateVisibility::Collapsed);
+            return;
+        }
+    }
 
     const float CurXP = ASC->GetNumericAttribute(XPAttr);
     const float MaxXP = ASC->GetNumericAttribute(XPMaxAttr);
     const int32 Cur = FMath::FloorToInt(CurXP);
     const int32 Max = FMath::Max(1, FMath::FloorToInt(MaxXP));
 
+    XPText->SetVisibility(ESlateVisibility::Visible);
     XPText->SetText(FText::FromString(FString::Printf(TEXT("%d/%d XP"), Cur, Max)));
 }
 
@@ -398,15 +505,17 @@ void UW_AeyerjiStatusBar::UpdateLevelLabel()
     if (!ASC.IsValid() || !LevelText) return;
     if (!LevelAttr.IsValid()) return;
 
-    const int32 Lvl = FMath::Max(1, FMath::RoundToInt(ASC->GetNumericAttribute(LevelAttr)));
+    const int32 Lvl = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(ASC->GetNumericAttribute(LevelAttr)));
     LevelText->SetText(FText::AsNumber(Lvl));
 }
 
 void UW_AeyerjiStatusBar::UpdateHPValueLabels()
 {
     if (!ASC.IsValid()) return;
-    const int32 CurHP = FMath::FloorToInt(ASC->GetNumericAttribute(HealthAttr));
-    const int32 MaxHP = FMath::FloorToInt(ASC->GetNumericAttribute(MaxHealthAttr));
+    const float RawCurHP = ASC->GetNumericAttribute(HealthAttr);
+    const float RawMaxHP = ASC->GetNumericAttribute(MaxHealthAttr);
+    const int32 CurHP = FMath::FloorToInt(GetDisplayedHealthValue(RawCurHP, RawMaxHP));
+    const int32 MaxHP = FMath::FloorToInt(RawMaxHP);
     if (HPValueText)
     {
         HPValueText->SetText(FText::FromString(FString::Printf(TEXT("%d/%d HP"), CurHP, MaxHP)));
@@ -416,8 +525,10 @@ void UW_AeyerjiStatusBar::UpdateHPValueLabels()
 void UW_AeyerjiStatusBar::UpdateManaValueLabels()
 {
     if (!ASC.IsValid()) return;
-    const int32 CurMana = FMath::FloorToInt(ASC->GetNumericAttribute(ManaAttr));
-    const int32 MaxMana = FMath::FloorToInt(ASC->GetNumericAttribute(MaxManaAttr));
+    const float RawCurMana = ASC->GetNumericAttribute(ManaAttr);
+    const float RawMaxMana = ASC->GetNumericAttribute(MaxManaAttr);
+    const int32 CurMana = FMath::FloorToInt(GetDisplayedManaValue(RawCurMana, RawMaxMana));
+    const int32 MaxMana = FMath::FloorToInt(RawMaxMana);
     if (ManaValueText)
     {
         ManaValueText->SetText(FText::FromString(FString::Printf(TEXT("%d/%d Mana"), CurMana, MaxMana)));
@@ -439,21 +550,140 @@ void UW_AeyerjiStatusBar::UpdateRegenLabels()
     }
 }
 
+float UW_AeyerjiStatusBar::GetDisplayedHealthValue(float CurrentHP, float MaxHP) const
+{
+    if (!ASC.IsValid())
+    {
+        return CurrentHP;
+    }
+
+    if (bHasObservedHealthUpdate || FMath::IsNearlyEqual(CurrentHP, MaxHP) || FMath::IsNearlyEqual(MaxHP, 100.f))
+    {
+        return CurrentHP;
+    }
+
+    if (!FMath::IsNearlyEqual(CurrentHP, 100.f))
+    {
+        return CurrentHP;
+    }
+    // Treat the constructor default HP as stale until the first real health update arrives.
+    return MaxHP;
+}
+
+float UW_AeyerjiStatusBar::GetDisplayedManaValue(float CurrentMana, float MaxMana) const
+{
+    if (!ASC.IsValid())
+    {
+        return CurrentMana;
+    }
+
+    if (bHasObservedManaUpdate || FMath::IsNearlyEqual(CurrentMana, MaxMana))
+    {
+        return CurrentMana;
+    }
+
+    if (FMath::IsNearlyEqual(CurrentMana, 0.f) && MaxMana > 0.f)
+    {
+        // Many startup paths leave mana at the attribute-set default (0) until a later update.
+        return MaxMana;
+    }
+
+    if (FMath::IsNearlyEqual(CurrentMana, 100.f) && !FMath::IsNearlyEqual(MaxMana, 100.f))
+    {
+        // Mirror the HP stale-default guard for mana setups that initialize current mana to 100.
+        return MaxMana;
+    }
+
+    return CurrentMana;
+}
+
+void UW_AeyerjiStatusBar::ScheduleDelayedInitialSync()
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    World->GetTimerManager().ClearTimer(InitialDelayedSyncTimer);
+
+    if (InitialDelayedSyncSeconds <= 0.f)
+    {
+        RunDelayedInitialSync();
+        return;
+    }
+
+    World->GetTimerManager().SetTimer(
+        InitialDelayedSyncTimer,
+        this,
+        &UW_AeyerjiStatusBar::RunDelayedInitialSync,
+        InitialDelayedSyncSeconds,
+        false);
+}
+
+void UW_AeyerjiStatusBar::RunDelayedInitialSync()
+{
+    if (!ASC.IsValid())
+    {
+        return;
+    }
+
+    RecalculateTargets();
+    HealthMain = HealthGhost = HealthTarget;
+    ManaMain = ManaGhost = ManaTarget;
+    XPMain = XPGhost = XPTarget;
+
+    if (HealthBar)       HealthBar->SetPercent(HealthMain);
+    if (HealthBar_Ghost) HealthBar_Ghost->SetPercent(HealthGhost);
+    if (ManaBar)         ManaBar->SetPercent(ManaMain);
+    if (ManaBar_Ghost)   ManaBar_Ghost->SetPercent(ManaGhost);
+    if (XPBar)           XPBar->SetPercent(XPMain);
+    if (XPBar_Ghost)     XPBar_Ghost->SetPercent(XPGhost);
+
+    UpdateResourceVisibility();
+    UpdateColors();
+    UpdateHPValueLabels();
+    UpdateManaValueLabels();
+    UpdateXPLabel();
+}
+
 void UW_AeyerjiStatusBar::BindRegenAttributes(UAbilitySystemComponent* InASC,
                                               FGameplayAttribute InHPRegen,
                                               FGameplayAttribute InManaRegen)
 {
+    UAbilitySystemComponent* OldASC = ASC.Get();
+    const FGameplayAttribute OldHPRegenAttr = HPRegenAttr;
+    const FGameplayAttribute OldManaRegenAttr = ManaRegenAttr;
+
+    if (OldASC)
+    {
+        if (HPRegenChangedHandle.IsValid() && OldHPRegenAttr.IsValid())
+        {
+            OldASC->GetGameplayAttributeValueChangeDelegate(OldHPRegenAttr).Remove(HPRegenChangedHandle);
+        }
+        if (ManaRegenChangedHandle.IsValid() && OldManaRegenAttr.IsValid())
+        {
+            OldASC->GetGameplayAttributeValueChangeDelegate(OldManaRegenAttr).Remove(ManaRegenChangedHandle);
+        }
+    }
+
+    HPRegenChangedHandle.Reset();
+    ManaRegenChangedHandle.Reset();
+
     ASC = InASC;
     HPRegenAttr  = InHPRegen;
     ManaRegenAttr= InManaRegen;
 
     if (ASC.IsValid())
     {
-        if (HPRegenChangedHandle.IsValid())   { ASC->GetGameplayAttributeValueChangeDelegate(HPRegenAttr).Remove(HPRegenChangedHandle); }
-        if (ManaRegenChangedHandle.IsValid()) { ASC->GetGameplayAttributeValueChangeDelegate(ManaRegenAttr).Remove(ManaRegenChangedHandle); }
-
-        HPRegenChangedHandle   = ASC->GetGameplayAttributeValueChangeDelegate(HPRegenAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnHPRegenChanged);
-        ManaRegenChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(ManaRegenAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnManaRegenChanged);
+        if (HPRegenAttr.IsValid())
+        {
+            HPRegenChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(HPRegenAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnHPRegenChanged);
+        }
+        if (ManaRegenAttr.IsValid())
+        {
+            ManaRegenChangedHandle = ASC->GetGameplayAttributeValueChangeDelegate(ManaRegenAttr).AddUObject(this, &UW_AeyerjiStatusBar::OnManaRegenChanged);
+        }
     }
 
     UpdateRegenLabels();

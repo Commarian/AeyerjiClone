@@ -86,6 +86,8 @@ private:
     void  ServerSetXP(float NewXP) const;
     void  ServerSetXPMax(float NewXPMax) const;
     void  ServerSetLevel(int32 NewLevel) const;
+    /** Keeps the server profile cache aligned with runtime XP/level without committing a checkpoint. */
+    void  SyncProfileProgressionCache(const TCHAR* Reason) const;
 
 private:
     mutable TWeakObjectPtr<UAbilitySystemComponent>        CachedASC;

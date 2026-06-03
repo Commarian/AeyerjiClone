@@ -2,7 +2,6 @@
 
 #include "GUI/W_EquipmentSlot.h"
 
-#include "Components/Border.h"
 #include "Components/Image.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
 #include "GUI/AeyerjiItemDragOperation.h"
@@ -14,6 +13,41 @@
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "InputCoreTypes.h"
 #include "Logging/AeyerjiLog.h"
+#include "Materials/MaterialInstanceDynamic.h"
+
+namespace
+{
+	FString EquipmentSlotToLogString(EEquipmentSlot Slot)
+	{
+		if (const UEnum* Enum = StaticEnum<EEquipmentSlot>())
+		{
+			return Enum->GetNameStringByValue(static_cast<int64>(Slot));
+		}
+
+		return FString::FromInt(static_cast<int32>(Slot));
+	}
+
+	FString ItemRarityToLogString(EItemRarity Rarity)
+	{
+		if (const UEnum* Enum = StaticEnum<EItemRarity>())
+		{
+			return Enum->GetNameStringByValue(static_cast<int64>(Rarity));
+		}
+
+		return FString::FromInt(static_cast<int32>(Rarity));
+	}
+}
+
+UW_EquipmentSlot::UW_EquipmentSlot(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer)
+{
+	AssaultLockedIcon = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/GUI/GeneralImages/locked_icon_assault.locked_icon_assault")));
+	GuardLockedIcon = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/GUI/GeneralImages/locked_icon_guard.locked_icon_guard")));
+	FlowLockedIcon = TSoftObjectPtr<UTexture2D>(FSoftObjectPath(TEXT("/Game/GUI/GeneralImages/lock_icon_flow.lock_icon_flow")));
+	AssaultBorderMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/GUI/GeneralImages/MI_UI_Equip_Assault.MI_UI_Equip_Assault")));
+	GuardBorderMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/GUI/GeneralImages/MI_UI_Equip_Guard.MI_UI_Equip_Guard")));
+	FlowBorderMaterial = TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/GUI/GeneralImages/MI_UI_Equip_Flow.MI_UI_Equip_Flow")));
+}
 
 void UW_EquipmentSlot::NativeOnInitialized()
 {
@@ -73,7 +107,86 @@ bool UW_EquipmentSlot::IsMouseOverItem() const
 		return false;
 	}
 
-	return IsHovered() || (ItemIcon && ItemIcon->IsHovered());
+	const UImage* EffectiveInsideImage = GetInsideImageWidget();
+	return IsHovered() || (EffectiveInsideImage && EffectiveInsideImage->IsHovered());
+}
+
+bool UW_EquipmentSlot::IsSlotLocked() const
+{
+	if (!IsSlotVisibleForCurrentLevel())
+	{
+		return true;
+	}
+
+	return Inventory.IsValid()
+		? !Inventory->IsEquipmentSlotUnlocked(GetEffectiveSlotType(), GetEffectiveSlotIndex())
+		: GetEffectiveSlotType() == EEquipmentSlot::Corruption;
+}
+
+bool UW_EquipmentSlot::IsSlotVisibleForCurrentLevel() const
+{
+	return Inventory.IsValid()
+		? GetEffectiveSlotIndex() < Inventory->GetVisibleEquipmentSlotCount(GetEffectiveSlotType())
+		: GetEffectiveSlotType() != EEquipmentSlot::Corruption;
+}
+
+bool UW_EquipmentSlot::IsSlotInteractionEnabled() const
+{
+	return IsSlotVisibleForCurrentLevel() && !IsSlotLocked();
+}
+
+ESlateVisibility UW_EquipmentSlot::GetSlotVisibility() const
+{
+	return IsSlotVisibleForCurrentLevel() ? ESlateVisibility::Visible : ESlateVisibility::Collapsed;
+}
+
+UTexture2D* UW_EquipmentSlot::GetLockedSlotIcon() const
+{
+	if (!IsSlotLocked())
+	{
+		return nullptr;
+	}
+
+	switch (GetEffectiveSlotType())
+	{
+	case EEquipmentSlot::Assault:
+		return AssaultLockedIcon.LoadSynchronous();
+	case EEquipmentSlot::Guard:
+		return GuardLockedIcon.LoadSynchronous();
+	case EEquipmentSlot::Flow:
+		return FlowLockedIcon.LoadSynchronous();
+	case EEquipmentSlot::Corruption:
+		return CorruptionLockedIcon.LoadSynchronous();
+	default:
+		return nullptr;
+	}
+}
+
+FText UW_EquipmentSlot::GetSlotDisplayText() const
+{
+	switch (GetEffectiveSlotType())
+	{
+	case EEquipmentSlot::Assault:
+		return FText::FromString(TEXT("Assault"));
+	case EEquipmentSlot::Guard:
+		return FText::FromString(TEXT("Guard"));
+	case EEquipmentSlot::Flow:
+		return FText::FromString(TEXT("Flow"));
+	case EEquipmentSlot::Corruption:
+		return FText::FromString(TEXT("Corruption"));
+	default:
+		return FText::FromString(TEXT("Assault"));
+	}
+}
+
+FText UW_EquipmentSlot::GetSlotTooltipText() const
+{
+	if (GetEffectiveSlotType() == EEquipmentSlot::Corruption && IsSlotLocked())
+	{
+		return FText::FromString(TEXT("Corruption Slot\nUnlocks at Level 50.\nCorruption items grant unstable power with dangerous tradeoffs."));
+	}
+
+	return GetSlotDisplayText();
 }
 
 bool UW_EquipmentSlot::DropItemToGround(float ForwardOffset)
@@ -153,47 +266,53 @@ void UW_EquipmentSlot::UpdateSlotVisuals()
 {
 	const UAeyerjiItemInstance* Item = CurrentItem.Get();
 	const bool bHasItem = Item != nullptr;
+	const bool bLocked = IsSlotLocked();
 
-	if (ItemIcon)
+	SetVisibility(GetSlotVisibility());
+	SetIsEnabled(IsSlotInteractionEnabled() || bLocked);
+
+	UImage* EffectiveInsideImage = GetInsideImageWidget();
+	if (EffectiveInsideImage)
 	{
 		UTexture2D* EffectiveTexture = nullptr;
-		FLinearColor Tint = EmptyTint;
 
-		if (bHasItem && Item->Definition && Item->Definition->Icon)
+		if (bLocked)
+		{
+			EffectiveTexture = GetLockedSlotIcon();
+		}
+		else if (bHasItem && Item->Definition && Item->Definition->Icon)
 		{
 			EffectiveTexture = Item->Definition->Icon;
-			Tint = FLinearColor::White;
 		}
-		else if (EmptySlotIcon)
+		else if (UTexture2D* LaneEmptyIcon = GetEmptySlotIcon())
 		{
-			EffectiveTexture = EmptySlotIcon;
+			EffectiveTexture = LaneEmptyIcon;
 		}
 
-		ItemIcon->SetBrushFromTexture(EffectiveTexture, EffectiveTexture != nullptr);
-		ItemIcon->SetColorAndOpacity(Tint);
+		EffectiveInsideImage->SetBrushFromTexture(EffectiveTexture, EffectiveTexture != nullptr);
+		EffectiveInsideImage->SetColorAndOpacity(FLinearColor::White);
 
-		const FVector2D WidgetDesired = ItemIcon->GetDesiredSize();
-		const FVector2D BrushSize = ItemIcon->GetBrush().ImageSize;
+		const FVector2D WidgetDesired = EffectiveInsideImage->GetDesiredSize();
+		const FVector2D BrushSize = EffectiveInsideImage->GetBrush().ImageSize;
 		// AJ_LOG(this, TEXT("UpdateSlotVisuals Slot=%d Item=%s Texture=%s Desired=(%.1f,%.1f) Brush=(%.1f,%.1f) Tint=%s"),
 		// 	GetEffectiveSlotIndex(),
 		// 	bHasItem && Item ? *Item->UniqueId.ToString() : TEXT("None"),
 		// 	EffectiveTexture ? *EffectiveTexture->GetName() : TEXT("None"),
 		// 	WidgetDesired.X, WidgetDesired.Y,
 		// 	BrushSize.X, BrushSize.Y,
-		// 	*Tint.ToString());
+		// 	*FLinearColor::White.ToString());
 	}
 
-	if (SlotBorder)
-	{
-		const EItemRarity Rarity = bHasItem ? Item->Rarity : EItemRarity::Common;
-		const float RareMultiplier = 0.15f * static_cast<int32>(Rarity);
-		const FLinearColor BorderColor = bHasItem ? Item->RarityTint(Rarity): EmptyTint;
-		SlotBorder->SetBrushColor(BorderColor);
-	}
+	UpdateBorderVisual(Item);
 }
 
 FReply UW_EquipmentSlot::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
+	if (!IsSlotInteractionEnabled())
+	{
+		return FReply::Unhandled();
+	}
+
 	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton && CurrentItem.IsValid())
 	{
 		return UWidgetBlueprintLibrary::DetectDragIfPressed(InMouseEvent, this, EKeys::LeftMouseButton).NativeReply;
@@ -210,6 +329,11 @@ FReply UW_EquipmentSlot::NativeOnMouseButtonDown(const FGeometry& InGeometry, co
 
 FReply UW_EquipmentSlot::NativeOnMouseButtonDoubleClick(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
 {
+	if (!IsSlotInteractionEnabled())
+	{
+		return FReply::Unhandled();
+	}
+
 	if (InMouseEvent.GetEffectingButton() != EKeys::LeftMouseButton)
 	{
 		return Super::NativeOnMouseButtonDoubleClick(InGeometry, InMouseEvent);
@@ -235,7 +359,8 @@ void UW_EquipmentSlot::NativeOnDragDetected(const FGeometry& InGeometry, const F
 		return;
 	}
 
-	UAeyerjiItemDragOperation* DragOp = NewObject<UAeyerjiItemDragOperation>(this);
+	const FName DragOpName = MakeUniqueObjectName(this, UAeyerjiItemDragOperation::StaticClass(), TEXT("AeyerjiItemDragOperation"));
+	UAeyerjiItemDragOperation* DragOp = NewObject<UAeyerjiItemDragOperation>(this, UAeyerjiItemDragOperation::StaticClass(), DragOpName);
 	if (!DragOp)
 	{
 		return;
@@ -272,7 +397,7 @@ bool UW_EquipmentSlot::NativeOnDragOver(const FGeometry& InGeometry, const FDrag
 {
 	if (UAeyerjiItemDragOperation* DragOp = Cast<UAeyerjiItemDragOperation>(InOperation))
 	{
-		if (CanAcceptDragOperation(DragOp))
+		if (IsSlotInteractionEnabled() && CanAcceptDragOperation(DragOp))
 		{
 			return true;
 		}
@@ -289,7 +414,7 @@ bool UW_EquipmentSlot::NativeOnDrop(
     UAeyerjiItemDragOperation* DragOp =
         Cast<UAeyerjiItemDragOperation>(InOperation);
 
-    if (!Inventory.IsValid() || !DragOp || !DragOp->ItemInstance)
+    if (!Inventory.IsValid() || !DragOp || !DragOp->ItemInstance || !IsSlotInteractionEnabled())
     {
         return false;
     }
@@ -406,14 +531,8 @@ bool UW_EquipmentSlot::IsItemCompatible(const UAeyerjiItemInstance* Item) const
 
 	const EEquipmentSlot EffectiveSlot = GetEffectiveSlotType();
 
-	// Primary check: matches default or currently equipped slot.
-	if (Item->Definition->DefaultSlot == EffectiveSlot || Item->EquippedSlot == EffectiveSlot)
-	{
-		return true;
-	}
-
-	// Fallback: allow category-aligned items even if the asset's default slot is stale.
-	return static_cast<EItemCategory>(EffectiveSlot) == Item->Definition->ItemCategory;
+	return Inventory.IsValid()
+		&& Inventory->CanEquipItemInSlot(Item, EffectiveSlot, GetEffectiveSlotIndex());
 }
 
 bool UW_EquipmentSlot::TryEquipFromDragOperation(UAeyerjiItemDragOperation* DragOp)
@@ -431,6 +550,185 @@ bool UW_EquipmentSlot::TryEquipFromDragOperation(UAeyerjiItemDragOperation* Drag
 
 	InventoryComponent->Server_EquipItem(DragOp->ItemId, GetEffectiveSlotType(), GetEffectiveSlotIndex());
 	return true;
+}
+
+UTexture2D* UW_EquipmentSlot::GetEmptySlotIcon() const
+{
+	switch (GetEffectiveSlotType())
+	{
+	case EEquipmentSlot::Assault:
+		if (!AssaultEmptyIcon.IsNull())
+		{
+			return AssaultEmptyIcon.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Guard:
+		if (!GuardEmptyIcon.IsNull())
+		{
+			return GuardEmptyIcon.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Flow:
+		if (!FlowEmptyIcon.IsNull())
+		{
+			return FlowEmptyIcon.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Corruption:
+		if (!CorruptionEmptyIcon.IsNull())
+		{
+			return CorruptionEmptyIcon.LoadSynchronous();
+		}
+		break;
+	default:
+		break;
+	}
+
+	return EmptySlotIcon;
+}
+
+UTexture2D* UW_EquipmentSlot::GetBorderSlotIcon() const
+{
+	switch (GetEffectiveSlotType())
+	{
+	case EEquipmentSlot::Assault:
+		if (!AssaultBorderIcon.IsNull())
+		{
+			return AssaultBorderIcon.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Guard:
+		if (!GuardBorderIcon.IsNull())
+		{
+			return GuardBorderIcon.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Flow:
+		if (!FlowBorderIcon.IsNull())
+		{
+			return FlowBorderIcon.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Corruption:
+		if (!CorruptionBorderIcon.IsNull())
+		{
+			return CorruptionBorderIcon.LoadSynchronous();
+		}
+		break;
+	default:
+		break;
+	}
+
+	return GenericBorderIcon;
+}
+
+UMaterialInterface* UW_EquipmentSlot::GetBorderSlotMaterial() const
+{
+	switch (GetEffectiveSlotType())
+	{
+	case EEquipmentSlot::Assault:
+		if (!AssaultBorderMaterial.IsNull())
+		{
+			return AssaultBorderMaterial.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Guard:
+		if (!GuardBorderMaterial.IsNull())
+		{
+			return GuardBorderMaterial.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Flow:
+		if (!FlowBorderMaterial.IsNull())
+		{
+			return FlowBorderMaterial.LoadSynchronous();
+		}
+		break;
+	case EEquipmentSlot::Corruption:
+		if (!CorruptionBorderMaterial.IsNull())
+		{
+			return CorruptionBorderMaterial.LoadSynchronous();
+		}
+		break;
+	default:
+		break;
+	}
+
+	return GenericBorderMaterial;
+}
+
+UImage* UW_EquipmentSlot::GetInsideImageWidget() const
+{
+	return InsideImage ? InsideImage.Get() : ItemIcon.Get();
+}
+
+void UW_EquipmentSlot::UpdateBorderVisual(const UAeyerjiItemInstance* Item)
+{
+	if (!BorderImage)
+	{
+		AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot missing BorderImage binding Slot=%s Index=%d Item=%s"),
+			*EquipmentSlotToLogString(GetEffectiveSlotType()),
+			GetEffectiveSlotIndex(),
+			Item ? *Item->UniqueId.ToString() : TEXT("None"));
+		return;
+	}
+
+	if (UMaterialInterface* BorderMaterial = GetBorderSlotMaterial())
+	{
+		const FLinearColor RarityColor = Item
+			? Item->RarityTint(Item->Rarity)
+			: FLinearColor::Transparent;
+		AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot material border Slot=%s Index=%d Material=%s Item=%s Rarity=%s RarityColor=%s Param=%s"),
+			*EquipmentSlotToLogString(GetEffectiveSlotType()),
+			GetEffectiveSlotIndex(),
+			*GetNameSafe(BorderMaterial),
+			Item ? *Item->UniqueId.ToString() : TEXT("None"),
+			Item ? *ItemRarityToLogString(Item->Rarity) : TEXT("None"),
+			*RarityColor.ToString(),
+			*RarityColorParameterName.ToString());
+
+		BorderImage->SetBrushFromMaterial(BorderMaterial);
+		BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+		BorderImage->SetColorAndOpacity(FLinearColor::White);
+
+		if (UMaterialInstanceDynamic* DynamicMaterial = BorderImage->GetDynamicMaterial())
+		{
+			DynamicMaterial->SetVectorParameterValue(RarityColorParameterName, RarityColor);
+			AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot set dynamic material parameter DynamicMaterial=%s Param=%s Value=%s"),
+				*GetNameSafe(DynamicMaterial),
+				*RarityColorParameterName.ToString(),
+				*RarityColor.ToString());
+		}
+		else
+		{
+			AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot failed to get dynamic material after SetBrushFromMaterial Slot=%s Index=%d Material=%s"),
+				*EquipmentSlotToLogString(GetEffectiveSlotType()),
+				GetEffectiveSlotIndex(),
+				*GetNameSafe(BorderMaterial));
+		}
+		return;
+	}
+
+	if (UTexture2D* BorderTexture = GetBorderSlotIcon())
+	{
+		AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot texture fallback Slot=%s Index=%d Texture=%s Item=%s"),
+			*EquipmentSlotToLogString(GetEffectiveSlotType()),
+			GetEffectiveSlotIndex(),
+			*GetNameSafe(BorderTexture),
+			Item ? *Item->UniqueId.ToString() : TEXT("None"));
+		BorderImage->SetBrushFromTexture(BorderTexture, true);
+		BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+		BorderImage->SetColorAndOpacity(FLinearColor::White);
+		return;
+	}
+
+	AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot no border material or texture Slot=%s Index=%d Item=%s"),
+		*EquipmentSlotToLogString(GetEffectiveSlotType()),
+		GetEffectiveSlotIndex(),
+		Item ? *Item->UniqueId.ToString() : TEXT("None"));
+	BorderImage->SetBrushFromTexture(nullptr, false);
+	BorderImage->SetVisibility(ESlateVisibility::Collapsed);
+	BorderImage->SetColorAndOpacity(FLinearColor::White);
 }
 
 void UW_EquipmentSlot::HandleInventoryEquippedChanged(EEquipmentSlot ChangedSlot, int32 ChangedIndex, UAeyerjiItemInstance* Item)
@@ -477,13 +775,13 @@ UWidget* UW_EquipmentSlot::CreateFallbackDragVisual() const
 
 	const float VisualScale = 0.85f;
 	FVector2D SlotSize = FVector2D(64.f, 64.f);
-	if (SlotBorder)
+	if (BorderImage)
 	{
-		SlotSize = SlotBorder->GetCachedGeometry().GetLocalSize();
+		SlotSize = BorderImage->GetCachedGeometry().GetLocalSize();
 	}
-	else if (ItemIcon)
+	else if (const UImage* EffectiveInsideImage = GetInsideImageWidget())
 	{
-		SlotSize = ItemIcon->GetCachedGeometry().GetLocalSize();
+		SlotSize = EffectiveInsideImage->GetCachedGeometry().GetLocalSize();
 	}
 	if (SlotSize.IsNearlyZero())
 	{
@@ -491,7 +789,9 @@ UWidget* UW_EquipmentSlot::CreateFallbackDragVisual() const
 	}
 	const FVector2D VisualSize = SlotSize * VisualScale;
 
-	USizeBox* Wrapper = NewObject<USizeBox>(const_cast<UW_EquipmentSlot*>(this));
+	UW_EquipmentSlot* MutableThis = const_cast<UW_EquipmentSlot*>(this);
+	const FName WrapperName = MakeUniqueObjectName(MutableThis, USizeBox::StaticClass(), TEXT("EquipmentDragWrapper"));
+	USizeBox* Wrapper = NewObject<USizeBox>(MutableThis, USizeBox::StaticClass(), WrapperName);
 	if (!Wrapper)
 	{
 		return nullptr;
@@ -499,7 +799,8 @@ UWidget* UW_EquipmentSlot::CreateFallbackDragVisual() const
 	Wrapper->SetWidthOverride(VisualSize.X);
 	Wrapper->SetHeightOverride(VisualSize.Y);
 
-	UImage* ImageWidget = NewObject<UImage>(Wrapper);
+	const FName ImageName = MakeUniqueObjectName(Wrapper, UImage::StaticClass(), TEXT("EquipmentDragImage"));
+	UImage* ImageWidget = NewObject<UImage>(Wrapper, UImage::StaticClass(), ImageName);
 	if (!ImageWidget)
 	{
 		return nullptr;

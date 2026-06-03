@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Aeyerji.
 #pragma once
 
+#include "AeyerjiObjectiveTypes.h"
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
 #include "GameFramework/Actor.h"
@@ -8,6 +9,8 @@
 #include "AeyerjiEncounterDirector.generated.h"
 
 class AEnemyParentNative;
+class AAeyerjiEncounterDirector;
+class AAeyerjiGameState;
 class AAeyerjiLevelDirector;
 class AAeyerjiSpawnerGroup;
 class AAeyerjiSpawnRegion;
@@ -34,6 +37,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter")
 	TArray<TSubclassOf<AEnemyParentNative>> EnemyTypes;
 
+	/** Optional elite-only archetypes. When empty, elite requests fall back to non-elite classes. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter")
+	TArray<TSubclassOf<AEnemyParentNative>> EliteEnemyTypes;
+
 	/** Minimum enemies to emit whenever this group is chosen. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter", meta=(ClampMin="1"))
 	int32 MinCount = 3;
@@ -55,6 +62,133 @@ public:
 
 	/** Returns a random enemy class from the configured pool. */
 	TSubclassOf<AEnemyParentNative> ResolveEnemyClass() const;
+
+	/** Returns a random elite class from EliteEnemyTypes (or nullptr when no elite pool is configured). */
+	TSubclassOf<AEnemyParentNative> ResolveEliteEnemyClass() const;
+};
+
+/**
+ * Designer-owned encounter director setup. The placed EncounterDirector consumes this and owns pacing decisions.
+ */
+UCLASS(BlueprintType)
+class AEYERJI_API UAeyerjiEncounterDirectorDefinition : public UPrimaryDataAsset
+{
+	GENERATED_BODY()
+
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Setup")
+	TArray<TObjectPtr<UEnemySpawnGroupDefinition>> SpawnGroups;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="s"))
+	float TickIntervalSeconds = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0", Units="cm"))
+	float MinDistanceBetweenEncounters = 1200.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0"))
+	float KillVelocitySpawnFloor = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.01"))
+	float KillVelocitySpawnCeil = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0", Units="cm"))
+	float MinDistanceAtSlow = 1800.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0", Units="cm"))
+	float MinDistanceAtFast = 900.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float MinDowntimeAtSlow = 2.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float MinDowntimeAtFast = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.1", Units="s"))
+	float KillVelocityWindowSeconds = 6.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="1"))
+	int32 MaxGroupsPerTrigger = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float PostCombatDelaySeconds = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="1"))
+	int32 MaxSpawnsPerTick = 5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm"))
+	float MinSpawnDistanceFromPlayer = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning")
+	bool bAvoidRecentPlayerPath = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm"))
+	float RecentPathAvoidRadius = 600.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.1", Units="s"))
+	float RecentPathSeconds = 8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.1", Units="s"))
+	float RecentPathSampleInterval = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="1"))
+	int32 RecentPathMaxSamples = 32;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning")
+	bool bAvoidPlayerForwardSpawnCone = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", ClampMax="180.0", Units="deg"))
+	float ForwardSpawnConeDegrees = 120.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning")
+	bool bUseLineOfSightForForwardCone = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="1"))
+	int32 SpawnLocationSearchAttempts = 12;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm"))
+	float GroundTraceUpOffset = 120.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="10.0", Units="cm"))
+	float GroundTraceDownDistance = 2000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnGroundOffset = 5.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance")
+	bool bEnableEnemyLODThrottling = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.05", Units="s"))
+	float EnemyLODUpdateInterval = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float EnemyLODNearDistance = 4000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float EnemyLODMidDistance = 8000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float EnemyLODFarDistance = 12000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="s"))
+	float EnemyLODMidTickInterval = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="s"))
+	float EnemyLODFarTickInterval = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance")
+	bool bEnableFixedClusterSleeping = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float FixedClusterSleepDistance = 14000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float FixedClusterWakeDistance = 11000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Debug")
+	bool bDrawDebug = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Debug", meta=(ClampMin="0.1", Units="s"))
+	float DebugLogIntervalSeconds = 1.0f;
 };
 
 UENUM(BlueprintType)
@@ -67,6 +201,8 @@ enum class EEncounterDirectorState : uint8
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FFixedClusterClearedSignature, int32, ClusterId, float, DensityAlpha, bool, bDenseCluster);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FFixedPopulationClearedSignature);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FFixedPopulationInitialSpawnCompleteSignature, AAeyerjiEncounterDirector*, Director);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FEncounterProgressChangedSignature, float, Progress01, int32, Killed, int32, Total);
 
 /**
  * Reactive encounter director that monitors player pace and injects new enemy packs on demand.
@@ -81,6 +217,7 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	/** Registers an externally spawned enemy (boss, mini-boss, scripted spawn) so pacing and cleanup logic stay in sync. */
 	UFUNCTION(BlueprintCallable, Category="EncounterDirector")
@@ -102,7 +239,64 @@ public:
 	UFUNCTION(BlueprintPure, Category="EncounterDirector|FixedPopulation")
 	int32 GetFixedPopulationTarget() const { return FixedPopulationTarget; }
 
+	/** Returns true once the initial fixed-population spawn queue has been fully processed. */
+	UFUNCTION(BlueprintPure, Category="EncounterDirector|FixedPopulation")
+	bool IsFixedWorldPopulationInitialSpawnComplete() const { return bFixedPopulationInitialSpawnComplete; }
+
+	/** Returns how many initial fixed-population enemies still need to be spawned. */
+	UFUNCTION(BlueprintPure, Category="EncounterDirector|FixedPopulation")
+	int32 GetFixedPopulationRemainingToSpawn() const { return FixedPopulationRemaining; }
+
+	/** Returns how many enemies have been counted toward the current objective. */
+	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Progress")
+	int32 GetKilledCount() const { return KilledCount; }
+
+	/** Returns the raw objective kill target for gameplay code that needs to distinguish "unset" from "1". */
+	int32 GetTotalToKillRaw() const { return TotalToKill; }
+
+	/** Returns the objective kill target for the current encounter flow. Blueprint-facing version never returns 0 to avoid divide-by-zero UI paths. */
+	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Progress")
+	int32 GetTotalToKill() const;
+
+	/** Returns normalized progress (0..1) based on KilledCount / TotalToKill. */
+	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Progress")
+	float GetProgress01() const;
+
+	/** Builds a coherent objective snapshot for replication into GameState. */
+	FAeyerjiObjectiveState BuildObjectiveStateSnapshot(const AAeyerjiLevelDirector* LevelDirector = nullptr, const AAeyerjiGameState* GameState = nullptr) const;
+
+	/** Pushes the latest coherent objective snapshot into the authoritative GameState. */
+	void PushObjectiveStateToGameState();
+
+	/** Updates the boss-spawned flag for UI objective switching (server authoritative). */
+	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Progress")
+	void SetBossSpawned(bool bInBossSpawned);
+
+	/** Returns true once the active boss phase has spawned a boss actor. */
+	UFUNCTION(BlueprintPure, Category="EncounterDirector|Progress")
+	bool IsBossSpawned() const { return bBossSpawned; }
+
+	/** Registers an enemy for progress tracking without affecting encounter pacing. */
+	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Progress")
+	void RegisterProgressEnemy(AEnemyParentNative* Enemy);
+
+	/** Applies designer-owned pacing/spawn setup from DirectorDefinition. */
+	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Definition")
+	void ApplyDirectorDefinition();
+
+	/** Compact debug string for console tools and temporary widgets. */
+	UFUNCTION(BlueprintPure, Category="EncounterDirector|Debug")
+	FString GetEncounterDirectorDebugString() const;
+
 public:
+	/** Designer-facing pacing and spawn-group setup. */
+	UPROPERTY(BlueprintReadOnly, Category="EncounterDirector|Resolved")
+	TObjectPtr<UAeyerjiEncounterDirectorDefinition> DirectorDefinition = nullptr;
+
+	/** Applies DirectorDefinition during BeginPlay. */
+	UPROPERTY(BlueprintReadOnly, Category="EncounterDirector|Resolved")
+	bool bApplyDirectorDefinitionOnBeginPlay = true;
+
 	/** Fired when a fixed population cluster is cleared. */
 	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|FixedPopulation")
 	FFixedClusterClearedSignature OnFixedClusterCleared;
@@ -110,6 +304,14 @@ public:
 	/** Fired when every fixed population cluster is cleared. */
 	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|FixedPopulation")
 	FFixedPopulationClearedSignature OnFixedPopulationCleared;
+
+	/** Fired once the initial fixed-population spawn queue has finished spawning. */
+	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|FixedPopulation")
+	FFixedPopulationInitialSpawnCompleteSignature OnFixedPopulationInitialSpawnComplete;
+
+	/** Fired when progress or boss state changes so UI can refresh. */
+	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|Progress")
+	FEncounterProgressChangedSignature OnProgressChanged;
 
 protected:
 	/** How often the director ticks (0 = every frame). */
@@ -136,6 +338,7 @@ protected:
 	void SnapActorToGround(AActor* SpawnedActor, float HalfHeight) const;
 	float GetEnemyHalfHeight(TSubclassOf<AEnemyParentNative> EnemyClass) const;
 	float GetKillSpeedAlpha() const;
+	bool RemoveProgressEnemy(AActor* Enemy);
 
 	UFUNCTION()
 	void HandleTrackedEnemyDied(AActor* DeadEnemy);
@@ -308,6 +511,18 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="EncounterDirector|State")
 	int32 ActiveEnemyCount = 0;
 
+	/** Total enemies required to complete the current objective. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ProgressData, Category="EncounterDirector|Progress")
+	int32 TotalToKill = 0;
+
+	/** Enemies killed toward the current objective. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ProgressData, Category="EncounterDirector|Progress")
+	int32 KilledCount = 0;
+
+	/** True once the boss pawn has actually been spawned. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_BossSpawned, Category="EncounterDirector|Progress")
+	bool bBossSpawned = false;
+
 private:
 	struct FFixedSpawnGroupEntry;
 	struct FFixedSpawnRegionEntry;
@@ -319,6 +534,7 @@ private:
 	void RecordKillTimestamp();
 	void BuildFixedPopulationPlan();
 	void ProcessFixedSpawnQueue();
+	AAeyerjiLevelDirector* ResolveObjectiveLevelDirector() const;
 	// Recomputes distance-based tick throttling for active enemies.
 	void UpdateEnemyLOD(float DeltaSeconds);
 	// Sleeps or wakes fixed clusters based on player distance.
@@ -341,7 +557,18 @@ private:
 	void RegisterFixedClusterEnemy(AEnemyParentNative* Enemy, int32 ClusterId);
 	void HandleFixedPopulationEnemyRemoved(AActor* Enemy);
 	void HandleFixedPopulationClusterDecrement(int32 ClusterId);
+	void NotifyFixedPopulationInitialSpawnComplete();
 	FGameplayTag ResolveArchetypeTagFromClass(TSubclassOf<AEnemyParentNative> EnemyClass) const;
+	void ResetProgress(int32 NewTotal);
+	void UpdateTotalToKill(int32 NewTotal);
+	void IncrementKillCount();
+	void HandleProgressChanged();
+
+	UFUNCTION()
+	void HandleProgressEnemyDied(AActor* DeadEnemy);
+
+	UFUNCTION()
+	void HandleProgressEnemyDestroyed(AActor* DestroyedActor);
 
 private:
 	struct FFixedSpawnGroupEntry
@@ -417,6 +644,7 @@ private:
 	TWeakObjectPtr<AController> CachedPlayerController;
 	TWeakObjectPtr<const UEnemySpawnGroupDefinition> LastSpawnedGroup;
 	TArray<TWeakObjectPtr<AActor>> LiveEnemies;
+	TArray<TWeakObjectPtr<AActor>> ProgressOnlyEnemies;
 	TArray<double> KillTimestampHistory;
 	TArray<FRecentPlayerSample> RecentPlayerSamples;
 	TArray<TWeakObjectPtr<const UEnemySpawnGroupDefinition>> PendingSpawnRequests;
@@ -437,6 +665,7 @@ private:
 	int32 FixedClustersRemaining = 0;
 	int32 FixedSpawnSeed = 0;
 	bool bFixedPopulationActive = false;
+	bool bFixedPopulationInitialSpawnComplete = false;
 	bool bFixedPopulationComplete = false;
 	bool bSpawnedPopulationSpawner = false;
 	FVector LastEncounterLocation = FVector::ZeroVector;
@@ -445,4 +674,13 @@ private:
 	double PostCombatTimeRemaining = 0.0;
 	double LastPathSampleTimestamp = 0.0;
 	double LastDebugLogTimestamp = -1.0;
+	int32 LastBroadcastKilled = INDEX_NONE;
+	int32 LastBroadcastTotal = INDEX_NONE;
+	bool bLastBroadcastBossSpawned = false;
+
+	UFUNCTION()
+	void OnRep_ProgressData();
+
+	UFUNCTION()
+	void OnRep_BossSpawned();
 };

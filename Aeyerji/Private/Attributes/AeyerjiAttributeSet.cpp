@@ -5,6 +5,7 @@
 #include "AbilitySystemComponent.h"
 #include "GameplayTagsManager.h"
 #include "Abilities/GA_Death.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 
 UAeyerjiAttributeSet::UAeyerjiAttributeSet()
     : bIsDead(false)
@@ -20,7 +21,7 @@ UAeyerjiAttributeSet::UAeyerjiAttributeSet()
 
     // Establish sensible combat defaults so dependent attributes behave.
     // Convention: AttackSpeed is a rating where 100 == 1 attack/sec; AttackCooldown = 100 / AttackSpeed seconds.
-    InitAttackSpeed(1.f);
+    InitAttackSpeed(100.f);
     InitAttackCooldown(1.f);
     InitAttackDamage(10.f);
 
@@ -28,7 +29,13 @@ UAeyerjiAttributeSet::UAeyerjiAttributeSet()
     InitStrength(0.f);
     InitAgility(0.f);
     InitIntellect(0.f);
-    InitAilment(0.f);
+
+    InitPoisonAmount(0.f);
+    InitPoisonDuration(0.f);
+    InitTraumaAmount(0.f);
+    InitTraumaDuration(0.f);
+    InitCorruptionAmount(0.f);
+    InitCorruptionDuration(0.f);
 
     InitCritChance(0.f);
     InitDodgeChance(0.f);
@@ -37,8 +44,6 @@ UAeyerjiAttributeSet::UAeyerjiAttributeSet()
     InitManaRegen(0.f);
     InitHPRegen(0.f);
     InitCooldownReduction(0.f);
-    InitAilmentDPS(0.f);
-    InitAilmentDuration(0.f);
 
     InitVisionRange(1500.f);
     InitHearingRange(750.f);
@@ -72,7 +77,13 @@ void UAeyerjiAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, Strength                  , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, Agility                   , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, Intellect                , COND_None, REPNOTIFY_Always);
-    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, Ailment                   , COND_None, REPNOTIFY_Always);
+
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, PoisonAmount             , COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, PoisonDuration           , COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, TraumaAmount             , COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, TraumaDuration           , COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, CorruptionAmount         , COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, CorruptionDuration       , COND_None, REPNOTIFY_Always);
 
     // Derived attributes
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, CritChance                , COND_None, REPNOTIFY_Always);
@@ -82,8 +93,6 @@ void UAeyerjiAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, ManaRegen                 , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, HPRegen                   , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, CooldownReduction         , COND_None, REPNOTIFY_Always);
-    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, AilmentDPS                , COND_None, REPNOTIFY_Always);
-    DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, AilmentDuration           , COND_None, REPNOTIFY_Always);
 
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, XP                        , COND_None, REPNOTIFY_Always);
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiAttributeSet, XPMax                     , COND_None, REPNOTIFY_Always);
@@ -150,7 +159,7 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     else if (Attribute == GetLevelAttribute())
     {
         // Keep a sane, non-zero level for scalable float lookups.
-        NewValue = FMath::Clamp(NewValue, 1.f, 999.f);
+        NewValue = static_cast<float>(UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(NewValue)));
     }
 
     // Core attributes are non-negative
@@ -166,7 +175,12 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     {
         NewValue = FMath::Max(0.f, NewValue);
     }
-    else if (Attribute == GetAilmentAttribute())
+    else if (Attribute == GetPoisonAmountAttribute()
+        || Attribute == GetPoisonDurationAttribute()
+        || Attribute == GetTraumaAmountAttribute()
+        || Attribute == GetTraumaDurationAttribute()
+        || Attribute == GetCorruptionAmountAttribute()
+        || Attribute == GetCorruptionDurationAttribute())
     {
         NewValue = FMath::Max(0.f, NewValue);
     }
@@ -194,7 +208,7 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     }
     else if (Attribute == GetMagicAmpAttribute())
     {
-        NewValue = FMath::Clamp(NewValue, 0.f, 1.f);
+        NewValue = FMath::Max(0.f, NewValue);
     }
     else if (Attribute == GetManaRegenAttribute())
     {
@@ -208,14 +222,6 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     {
         // Cap around 40% by design
         NewValue = FMath::Clamp(NewValue, 0.f, 0.40f);
-    }
-    else if (Attribute == GetAilmentDPSAttribute())
-    {
-        NewValue = FMath::Max(0.f, NewValue);
-    }
-    else if (Attribute == GetAilmentDurationAttribute())
-    {
-        NewValue = FMath::Max(0.f, NewValue);
     }
 
     // Keep AttackSpeed and AttackCooldown in sync.

@@ -31,7 +31,8 @@ void ACorridorSplineBuilder::GatherOrCreateSegments(int32 NumNeeded)
 {
 	while (GeneratedSegments.Num() < NumNeeded)
 	{
-		USplineMeshComponent* SMC = NewObject<USplineMeshComponent>(this);
+		const FName SegmentName = MakeUniqueObjectName(this, USplineMeshComponent::StaticClass(), TEXT("CorridorSegment"));
+		USplineMeshComponent* SMC = NewObject<USplineMeshComponent>(this, USplineMeshComponent::StaticClass(), SegmentName);
 		SMC->SetMobility(EComponentMobility::Static);
 		SMC->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepRelativeTransform);
 		SMC->RegisterComponent();

@@ -8,13 +8,16 @@
 #include "AeyerjiGameplayTags.h"
 
 #include "Components/CapsuleComponent.h"
+#include "Engine/GameInstance.h"
 
 #include "Engine/World.h"
 
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GAS/GE_AeyerjiAbilityCooldown.h"
+#include "GAS/GE_AeyerjiAbilityCostMana.h"
+#include "MouseNavBlueprintLibrary.h"
 
 #include "GameplayTagContainer.h"
-#include "Abilities/AeyerjiAbilityData.h"
 
 UGA_AeyerjiBase::UGA_AeyerjiBase()
 
@@ -23,6 +26,7 @@ UGA_AeyerjiBase::UGA_AeyerjiBase()
   // All abilities are blocked while Dead.
 
   ActivationBlockedTags.AddTag(AeyerjiTags::State_Dead);
+  ActivationBlockedTags.AddTag(AeyerjiTags::State_CrowdControl_Stunned);
 
   // Sensible defaults for ARPG skills; tweak as needed.
 
@@ -100,41 +104,87 @@ bool UGA_AeyerjiBase::TryCommitAbilityInternal(
   return false;
 }
 
-void UGA_AeyerjiBase::EvaluateAbilityCostAndCooldown(const UAbilitySystemComponent* ASC, float& OutManaCost, float& OutCooldown) const
+void UGA_AeyerjiBase::EvaluateAbilityCostAndCooldown(const UAbilitySystemComponent*, float& OutManaCost, float& OutCooldown) const
 {
+  if (const FAeyerjiAbilityTableRow* Row = GetAbilityTuningRow())
+  {
+    OutManaCost = FMath::Max(0.f, Row->Cost.ManaCost);
+    OutCooldown = FMath::Max(0.f, Row->Cost.Cooldown);
+    return;
+  }
+
   OutManaCost = 0.f;
   OutCooldown = 0.f;
+}
 
-  const UClass* AbilityClass = GetClass();
-
-  // Locate the first UAeyerjiAbilityData* property on this ability (e.g., BlinkConfig).
-  const FObjectProperty* DataProp = nullptr;
-  for (TFieldIterator<FObjectProperty> It(AbilityClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+FGameplayTag UGA_AeyerjiBase::ResolveAbilityTag() const
+{
+  if (AbilityTag.IsValid())
   {
-    if (It->PropertyClass && It->PropertyClass->IsChildOf(UAeyerjiAbilityData::StaticClass()))
+    return AbilityTag;
+  }
+
+  FGameplayTag BestTag;
+  int32 BestDepth = -1;
+  FGameplayTagContainer Tags = GetAssetTags();
+  for (const FGameplayTag& Tag : Tags)
+  {
+    const FString TagString = Tag.ToString();
+    if (!TagString.StartsWith(TEXT("Ability.")))
     {
-      DataProp = *It;
-      break;
+      continue;
+    }
+
+    int32 Depth = 1;
+    for (const TCHAR Character : TagString)
+    {
+      if (Character == TEXT('.'))
+      {
+        ++Depth;
+      }
+    }
+
+    if (Depth > BestDepth)
+    {
+      BestDepth = Depth;
+      BestTag = Tag;
     }
   }
 
-  if (!DataProp)
-  {
-    return;
-  }
-
-  const UAeyerjiAbilityData* Config = Cast<UAeyerjiAbilityData>(DataProp->GetObjectPropertyValue_InContainer(this));
-  if (!Config)
-  {
-    return;
-  }
-
-  const FAeyerjiAbilityCost AbilityCost = Config->EvaluateCost(ASC);
-  OutManaCost = AbilityCost.ManaCost;
-  OutCooldown = AbilityCost.Cooldown;
+  return BestTag;
 }
 
-void UGA_AeyerjiBase::ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& SpecHandle, float ManaCost, float Cooldown) const
+const FAeyerjiAbilityTableRow* UGA_AeyerjiBase::GetAbilityTuningRow(const UAbilitySystemComponent* ASC) const
+{
+  const FGameplayTag RowTag = ResolveAbilityTag();
+  if (!RowTag.IsValid())
+  {
+    return nullptr;
+  }
+
+  if (ASC)
+  {
+    if (UWorld* World = ASC->GetWorld())
+    {
+      if (UGameInstance* GI = World->GetGameInstance())
+      {
+        if (const UAeyerjiAbilityTuningSubsystem* Tuning = GI->GetSubsystem<UAeyerjiAbilityTuningSubsystem>())
+        {
+          if (const FAeyerjiAbilityTableRow* Row = Tuning->FindAbilityRow(RowTag))
+          {
+            return Row;
+          }
+        }
+      }
+    }
+  }
+
+  return UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
+    UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
+    RowTag);
+}
+
+void UGA_AeyerjiBase::ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& SpecHandle, float InManaCost, float InCooldown) const
 {
   if (!SpecHandle.IsValid() || !SpecHandle.Data.IsValid())
   {
@@ -143,18 +193,14 @@ void UGA_AeyerjiBase::ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& S
 
   FGameplayEffectSpec* Spec = SpecHandle.Data.Get();
 
-  // Only set values if the GE expects them.
-  const FGameplayTag ManaTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Cost.Mana"));
-  const FGameplayTag CooldownTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Cooldown.Seconds"));
-
-  if (ManaTag.IsValid())
+  if (AeyerjiTags::SBC_Cost_Mana.GetTag().IsValid())
   {
-    Spec->SetSetByCallerMagnitude(ManaTag, ManaCost);
+    Spec->SetSetByCallerMagnitude(AeyerjiTags::SBC_Cost_Mana, -FMath::Abs(InManaCost));
   }
 
-  if (CooldownTag.IsValid())
+  if (AeyerjiTags::SBC_CooldownSeconds.GetTag().IsValid())
   {
-    Spec->SetSetByCallerMagnitude(CooldownTag, Cooldown);
+    Spec->SetSetByCallerMagnitude(AeyerjiTags::SBC_CooldownSeconds, FMath::Max(0.f, InCooldown));
   }
 }
 
@@ -177,18 +223,18 @@ bool UGA_AeyerjiBase::CheckCost(const FGameplayAbilitySpecHandle Handle, const F
 
   UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
 
-  float ManaCost = 0.f;
-  float CooldownSeconds = 0.f;
-  EvaluateAbilityCostAndCooldown(ASC, ManaCost, CooldownSeconds);
+  float EvaluatedManaCost = 0.f;
+  float EvaluatedCooldownSeconds = 0.f;
+  EvaluateAbilityCostAndCooldown(ASC, EvaluatedManaCost, EvaluatedCooldownSeconds);
 
   // Simple mana gate to avoid SetByCaller warnings from GE-based checks.
-  if (ManaCost > 0.f)
+  if (EvaluatedManaCost > 0.f)
   {
     const FGameplayAttribute ManaAttr = UAeyerjiAttributeSet::GetManaAttribute();
     if (ASC->HasAttributeSetForAttribute(ManaAttr))
     {
       const float CurrentMana = ASC->GetNumericAttribute(ManaAttr);
-      if (CurrentMana + KINDA_SMALL_NUMBER < ManaCost)
+      if (CurrentMana + KINDA_SMALL_NUMBER < EvaluatedManaCost)
       {
         return false;
       }
@@ -204,6 +250,30 @@ bool UGA_AeyerjiBase::CheckCost(const FGameplayAbilitySpecHandle Handle, const F
   return Super::CheckCost(Handle, ActorInfo, OptionalRelevantTags);
 }
 
+bool UGA_AeyerjiBase::CheckCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags) const
+{
+  const FGameplayTagContainer* CooldownTags = GetCooldownTags();
+  if (CooldownTags && !CooldownTags->IsEmpty() && ActorInfo && ActorInfo->AbilitySystemComponent.IsValid())
+  {
+    const UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
+    const FGameplayEffectQuery Query = FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(*CooldownTags);
+    const TArray<float> RemainingTimes = ASC->GetActiveEffectsTimeRemaining(Query);
+    for (const float RemainingTime : RemainingTimes)
+    {
+      if (RemainingTime > KINDA_SMALL_NUMBER)
+      {
+        if (OptionalRelevantTags)
+        {
+          OptionalRelevantTags->AppendTags(*CooldownTags);
+        }
+        return false;
+      }
+    }
+  }
+
+  return Super::CheckCooldown(Handle, ActorInfo, OptionalRelevantTags);
+}
+
 void UGA_AeyerjiBase::ApplyCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const
 {
   if (!ActorInfo || !ActorInfo->AbilitySystemComponent.IsValid())
@@ -211,14 +281,24 @@ void UGA_AeyerjiBase::ApplyCost(const FGameplayAbilitySpecHandle Handle, const F
     return;
   }
 
-  float ManaCost = 0.f;
-  float CooldownSeconds = 0.f;
-  EvaluateAbilityCostAndCooldown(ActorInfo->AbilitySystemComponent.Get(), ManaCost, CooldownSeconds);
+  float EvaluatedManaCost = 0.f;
+  float EvaluatedCooldownSeconds = 0.f;
+  EvaluateAbilityCostAndCooldown(ActorInfo->AbilitySystemComponent.Get(), EvaluatedManaCost, EvaluatedCooldownSeconds);
 
+  TSubclassOf<UGameplayEffect> CostGEClass = nullptr;
   if (const UGameplayEffect* CostGE = GetCostGameplayEffect())
   {
-    FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CostGE->GetClass(), GetAbilityLevel(Handle, ActorInfo));
-    ApplyAbilitySetByCallerToSpec(SpecHandle, ManaCost, CooldownSeconds);
+    CostGEClass = CostGE->GetClass();
+  }
+  else if (EvaluatedManaCost > 0.f)
+  {
+    CostGEClass = UGE_AeyerjiAbilityCostMana::StaticClass();
+  }
+
+  if (CostGEClass)
+  {
+    FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CostGEClass, GetAbilityLevel(Handle, ActorInfo));
+    ApplyAbilitySetByCallerToSpec(SpecHandle, EvaluatedManaCost, EvaluatedCooldownSeconds);
 
     if (SpecHandle.IsValid())
     {
@@ -234,21 +314,66 @@ void UGA_AeyerjiBase::ApplyCooldown(const FGameplayAbilitySpecHandle Handle, con
     return;
   }
 
-  float ManaCost = 0.f;
-  float CooldownSeconds = 0.f;
-  EvaluateAbilityCostAndCooldown(ActorInfo->AbilitySystemComponent.Get(), ManaCost, CooldownSeconds);
+  float EvaluatedManaCost = 0.f;
+  float EvaluatedCooldownSeconds = 0.f;
+  EvaluateAbilityCostAndCooldown(ActorInfo->AbilitySystemComponent.Get(), EvaluatedManaCost, EvaluatedCooldownSeconds);
 
   // Default path mirrors UGameplayAbility::ApplyCooldown but adds SetByCaller.
+  TSubclassOf<UGameplayEffect> CooldownGEClass = nullptr;
   if (const UGameplayEffect* CooldownGE = GetCooldownGameplayEffect())
   {
-    FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CooldownGE->GetClass(), GetAbilityLevel(Handle, ActorInfo));
-    ApplyAbilitySetByCallerToSpec(SpecHandle, ManaCost, CooldownSeconds);
+    CooldownGEClass = CooldownGE->GetClass();
+  }
+  else if (EvaluatedCooldownSeconds > 0.f)
+  {
+    CooldownGEClass = UGE_AeyerjiAbilityCooldown::StaticClass();
+  }
+
+  if (CooldownGEClass)
+  {
+    FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CooldownGEClass, GetAbilityLevel(Handle, ActorInfo));
+    ApplyAbilitySetByCallerToSpec(SpecHandle, EvaluatedManaCost, EvaluatedCooldownSeconds);
 
     if (SpecHandle.IsValid())
     {
+      if (const FAeyerjiAbilityTableRow* Row = GetAbilityTuningRow(ActorInfo->AbilitySystemComponent.Get()))
+      {
+        const FGameplayTag CooldownTag = UAeyerjiAbilityTuningSubsystem::NormalizeCooldownTag(Row->CooldownTag);
+        if (CooldownTag.IsValid() && SpecHandle.Data.IsValid())
+        {
+          SpecHandle.Data->DynamicGrantedTags.AddTag(CooldownTag);
+        }
+      }
       ApplyGameplayEffectSpecToOwner(Handle, ActorInfo, ActivationInfo, SpecHandle);
     }
   }
+}
+
+const FGameplayTagContainer* UGA_AeyerjiBase::GetCooldownTags() const
+{
+  RuntimeCooldownTags.Reset();
+
+  if (const FAeyerjiAbilityTableRow* Row = GetAbilityTuningRow())
+  {
+    const FGameplayTag CooldownTag = UAeyerjiAbilityTuningSubsystem::NormalizeCooldownTag(Row->CooldownTag);
+    if (CooldownTag.IsValid())
+    {
+      RuntimeCooldownTags.AddTag(CooldownTag);
+    }
+  }
+
+  if (RuntimeCooldownTags.IsEmpty())
+  {
+    return Super::GetCooldownTags();
+  }
+
+  const FGameplayTagContainer* ParentTags = Super::GetCooldownTags();
+  if (ParentTags)
+  {
+    RuntimeCooldownTags.AppendTags(*ParentTags);
+  }
+
+  return &RuntimeCooldownTags;
 }
 
 bool UGA_AeyerjiBase::BP_TryCommitAbility(bool bEndAbilityOnFailure)
@@ -290,68 +415,43 @@ bool UGA_AeyerjiBase::TeleportCharacterSafely(
 
     return false;
   }
-
-  UCapsuleComponent *Capsule = Character->GetCapsuleComponent();
-
-  const float HalfHeight =
-      Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 0.f;
-
-  const float Radius = Capsule ? Capsule->GetScaledCapsuleRadius() : 0.f;
-
   FVector TargetLocation = DesiredLocation;
+  const float DefaultTraceHeight = 200.f;
+  const float DefaultTraceDepth = 300.f;
+  const float TraceHeight =
+      GroundTraceDistance > 0.f ? GroundTraceDistance : DefaultTraceHeight;
+  const float TraceDepth =
+      GroundTraceDistance > 0.f ? GroundTraceDistance : DefaultTraceDepth;
+  const float AdditionalOffset =
+      FMath::Max(2.f, CapsuleInflation);
 
-  if (GroundTraceDistance > 0.f)
+  if (!UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
+          Character,
+          DesiredLocation,
+          Character,
+          TargetLocation,
+          TraceHeight,
+          TraceDepth,
+          AdditionalOffset))
 
   {
 
-    if (UWorld *World = Character->GetWorld())
+    OutFinalLocation = DesiredLocation;
 
-    {
+    return false;
+  }
 
-      const FVector TraceStart =
-          DesiredLocation + FVector::UpVector * HalfHeight;
+  if (!UMouseNavBlueprintLibrary::IsTeleportLocationClear(
+          Character,
+          TargetLocation,
+          Character,
+          CapsuleInflation))
 
-      const FVector TraceEnd =
-          TraceStart - FVector::UpVector * (GroundTraceDistance + HalfHeight);
+  {
 
-      FHitResult Hit;
+    OutFinalLocation = DesiredLocation;
 
-      FCollisionQueryParams Params(SCENE_QUERY_STAT(AeyerjiAbilityGroundTrace),
-                                   false, Character);
-
-      const float CollisionRadius = Radius + FMath::Max(0.f, CapsuleInflation);
-
-      const bool bHit = World->SweepSingleByChannel(
-
-          Hit,
-
-          TraceStart,
-
-          TraceEnd,
-
-          FQuat::Identity,
-
-          ECC_Visibility,
-
-          FCollisionShape::MakeSphere(CollisionRadius),
-
-          Params);
-
-      if (bHit)
-
-      {
-
-        TargetLocation = Hit.ImpactPoint + FVector::UpVector * HalfHeight;
-
-      }
-
-      else
-
-      {
-
-        TargetLocation = TraceEnd + FVector::UpVector * HalfHeight;
-      }
-    }
+    return false;
   }
 
   OutFinalLocation = TargetLocation;
@@ -369,6 +469,7 @@ bool UGA_AeyerjiBase::TeleportCharacterSafely(
     {
 
       MoveComp->StopMovementImmediately();
+      MoveComp->UpdateComponentVelocity();
     }
   }
 

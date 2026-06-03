@@ -34,7 +34,4 @@ UGE_SecondaryStatsFromPrimaries::UGE_SecondaryStatsFromPrimaries()
     Modifiers.Add(MakeSBC(UAeyerjiAttributeSet::GetManaRegenAttribute(),     AeyerjiTags::SBC_PrimaryDerived_ManaRegen));
     // HPRegen from Strength
     Modifiers.Add(MakeSBC(UAeyerjiAttributeSet::GetHPRegenAttribute(),       AeyerjiTags::SBC_PrimaryDerived_HPRegen));
-    // Ailment DPS & Duration from Ailment
-    Modifiers.Add(MakeSBC(UAeyerjiAttributeSet::GetAilmentDPSAttribute(),    AeyerjiTags::SBC_PrimaryDerived_AilmentDPS));
-    Modifiers.Add(MakeSBC(UAeyerjiAttributeSet::GetAilmentDurationAttribute(),AeyerjiTags::SBC_PrimaryDerived_AilmentDuration));
 }

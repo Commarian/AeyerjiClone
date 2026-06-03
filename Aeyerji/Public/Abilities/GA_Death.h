@@ -6,8 +6,8 @@
 #include "GA_Death.generated.h"
 
 /**
- * Passive – automatically activates when the owner gets the State.Dead tag.
- * Plays a montage, rag-dolls (optional) and disables input / collision.
+ * Passive finalization ability triggered by State.Dead.
+ * Native death shutdown happens in ApplyDeathState; this ability only handles delayed cleanup.
  */
 UCLASS()
 class AEYERJI_API UGA_Death : public UGameplayAbility
@@ -17,10 +17,11 @@ class AEYERJI_API UGA_Death : public UGameplayAbility
 public:
 	UGA_Death();
 
-	/** Animation montage to play when we die (optional). */
+	/** Legacy montage reference retained for Blueprint-driven death presentation. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Death")
 	TObjectPtr<UAnimMontage> DeathMontage;
-	/** Delay (seconds) before the pawn is respawned or destroyed. */
+
+	/** Delay (seconds) before the dead pawn is respawned or destroyed. */
 	UPROPERTY(EditDefaultsOnly, Category = "Death")
 	float RespawnDelay = 2.f;      
 
@@ -48,14 +49,6 @@ protected:
 		const FGameplayAbilityActivationInfo ActivationInfo,
 		bool bReplicateEndAbility, bool bWasCancelled) override;
 
-	UFUNCTION()
-	void OnDeathTimeout(FGameplayAbilitySpecHandle Handle,
-						FGameplayAbilityActivationInfo ActivationInfo)
-	{
-		EndAbility(Handle, CurrentActorInfo, ActivationInfo,
-				   /*bReplicateEndAbility=*/true,
-				   /*bWasCancelled=*/false);
-	}
 	/** Server-only callback fired by timer. */
 	UFUNCTION()
 	void Server_FinishDeath();

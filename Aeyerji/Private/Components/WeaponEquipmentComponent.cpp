@@ -2,7 +2,9 @@
 
 #include "Combat/AeyerjiWeaponActor.h"
 #include "Engine/World.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
@@ -67,16 +69,13 @@ void UWeaponEquipmentComponent::EquipFromItem(UAeyerjiItemInstance* Item)
 		return;
 	}
 
-	if (Definition->ItemCategory != EItemCategory::Offense)
+	if (Definition->ItemCategory != EItemCategory::Assault)
 	{
 		UnequipWeapon();
 		return;
 	}
 
-	const FWeaponEquipmentConfig& Config = Definition->WeaponConfig;
-	// Mesh equipping is deprecated; keep anim/movement overrides only.
-	ApplyAnimClass(Config.AnimClass ? Config.AnimClass : DefaultAnimClass);
-	ApplyMovementSettings(Config.Movement);
+	ApplyAnimClass(DefaultAnimClass);
 	DestroyWeaponActor();
 }
 
@@ -97,7 +96,7 @@ void UWeaponEquipmentComponent::UnequipWeapon()
 
 void UWeaponEquipmentComponent::HandleEquippedItemChanged(EEquipmentSlot Slot, int32 /*SlotIndex*/, UAeyerjiItemInstance* Item)
 {
-	if (Slot != EEquipmentSlot::Offense)
+	if (Slot != EEquipmentSlot::Assault)
 	{
 		return;
 	}
@@ -132,35 +131,7 @@ void UWeaponEquipmentComponent::ApplyAnimClass(TSubclassOf<UAnimInstance> AnimCl
 	}
 }
 
-void UWeaponEquipmentComponent::ApplyMovementSettings(const FWeaponMovementSettings& Settings)
-{
-	if (!CachedMovement.IsValid())
-	{
-		return;
-	}
-
-	if (Settings.bOverrideMaxWalkSpeed)
-	{
-		CachedMovement->MaxWalkSpeed = Settings.MaxWalkSpeed;
-	}
-	else
-	{
-		CachedMovement->MaxWalkSpeed = DefaultMovementState.MaxWalkSpeed;
-	}
-
-	if (Settings.bOverrideRotationSettings)
-	{
-		CachedMovement->bOrientRotationToMovement = Settings.bOrientRotationToMovement;
-		CachedMovement->bUseControllerDesiredRotation = Settings.bUseControllerDesiredRotation;
-	}
-	else
-	{
-		CachedMovement->bOrientRotationToMovement = DefaultMovementState.bOrientRotationToMovement;
-		CachedMovement->bUseControllerDesiredRotation = DefaultMovementState.bUseControllerDesiredRotation;
-	}
-}
-
-void UWeaponEquipmentComponent::SpawnOrUpdateWeaponActor(const UItemDefinition* Definition, const FWeaponEquipmentConfig& Config, FName SocketName)
+void UWeaponEquipmentComponent::SpawnOrUpdateWeaponActor(const UItemDefinition* Definition, FName SocketName)
 {
 	if (!GetOwner() || !Definition)
 	{
@@ -170,7 +141,7 @@ void UWeaponEquipmentComponent::SpawnOrUpdateWeaponActor(const UItemDefinition* 
 	const bool bHasAuthority = GetOwner()->HasAuthority();
 	if (bHasAuthority)
 	{
-		TSubclassOf<AAeyerjiWeaponActor> ClassToSpawn = Definition->WeaponActorClass ? Definition->WeaponActorClass : DefaultWeaponActorClass;
+		TSubclassOf<AAeyerjiWeaponActor> ClassToSpawn = DefaultWeaponActorClass;
 		if (!*ClassToSpawn)
 		{
 			DestroyWeaponActor();

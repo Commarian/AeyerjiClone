@@ -28,7 +28,7 @@ struct AEYERJI_API FEnemyAttributeScalingEntry
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|EnemyScaling")
 	float PerLevelAdd = 0.f;
 
-	/** Multiplier from difficulty curve: lerp(DifficultyMinMultiplier, DifficultyMaxMultiplier, dCurved). */
+	/** Legacy difficulty multiplier range kept for backward-compatible data only; runtime now uses the shared world-tier curve. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|EnemyScaling")
 	float DifficultyMinMultiplier = 1.f;
 
@@ -59,15 +59,15 @@ struct AEYERJI_API FEnemyScalingRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|EnemyScaling")
 	FGameplayTag SourceTag;
 
-	/** Base level when difficulty is zero; typically matches the player baseline. */
+	/** Legacy base-level field kept for backward-compatible data only; runtime now uses the shared level curve. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|EnemyScaling", meta = (ClampMin = "1.0"))
 	float BaseLevel = 1.f;
 
-	/** Maximum level advantage applied at the hardest difficulty. */
+	/** Legacy level-advantage field kept for backward-compatible data only; runtime now uses the shared level curve. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|EnemyScaling")
 	float MaxLevelAdvantage = 0.f;
 
-	/** Exponent used for pow(DifficultyScale, DifficultyExponent); >1 pushes gains toward the end of the slider. */
+	/** Legacy exponent field kept for backward-compatible data only; runtime now uses the shared world-tier curve. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|EnemyScaling", meta = (ClampMin = "0.1"))
 	float DifficultyExponent = 1.25f;
 

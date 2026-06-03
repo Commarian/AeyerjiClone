@@ -11,8 +11,6 @@
 
 class UGameplayEffect;
 class UGameplayAbility;
-class UAnimInstance;
-class AAeyerjiWeaponActor;
 class UNiagaraSystem;
 
 UENUM(BlueprintType)
@@ -31,17 +29,19 @@ enum class EItemRarity : uint8
 UENUM(BlueprintType)
 enum class EEquipmentSlot : uint8
 {
-	Offense,
-	Defense,
-	Magic
+	Assault = 0 UMETA(DisplayName = "Assault"),
+	Guard = 1 UMETA(DisplayName = "Guard"),
+	Flow = 2 UMETA(DisplayName = "Flow"),
+	Corruption = 3 UMETA(DisplayName = "Corruption")
 };
 
 UENUM(BlueprintType)
 enum class EItemCategory : uint8
 {
-	Offense,
-	Defense,
-	Magic
+	Assault = 0 UMETA(DisplayName = "Assault"),
+	Guard = 1 UMETA(DisplayName = "Guard"),
+	Flow = 2 UMETA(DisplayName = "Flow"),
+	Corruption = 3 UMETA(DisplayName = "Corruption")
 };
 
 UENUM(BlueprintType)
@@ -68,6 +68,30 @@ struct AEYERJI_API FItemStatModifier
 };
 
 USTRUCT(BlueprintType)
+struct AEYERJI_API FItemSetByCallerMagnitude
+{
+	GENERATED_BODY()
+
+	/** SetByCaller tag to write into the outgoing effect spec. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item|Effects", meta = (Categories = "SetByCaller"))
+	FGameplayTag DataTag;
+
+	/** Magnitude used at item level 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item|Effects")
+	float LevelOneMagnitude = 0.f;
+
+	/** Multiplied by (1 + PerLevelMultiplier * (Level-1)). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item|Effects")
+	float PerLevelMultiplier = 0.f;
+
+	/** Added as (PerLevelAdd * (Level-1)). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item|Effects")
+	float PerLevelAdd = 0.f;
+
+	bool IsValid() const { return DataTag.IsValid(); }
+};
+
+USTRUCT(BlueprintType)
 struct AEYERJI_API FItemGrantedEffect
 {
 	GENERATED_BODY()
@@ -83,6 +107,10 @@ struct AEYERJI_API FItemGrantedEffect
 	/** Optional set of tags to add to the gameplay effect spec when applied. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
 	FGameplayTagContainer ApplicationTags;
+
+	/** Optional SetByCaller magnitudes to inject into the gameplay effect spec. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Item")
+	TArray<FItemSetByCallerMagnitude> SetByCallerMagnitudes;
 
 	bool IsValid() const { return EffectClass != nullptr; }
 };
@@ -170,44 +198,6 @@ struct AEYERJI_API FRolledAffix
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Affix")
 	TArray<FItemGrantedAbility> GrantedAbilities;
-};
-
-USTRUCT(BlueprintType)
-struct AEYERJI_API FWeaponMovementSettings
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	bool bOverrideMaxWalkSpeed = false;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (EditCondition = "bOverrideMaxWalkSpeed", ClampMin = "0.0"))
-	float MaxWalkSpeed = 500.f;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	bool bOverrideRotationSettings = false;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (EditCondition = "bOverrideRotationSettings"))
-	bool bOrientRotationToMovement = true;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon", meta = (EditCondition = "bOverrideRotationSettings"))
-	bool bUseControllerDesiredRotation = false;
-};
-
-USTRUCT(BlueprintType)
-struct AEYERJI_API FWeaponEquipmentConfig
-{
-	GENERATED_BODY()
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	FName EquippedSocket = NAME_None;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	TSubclassOf<UAnimInstance> AnimClass;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Weapon")
-	FWeaponMovementSettings Movement;
-
-	bool HasValidSocket() const { return EquippedSocket != NAME_None; }
 };
 
 USTRUCT(BlueprintType)

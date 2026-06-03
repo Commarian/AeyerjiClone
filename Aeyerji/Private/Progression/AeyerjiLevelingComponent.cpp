@@ -5,10 +5,16 @@
 #include "GameplayEffect.h"
 #include "GameplayEffectTypes.h"
 
+#include "Aeyerji/AeyerjiSaveGame.h"
 #include "Engine/CurveTable.h"           // FCurveTableRowHandle (5.6)
+#include "Engine/GameInstance.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerState.h"
 
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
+#include "Systems/AeyerjiSaveManagerSubsystem.h"
 
 UAeyerjiLevelingComponent::UAeyerjiLevelingComponent()
 {
@@ -29,7 +35,11 @@ void UAeyerjiLevelingComponent::BeginPlay()
     {
         if (const UAeyerjiAttributeSet* Attr = GetAttr())
         {
-            const int32 Level  = FMath::RoundToInt(Attr->GetLevel());
+            const int32 Level = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
+            if (!FMath::IsNearlyEqual(Attr->GetLevel(), static_cast<float>(Level)))
+            {
+                ServerSetLevel(Level);
+            }
             const float NewMax = ComputeXPMaxForLevel(Level);
             if (NewMax > 0.f)
             {
@@ -60,13 +70,13 @@ void UAeyerjiLevelingComponent::AddXP(float DeltaXP)
     const UAeyerjiAttributeSet* Attr = GetAttr();
     if (!ASC || !Attr) return;
 
-    int32 Level = FMath::RoundToInt(Attr->GetLevel());
+    int32 Level = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
     const int32 OldLevel = Level;
     float XP    = Attr->GetXP() + DeltaXP;
     float XPMax = Attr->GetXPMax();
 
     bool bLeveled = false;
-    while (XP >= XPMax && Level < 999)
+    while (XP >= XPMax && Level < UAeyerjiDifficultySettings::GetMaxGameplayLevel())
     {
         XP    -= XPMax;
         Level += 1;
@@ -88,6 +98,8 @@ void UAeyerjiLevelingComponent::AddXP(float DeltaXP)
         ReapplyInfiniteEffects();
         OnLevelUp.Broadcast(OldLevel, Level);
     }
+
+    SyncProfileProgressionCache(TEXT("AddXP"));
 }
 
 void UAeyerjiLevelingComponent::SetLevel(int32 NewLevel)
@@ -97,10 +109,10 @@ void UAeyerjiLevelingComponent::SetLevel(int32 NewLevel)
         return;
     }
 
-    NewLevel = FMath::Clamp(NewLevel, 1, 999);
+    NewLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(NewLevel);
 
     const UAeyerjiAttributeSet* Attr = GetAttr();
-    const int32 OldLevel = Attr ? FMath::RoundToInt(Attr->GetLevel()) : 1;
+    const int32 OldLevel = Attr ? UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel())) : 1;
 
     ServerSetLevel(NewLevel);
 
@@ -118,6 +130,7 @@ void UAeyerjiLevelingComponent::SetLevel(int32 NewLevel)
     ReapplyInfiniteEffects();
 
     OnLevelUp.Broadcast(OldLevel, NewLevel);
+    SyncProfileProgressionCache(TEXT("SetLevel"));
 }
 
 /* ---------- Internals ---------- */
@@ -187,13 +200,13 @@ void UAeyerjiLevelingComponent::TryProcessLevelUps()
     UAbilitySystemComponent* ASC     = GetASC();
     if (!Attr || !ASC) return;
 
-    int32 Level = FMath::RoundToInt(Attr->GetLevel());
+    int32 Level = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
     float XP    = Attr->GetXP();
     float XPMax = Attr->GetXPMax();
 
     bool bLeveled = false;
 
-    while (XP >= XPMax && Level < 999)
+    while (XP >= XPMax && Level < UAeyerjiDifficultySettings::GetMaxGameplayLevel())
     {
         XP    -= XPMax;
         Level += 1;
@@ -203,7 +216,7 @@ void UAeyerjiLevelingComponent::TryProcessLevelUps()
 
     if (bLeveled)
     {
-        const int32 OldLevel = FMath::RoundToInt(Attr->GetLevel());
+        const int32 OldLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
 
         ServerSetLevel(Level);
         ServerSetXPMax(XPMax);
@@ -213,6 +226,7 @@ void UAeyerjiLevelingComponent::TryProcessLevelUps()
         ReapplyInfiniteEffects();
 
         OnLevelUp.Broadcast(OldLevel, Level);
+        SyncProfileProgressionCache(TEXT("ProcessLevelUps"));
     }
 }
 
@@ -222,7 +236,7 @@ void UAeyerjiLevelingComponent::RefreshOwnedAbilities() const
     const UAeyerjiAttributeSet* Attr     = GetAttr();
     if (!ASC || !Attr) return;
 
-    const int32 CurrentLevel = FMath::RoundToInt(Attr->GetLevel());
+    const int32 CurrentLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
 
     for (const FLevelScaledAbility& Def : AbilitiesToOwn)
     {
@@ -254,7 +268,7 @@ void UAeyerjiLevelingComponent::ReapplyInfiniteEffects() const
     const UAeyerjiAttributeSet* Attr     = GetAttr();
     if (!ASC || !Attr) return;
 
-    const int32 CurrentLevel = FMath::RoundToInt(Attr->GetLevel());
+    const int32 CurrentLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
 
     for (TSubclassOf<UGameplayEffect> GEClass : ReapplyInfiniteEffectsOnLevelUp)
     {
@@ -304,6 +318,70 @@ void UAeyerjiLevelingComponent::ServerSetLevel(int32 NewLevel) const
     {
         ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetLevelAttribute(), (float)NewLevel);
     }
+}
+
+void UAeyerjiLevelingComponent::SyncProfileProgressionCache(const TCHAR* Reason) const
+{
+    AActor* Owner = GetOwner();
+    if (!Owner || !Owner->HasAuthority())
+    {
+        return;
+    }
+
+    const UAeyerjiAttributeSet* Attr = GetAttr();
+    if (!Attr)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[ProfileXP] CacheSync skipped Reason=%s Owner=%s Detail=MissingAttributeSet"),
+            Reason ? Reason : TEXT("Unknown"),
+            *GetNameSafe(Owner));
+        return;
+    }
+
+    const APawn* PawnOwner = Cast<APawn>(Owner);
+    const APlayerState* PlayerState = PawnOwner ? PawnOwner->GetPlayerState() : Cast<APlayerState>(Owner);
+    if (!PlayerState)
+    {
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[ProfileXP] CacheSync skipped Reason=%s Owner=%s Detail=NoPlayerState Level=%d XP=%.2f"),
+            Reason ? Reason : TEXT("Unknown"),
+            *GetNameSafe(Owner),
+            UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel())),
+            Attr->GetXP());
+        return;
+    }
+
+    UWorld* World = GetWorld();
+    UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+    UAeyerjiSaveManagerSubsystem* SaveManager =
+        GameInstance ? GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>() : nullptr;
+    if (!SaveManager)
+    {
+        return;
+    }
+
+    UAeyerjiSaveGame* CachedProfile = nullptr;
+    if (!SaveManager->GetServerCachedProfile(PlayerState, CachedProfile) || !CachedProfile)
+    {
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[ProfileXP] CacheSync skipped Reason=%s PlayerState=%s Detail=NoServerCachedProfile Level=%d XP=%.2f"),
+            Reason ? Reason : TEXT("Unknown"),
+            *GetNameSafe(PlayerState),
+            UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel())),
+            Attr->GetXP());
+        return;
+    }
+
+    CachedProfile->Attributes.Level = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
+    CachedProfile->Attributes.XP = FMath::Max(0.f, Attr->GetXP());
+    UE_LOG(LogTemp, Display,
+        TEXT("[ProfileXP] CacheSync Reason=%s PlayerState=%s Level=%d XP=%.2f XPMax=%.2f Revision=%lld"),
+        Reason ? Reason : TEXT("Unknown"),
+        *GetNameSafe(PlayerState),
+        CachedProfile->Attributes.Level,
+        CachedProfile->Attributes.XP,
+        Attr->GetXPMax(),
+        CachedProfile->Revision);
 }
 
 void UAeyerjiLevelingComponent::AddReapplyInfiniteEffect(TSubclassOf<UGameplayEffect> GEClass)

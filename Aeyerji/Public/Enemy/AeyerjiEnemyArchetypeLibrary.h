@@ -6,6 +6,8 @@
 
 #include "AeyerjiEnemyArchetypeLibrary.generated.h"
 
+class AActor;
+
 /**
  * Library entry that mirrors UAeyerjiEnemyArchetypeData fields for bulk editing.
  */
@@ -79,6 +81,10 @@ struct AEYERJI_API FAeyerjiEnemyArchetypeEntry
 	// Optional mesh/animation overrides for the pawn's skeletal mesh component.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Visuals")
 	FAeyerjiEnemyMeshOverrides MeshOverrides;
+
+	// Optional actor class to spawn when this enemy dies, such as a geometry collection corpse or gib actor.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Death", meta=(ToolTip="Optional actor class to spawn when this enemy dies, such as a geometry collection corpse or gib actor."))
+	TSubclassOf<AActor> DeadBodyActorClass;
 
 	// Stat multipliers applied after EnemyScalingTable values are computed.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Stats")

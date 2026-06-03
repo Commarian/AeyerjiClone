@@ -6,10 +6,9 @@
 #include "Aeyerji/AeyerjiPlayerController.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
-#include "Abilities/Blink/DA_Blink.h"
+#include "Abilities/AeyerjiAbilityTuning.h"
 #include "Abilities/Blink/GABlink.h"
 #include "Abilities/GameplayAbility.h"
-#include "Abilities/GravitonPull/DA_AGGravitonPull.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Attributes/AttributeSet_Ranges.h"
 #include "CharacterStatsLibrary.h"
@@ -280,55 +279,62 @@ void UAeyerjiTargetingManager::StopRangePreview()
 
 float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbilitySlot& Slot) const
 {
-	// Queries CDO/data assets to find a usable preview range for the ability slot.
+	// Query the global ability table first; legacy reflection is intentionally not used.
 	float Range = 0.f;
+
+	FGameplayTag AbilityTag;
+	for (const FGameplayTag& Tag : Slot.Tag)
+	{
+		if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
+		{
+			AbilityTag = Tag;
+			break;
+		}
+	}
+
+	if (const FAeyerjiAbilityTableRow* Row = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
+		UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
+		AbilityTag))
+	{
+		Range = FMath::Max(Row->PreviewRange, Row->MaxRange);
+	}
 
 	if (Slot.Class)
 	{
 		if (const UGameplayAbility* AbilityCDO = Slot.Class->GetDefaultObject<UGameplayAbility>())
 		{
-			if (const UAbilitySystemComponent* ASC = GetControlledAbilitySystem())
+			if (!AbilityTag.IsValid())
 			{
-				const FObjectProperty* BlinkDAProp = FindFProperty<FObjectProperty>(Slot.Class, TEXT("BlinkConfig"));
-				if (!BlinkDAProp)
+				int32 BestDepth = -1;
+				for (const FGameplayTag& Tag : AbilityCDO->GetAssetTags())
 				{
-					for (TFieldIterator<FObjectProperty> It(Slot.Class, EFieldIteratorFlags::IncludeSuper); It; ++It)
+					const FString TagString = Tag.ToString();
+					if (!TagString.StartsWith(TEXT("Ability.")))
 					{
-						if (It->PropertyClass && It->PropertyClass->IsChildOf(UDA_Blink::StaticClass()))
+						continue;
+					}
+
+					int32 Depth = 1;
+					for (const TCHAR Character : TagString)
+					{
+						if (Character == TEXT('.'))
 						{
-							BlinkDAProp = *It;
-							break;
+							++Depth;
 						}
+					}
+
+					if (Depth > BestDepth)
+					{
+						BestDepth = Depth;
+						AbilityTag = Tag;
 					}
 				}
 
-				if (BlinkDAProp && BlinkDAProp->PropertyClass->IsChildOf(UDA_Blink::StaticClass()))
+				if (const FAeyerjiAbilityTableRow* Row = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
+					UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
+					AbilityTag))
 				{
-					if (const UDA_Blink* BlinkDA = Cast<UDA_Blink>(BlinkDAProp->GetObjectPropertyValue_InContainer(AbilityCDO)))
-					{
-						float DAValue = BlinkDA->Tunables.MaxRange;
-
-						const FRichCurve* Curve = BlinkDA->Tunables.RangeByLevel.GetRichCurveConst();
-						if (Curve && Curve->GetNumKeys() > 0)
-						{
-							const float Level = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetLevelAttribute());
-							DAValue = Curve->Eval(Level, BlinkDA->Tunables.MaxRange);
-						}
-
-						DAValue *= FMath::Max(0.0f, BlinkDA->Tunables.RangeScalar);
-						Range = FMath::Max(Range, DAValue);
-					}
-				}
-			}
-
-			if (const FObjectProperty* GravProp = FindFProperty<FObjectProperty>(Slot.Class, TEXT("GravitonConfig")))
-			{
-				if (GravProp->PropertyClass && GravProp->PropertyClass->IsChildOf(UDA_AGGravitonPull::StaticClass()))
-				{
-					if (const UDA_AGGravitonPull* GravDA = Cast<UDA_AGGravitonPull>(GravProp->GetObjectPropertyValue_InContainer(AbilityCDO)))
-					{
-						Range = FMath::Max(Range, GravDA->Tunables.MaxRange);
-					}
+					Range = FMath::Max(Range, FMath::Max(Row->PreviewRange, Row->MaxRange));
 				}
 			}
 
@@ -344,23 +350,7 @@ float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbility
 				}
 			}
 
-			auto TryReadFloatProperty = [&](const TCHAR* PropName)
-			{
-				if (const FProperty* Prop = Slot.Class->FindPropertyByName(PropName))
-				{
-					if (const FFloatProperty* FloatProp = CastField<FFloatProperty>(Prop))
-					{
-						Range = FMath::Max(Range, FloatProp->GetFloatingPointPropertyValue(FloatProp->ContainerPtrToValuePtr<void>(AbilityCDO)));
-					}
-				}
-			};
-
-			TryReadFloatProperty(TEXT("MaxBlinkDistance"));
-			TryReadFloatProperty(TEXT("MaxRange"));
-			TryReadFloatProperty(TEXT("Range"));
-			TryReadFloatProperty(TEXT("DefaultBlinkRange"));
-			TryReadFloatProperty(TEXT("BlinkRange"));
-			TryReadFloatProperty(TEXT("BlinkDistance"));
+			(void)AbilityCDO;
 		}
 	}
 

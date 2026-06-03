@@ -45,13 +45,13 @@ struct AEYERJI_API FLootContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	FGameplayTag SourceTag;
 
+	/** Optional named pity bucket, e.g. Loot.Pity.BossUnique or Loot.Pity.ProgressionKey. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	FGameplayTag PityGroup;
+
 	/** Optional: force a specific item definition for this roll (bypasses pool lookup). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	TObjectPtr<UItemDefinition> ForcedItemDefinition = nullptr;
-
-	/** Optional: force a specific item id for this roll (used when ForcedItemDefinition not set). */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
-	FName ForcedItemId = NAME_None;
 
 	/** Optional: base legendary chance for this source (0-1). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
@@ -60,6 +60,10 @@ struct AEYERJI_API FLootContext
 	/** Optional: minimum rarity gate for this roll. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	EItemRarity MinimumRarity = EItemRarity::Common;
+
+	/** Minimum rarity that counts as a success for PityGroup memory. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	EItemRarity PitySuccessRarity = EItemRarity::Legendary;
 
 	/** Optional: non-legendary rarity weights used when no legendary is rolled. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
@@ -75,6 +79,22 @@ struct AEYERJI_API FLootContext
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	int32 ItemLevelJitterMax = 2;
+
+	/** Override for named pity soft start. -1 uses LootService defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	int32 PitySoftStartOverride = -1;
+
+	/** Override for named pity chance added per miss beyond soft start. Negative uses LootService defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	float PitySoftSlopeOverride = -1.f;
+
+	/** Override for named hard pity. -1 uses LootService defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")
+	int32 PityHardAttemptsOverride = -1;
+
+	/** Override for named pity probability cap. Negative uses LootService defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PityMaxChanceOverride = -1.f;
 };
 
 /** Bucket definition used by multi-drop rolls (e.g. force 1 legendary, 3 commons, etc.). */
@@ -99,7 +119,7 @@ struct AEYERJI_API FLootMultiDropBucket
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|MultiDrop")
 	EItemRarity MinimumRarity = EItemRarity::Common;
 
-	/** Prevent duplicates within this bucket (uses ItemId/Definition->ItemId as the key). */
+	/** Prevent duplicates within this bucket (uses asset-derived definition keys). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|MultiDrop")
 	bool bUniqueWithinBucket = false;
 
@@ -122,7 +142,7 @@ struct AEYERJI_API FLootMultiDropConfig
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|MultiDrop", meta = (ClampMin = "0"))
 	int32 TotalVariance = 0;
 
-	/** If true, enforce uniqueness across all drops (uses ItemId/Definition->ItemId). */
+	/** If true, enforce uniqueness across all drops (uses asset-derived definition keys). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|MultiDrop")
 	bool bRequireTotalUnique = false;
 

@@ -13,6 +13,7 @@ class UAbilitySystemComponent;
 class UGameplayAbility;
 class AActor;
 class AController;
+class APawn;
 
 /**
 	Works together with @GetAttributeForAeyerjiStat in CharacterStatsLibrary.cpp
@@ -23,9 +24,6 @@ enum class EAeyerjiStat : uint8
 {
     None                                UMETA(DisplayName = "None"),
     Agility                             UMETA(DisplayName = "Agility"),
-    Ailment                             UMETA(DisplayName = "Ailment"),
-    AilmentDPS                          UMETA(DisplayName = "Ailment DPS"),
-    AilmentDuration                     UMETA(DisplayName = "Ailment Duration"),
     Armor                               UMETA(DisplayName = "Armor"),
     AttackAngle                         UMETA(DisplayName = "Attack Angle"),
     AttackCooldown                      UMETA(DisplayName = "Attack Cooldown"),
@@ -40,6 +38,12 @@ enum class EAeyerjiStat : uint8
     HPMax                               UMETA(DisplayName = "HP Max"),
     HPRegen                             UMETA(DisplayName = "HP Regen"),
     Intellect                           UMETA(DisplayName = "Intellect"),
+    PoisonAmount                        UMETA(DisplayName = "Poison Amount"),
+    PoisonDuration                      UMETA(DisplayName = "Poison Duration"),
+    TraumaAmount                        UMETA(DisplayName = "Trauma Amount"),
+    TraumaDuration                      UMETA(DisplayName = "Trauma Duration"),
+    CorruptionAmount                    UMETA(DisplayName = "Corruption Amount"),
+    CorruptionDuration                  UMETA(DisplayName = "Corruption Duration"),
     Level                               UMETA(DisplayName = "Level"),
     Mana                                UMETA(DisplayName = "Mana"),
     ManaMax                             UMETA(DisplayName = "Mana Max"),
@@ -66,6 +70,9 @@ public:
 	/* ───────────────────────── Existing API (unchanged) ───────────────────────── */
 
 	UFUNCTION(BlueprintPure, Category="SaveGame")
+	static FString MakeStableOwnerKey(const class APlayerState* PS);
+
+	UFUNCTION(BlueprintPure, Category="SaveGame")
 	static FString MakeStableCharSlotName(const class APlayerState* PS);
 	
 	UFUNCTION(BlueprintCallable, Category="SaveGame")
@@ -79,14 +86,30 @@ public:
 	UFUNCTION(BlueprintCallable, Category="SaveGame")
 	static UAeyerjiSaveGame* LoadOrCreateAeyerjiSave(const FString& Slot, UPARAM(ref) bool& bOutLoadedFromDisk);
 
+	/** Captures authoritative runtime state into an existing save object without performing storage I/O. */
+	static bool BuildAeyerjiSaveDataFromRuntime(UAeyerjiSaveGame* Data,
+	                                            const class AAeyerjiPlayerState* PS,
+	                                            const FString& Slot,
+	                                            const APawn* SourcePawn = nullptr);
+
 	UFUNCTION(BlueprintCallable, Category="SaveGame")
 	static void SaveAeyerjiChar(UAeyerjiSaveGame* Data,
 	                            const class AAeyerjiPlayerState* PS,
 	                            FString Slot);
 
-	/** Returns the saved difficulty slider (0..1000) and normalized scale (0..1) if one was set; false otherwise. */
+	/** Saves character data from an explicit pawn source so respawn/shutdown paths do not rely on PlayerState->GetPawn(). */
+	static void SaveAeyerjiCharFromPawn(UAeyerjiSaveGame* Data,
+	                                    const class AAeyerjiPlayerState* PS,
+	                                    const FString& Slot,
+	                                    const APawn* SourcePawn);
+
+	/** Returns the persisted legacy difficulty slider (0..1000) and normalized slider scale (0..1). Falls back to the Normal world-tier alias when no prior value exists. */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Difficulty", meta=(WorldContext="WorldContextObject"))
 	static bool GetSavedDifficulty(const UObject* WorldContextObject, float& OutSlider, float& OutScale);
+
+	/** Returns the authoritative persisted world tier (0..999), defaulting via the same fallback path as GetSavedDifficulty. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Difficulty", meta=(WorldContext="WorldContextObject"))
+	static bool GetSavedWorldTier(const UObject* WorldContextObject, int32& OutWorldTier);
 
 	/** Records a new best (lowest) completed run time for the given difficulty slider on this player's save slot. Server-authoritative (writes SaveGame on the server instance). */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Run|Persistence")
@@ -95,6 +118,10 @@ public:
 	/** Looks up the best (lowest) completed run time for the given difficulty slider on this player's save slot. */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Run|Persistence")
 	static bool GetBestRunTimeSecondsForDifficulty(const class AAeyerjiPlayerState* PS, float DifficultySlider, float& OutBestRunTimeSeconds);
+
+	/** Captures the current character state, appends a finished run record, updates best times, and saves once. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Run|Persistence")
+	static bool RecordCompletedRunAndSaveCharacter(const class AAeyerjiPlayerState* PS, const FAeyerjiRunResults& Results);
 
 	static int32 TagDepth(const FGameplayTag& Tag);
 
@@ -120,7 +147,7 @@ public:
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Stats", meta=(DefaultToSelf="Actor"))
 	static class UPlayerStatsTrackingComponent* GetPlayerStatsTracking(const AActor* Actor);
 
-	/** Returns true if the player has ever picked up the given item id (lifetime, per current save). */
+	/** Returns true if the player has ever picked up the given item definition key (lifetime, per current save). */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Stats", meta=(DefaultToSelf="Actor"))
 	static bool HasPlayerPickedUpItemId(const AActor* Actor, FName ItemId);
 
@@ -128,12 +155,16 @@ public:
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Service", meta=(WorldContext="WorldContextObject"))
 	static class ULootService* GetLootService(UObject* WorldContextObject);
 
-	/** Resolves an item definition from a loot result (ItemDefinition pointer or ItemId). */
+	/** Resolves an item definition from a loot result (ItemDefinition pointer or asset-derived definition key). */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Loot|Items")
 	static class UItemDefinition* GetDefinitionFromLootResult(const FLootDropResult& Result);
 
-	/** Resolves an item definition by item id using the asset manager. */
+	/** Resolves an item definition by asset-derived definition key using the asset manager. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Loot|Items", meta=(WorldContext="WorldContextObject"))
+	static class UItemDefinition* ResolveItemDefinitionByKey(UObject* WorldContextObject, FName ItemDefinitionKey);
+
+	/** Deprecated compatibility wrapper for ResolveItemDefinitionByKey. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Loot|Items", meta=(WorldContext="WorldContextObject", DeprecatedFunction, DeprecationMessage="Use ResolveItemDefinitionByKey."))
 	static class UItemDefinition* ResolveItemDefinitionById(UObject* WorldContextObject, FName ItemId);
     /** Blueprint helper that looks up a numeric Aeyerji stat on any actor that exposes an ASC. */
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Stats", meta=(DefaultToSelf="Actor", ExpandBoolAsExecs="ReturnValue", DisplayName="Get Aeyerji Stat From Actor"))

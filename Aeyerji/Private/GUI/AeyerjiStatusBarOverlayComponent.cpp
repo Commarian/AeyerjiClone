@@ -4,9 +4,93 @@
 #include "GUI/W_AeyerjiStatusBar.h"
 #include "AbilitySystemInterface.h"
 #include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 #include "Kismet/GameplayStatics.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
 #include "GUI/AeyerjiFloatingStatusBarComponent.h"
+#include "Engine/Engine.h"
+
+namespace
+{
+    void ReportStatusBarProblem(const UObject* Context, const FString& Message)
+    {
+        const FString FullMessage = FString::Printf(TEXT("%s: %s"), *GetNameSafe(Context), *Message);
+        UE_LOG(LogTemp, Warning, TEXT("StatusBarOverlay: %s"), *FullMessage);
+
+        if (GEngine)
+        {
+            const FString ScreenMessage = FString::Printf(TEXT("StatusBarOverlay: %s"), *FullMessage);
+            GEngine->AddOnScreenDebugMessage(
+                static_cast<int32>(GetTypeHash(ScreenMessage)),
+                8.f,
+                FColor::Red,
+                ScreenMessage);
+        }
+    }
+
+    void BindOverlayWidget(UW_AeyerjiStatusBar* Widget, UAeyerjiFloatingStatusBarComponent* Source, AActor* Target)
+    {
+        if (!Widget || !Source || !Target)
+        {
+            return;
+        }
+
+        UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Target, /*LookForComponent=*/true);
+        if (!ASC)
+        {
+            if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Target))
+            {
+                ASC = ASI->GetAbilitySystemComponent();
+            }
+        }
+        if (!ASC)
+        {
+            return;
+        }
+
+        const FGameplayAttribute XPAttr = Source->GetXPAttr();
+        const FGameplayAttribute XPMaxAttr = Source->GetXPMaxAttr();
+        const FGameplayAttribute LevelAttr = Source->GetLevelAttr();
+
+        if (XPAttr.IsValid() && XPMaxAttr.IsValid() && LevelAttr.IsValid())
+        {
+            Widget->BindToAttributesWithXPAndLevel(
+                ASC,
+                Source->GetHealthAttr(),
+                Source->GetMaxHealthAttr(),
+                Source->GetManaAttr(),
+                Source->GetMaxManaAttr(),
+                XPAttr,
+                XPMaxAttr,
+                LevelAttr);
+        }
+        else if (XPAttr.IsValid() && XPMaxAttr.IsValid())
+        {
+            Widget->BindToAttributesWithXP(
+                ASC,
+                Source->GetHealthAttr(),
+                Source->GetMaxHealthAttr(),
+                Source->GetManaAttr(),
+                Source->GetMaxManaAttr(),
+                XPAttr,
+                XPMaxAttr);
+        }
+        else
+        {
+            Widget->BindToAttributes(
+                ASC,
+                Source->GetHealthAttr(),
+                Source->GetMaxHealthAttr(),
+                Source->GetManaAttr(),
+                Source->GetMaxManaAttr());
+        }
+
+        if (Source->GetHPRegenAttr().IsValid() && Source->GetManaRegenAttr().IsValid())
+        {
+            Widget->BindRegenAttributes(ASC, Source->GetHPRegenAttr(), Source->GetManaRegenAttr());
+        }
+    }
+}
 
 UAeyerjiStatusBarOverlayComponent::UAeyerjiStatusBarOverlayComponent()
 {
@@ -34,74 +118,79 @@ void UAeyerjiStatusBarOverlayComponent::EndPlay(const EEndPlayReason::Type EndPl
 UW_AeyerjiStatusBar* UAeyerjiStatusBarOverlayComponent::RegisterSource(UAeyerjiFloatingStatusBarComponent* Source)
 {
     APlayerController* PC = GetPC();
-    if (!PC || !Source) return nullptr;
+    if (!PC)
+    {
+        ReportStatusBarProblem(this, TEXT("Overlay component is not owned by a valid local PlayerController."));
+        return nullptr;
+    }
+
+    if (!Source)
+    {
+        ReportStatusBarProblem(this, TEXT("Tried to register a null floating status bar source."));
+        return nullptr;
+    }
 
     AActor* Target = Source->GetOwner();
-    if (!IsValid(Target)) return nullptr;
+    if (!IsValid(Target))
+    {
+        ReportStatusBarProblem(Source, TEXT("Floating status bar source has no valid owning actor."));
+        return nullptr;
+    }
 
     TSubclassOf<UW_AeyerjiStatusBar> WidgetClass = Source->GetStatusBarWidgetClass();
     if (!*WidgetClass) WidgetClass = DefaultWidgetClass;
-    if (!*WidgetClass) return nullptr;
-
-    // Build widget for this client
-    UW_AeyerjiStatusBar* W = CreateWidget<UW_AeyerjiStatusBar>(PC, WidgetClass);
-    if (!W) return nullptr;
-
-    // Add to viewport and align bottom-center
-    W->AddToViewport(BaseZOrder + Source->GetOverlayZOrder());
-    W->SetAlignmentInViewport(FVector2D(0.5f, 0.0f));
-    W->SetVisibility(ESlateVisibility::Visible);
-
-    // Bind attributes
-    UAbilitySystemComponent* ASC = nullptr;
-    if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Target))
+    if (!*WidgetClass)
     {
-        ASC = ASI->GetAbilitySystemComponent();
+        ReportStatusBarProblem(
+            Source,
+            FString::Printf(
+                TEXT("No widget class set for %s. Assign StatusBarWidgetClass on the source BP or DefaultWidgetClass on the overlay manager."),
+                *GetNameSafe(Target)));
+        return nullptr;
     }
-    if (ASC)
-    {
-        const FGameplayAttribute XPAttr     = Source->GetXPAttr();
-        const FGameplayAttribute XPMaxAttr  = Source->GetXPMaxAttr();
-        const FGameplayAttribute LevelAttr  = Source->GetLevelAttr();
 
-        if (XPAttr.IsValid() && XPMaxAttr.IsValid() && LevelAttr.IsValid())
+    FTracked* Existing = nullptr;
+    for (FTracked& Entry : Tracked)
+    {
+        if (Entry.Source.Get() == Source)
         {
-            W->BindToAttributesWithXPAndLevel(
-                ASC,
-                Source->GetHealthAttr(),
-                Source->GetMaxHealthAttr(),
-                Source->GetManaAttr(),
-                Source->GetMaxManaAttr(),
-                XPAttr,
-                XPMaxAttr,
-                LevelAttr);
+            Existing = &Entry;
+            break;
         }
-        else if (XPAttr.IsValid() && XPMaxAttr.IsValid())
+    }
+
+    UW_AeyerjiStatusBar* W = Existing ? Existing->Widget.Get() : nullptr;
+    if (!W)
+    {
+        // Build widget for this client
+        W = CreateWidget<UW_AeyerjiStatusBar>(PC, WidgetClass);
+        if (!W)
         {
-            W->BindToAttributesWithXP(
-                ASC,
-                Source->GetHealthAttr(),
-                Source->GetMaxHealthAttr(),
-                Source->GetManaAttr(),
-                Source->GetMaxManaAttr(),
-                XPAttr,
-                XPMaxAttr);
+            ReportStatusBarProblem(
+                Source,
+                FString::Printf(
+                    TEXT("Failed to create status bar widget %s for %s."),
+                    *GetNameSafe(WidgetClass.Get()),
+                    *GetNameSafe(Target)));
+            return nullptr;
         }
-        
-        // Optional regen binding
-        if (Source->GetHPRegenAttr().IsValid() && Source->GetManaRegenAttr().IsValid())
-        {
-            W->BindRegenAttributes(ASC, Source->GetHPRegenAttr(), Source->GetManaRegenAttr());
-        }
-else
-        {
-            W->BindToAttributes(
-                ASC,
-                Source->GetHealthAttr(),
-                Source->GetMaxHealthAttr(),
-                Source->GetManaAttr(),
-                Source->GetMaxManaAttr());
-        }
+
+        // Add to viewport and align bottom-center
+        W->AddToViewport(BaseZOrder + Source->GetOverlayZOrder());
+        W->SetAlignmentInViewport(FVector2D(0.5f, 0.0f));
+        W->SetVisibility(ESlateVisibility::Visible);
+    }
+
+    BindOverlayWidget(W, Source, Target);
+
+    if (Existing)
+    {
+        Existing->Target = Target;
+        Existing->Widget = W;
+        Existing->WorldOffset = Source->GetWorldOffset();
+        Existing->ScreenPixelOffset = Source->GetOverlayPixelOffset();
+        Existing->ZOrder = BaseZOrder + Source->GetOverlayZOrder();
+        return W;
     }
 
     // Store
@@ -176,7 +265,8 @@ static FVector2D ClampToViewportForWidget(
 bool UAeyerjiStatusBarOverlayComponent::IsOccluded(const FVector& WorldLoc, const AActor* Ignore) const
 {
     const APlayerController* PC = GetPC();
-    if (!bOcclusionCheck || !PC) return false;
+    UWorld* World = GetWorld();
+    if (!bOcclusionCheck || !PC || !World) return false;
 
     FVector CamLoc; FRotator CamRot;
     PC->GetPlayerViewPoint(CamLoc, CamRot);
@@ -184,8 +274,16 @@ bool UAeyerjiStatusBarOverlayComponent::IsOccluded(const FVector& WorldLoc, cons
     FHitResult Hit;
     FCollisionQueryParams Params(SCENE_QUERY_STAT(StatusBarOcclusion), /*bTraceComplex=*/false);
     if (Ignore) Params.AddIgnoredActor(Ignore);
+    if (const APawn* LocalPawn = PC->GetPawn())
+    {
+        Params.AddIgnoredActor(LocalPawn);
+    }
+    if (const AActor* ViewTarget = PC->GetViewTarget())
+    {
+        Params.AddIgnoredActor(ViewTarget);
+    }
 
-    const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, CamLoc, WorldLoc, ECC_Visibility, Params);
+    const bool bHit = World->LineTraceSingleByChannel(Hit, CamLoc, WorldLoc, ECC_Visibility, Params);
     return bHit && Hit.GetActor() != Ignore;
 }
 
@@ -195,7 +293,11 @@ void UAeyerjiStatusBarOverlayComponent::TickComponent(
     Super::TickComponent(DeltaTime, TickType, ThisTick);
     
     APlayerController* PC = GetPC();
-    if (!PC) return;
+    if (!PC)
+    {
+        ReportStatusBarProblem(this, TEXT("Overlay tick skipped because owner is not a valid local PlayerController."));
+        return;
+    }
 
     for (int32 i = Tracked.Num() - 1; i >= 0; --i)
     {
@@ -212,8 +314,12 @@ void UAeyerjiStatusBarOverlayComponent::TickComponent(
         // Distance LOD
         if (MaxDrawDistance > 0.f)
         {
+            FVector CameraLocation;
+            FRotator CameraRotation;
+            PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
+
             const float DistSq = FVector::DistSquared(
-                PC->PlayerCameraManager->GetCameraLocation(),
+                CameraLocation,
                 Target->GetActorLocation());
             if (DistSq > FMath::Square(MaxDrawDistance))
             {

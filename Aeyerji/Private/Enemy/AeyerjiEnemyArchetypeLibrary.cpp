@@ -23,6 +23,7 @@ void CopyArchetypeDataToEntry(const UAeyerjiEnemyArchetypeData& Source, FAeyerji
 	OutEntry.TraitComponents = Source.TraitComponents;
 	OutEntry.AggroSettings = Source.AggroSettings;
 	OutEntry.MeshOverrides = Source.MeshOverrides;
+	OutEntry.DeadBodyActorClass = Source.DeadBodyActorClass;
 	OutEntry.StatMultipliers = Source.StatMultipliers;
 	OutEntry.bWarnIfMissingAttackMontage = Source.bWarnIfMissingAttackMontage;
 	OutEntry.bWarnIfMissingInitEffects = Source.bWarnIfMissingInitEffects;

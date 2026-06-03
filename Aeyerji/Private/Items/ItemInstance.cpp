@@ -6,6 +6,7 @@
 #include "Items/ItemDefinition.h"
 #include "Items/InventoryComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/LootService.h"
 #include "Systems/LootTable.h"
 #include "UObject/CoreNet.h"
@@ -135,7 +136,7 @@ FAeyerjiPickupVisualConfig UAeyerjiItemInstance::GetPickupVisualConfig() const
 
 EItemCategory UAeyerjiItemInstance::GetItemCategory() const
 {
-	return Definition ? Definition->ItemCategory : EItemCategory::Offense;
+	return Definition ? Definition->ItemCategory : EItemCategory::Assault;
 }
 
 void UAeyerjiItemInstance::RebuildAggregation()
@@ -161,14 +162,15 @@ void UAeyerjiItemInstance::RebuildAggregation()
 
 	if (Definition)
 	{
-		for (FItemStatModifier Mod : Definition->BaseModifiers)
+		TArray<FItemStatModifier> ScaledBaseMods = Definition->BaseModifiers;
+		if (RarityScaling)
 		{
-			if (RarityScaling)
+			for (FItemStatModifier& Mod : ScaledBaseMods)
 			{
 				Mod.Magnitude *= RarityScaling->BaseModifierMultiplier;
 			}
-			FinalAggregatedModifiers.Add(Mod);
 		}
+		FinalAggregatedModifiers.Append(ScaledBaseMods);
 
 		for (FItemGrantedEffect Effect : Definition->GrantedEffects)
 		{
@@ -222,7 +224,7 @@ void UAeyerjiItemInstance::ApplyLootStatScaling(const UAeyerjiLootTable* LootTab
 		return;
 	}
 
-	const int32 Level = FMath::Max(ItemLevel, 1);
+	const int32 Level = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
 	const int32 LevelDelta = FMath::Max(Level - 1, 0);
 
 	if (LevelDelta <= 0 || FinalAggregatedModifiers.Num() == 0)
@@ -254,7 +256,7 @@ void UAeyerjiItemInstance::InitializeFromDefinition(
 {
 	Definition = InDefinition;
 	Rarity = InRarity;
-	ItemLevel = InItemLevel;
+	ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(InItemLevel);
 	Seed = InSeed;
 	EquippedSlot = InSlot;
 	EquippedSlotIndex = INDEX_NONE;

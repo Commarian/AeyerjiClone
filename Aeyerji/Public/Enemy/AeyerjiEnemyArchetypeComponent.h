@@ -13,6 +13,7 @@ class UAbilitySystemComponent;
 class UAnimMontage;
 class UGameplayAbility;
 class UGameplayEffect;
+class AActor;
 struct FAeyerjiEnemyArchetypeEntry;
 struct FAeyerjiEnemyStatMultipliers;
 
@@ -58,6 +59,10 @@ public:
 	// Returns the optional basic attack effect reference.
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
 	TSubclassOf<UGameplayEffect> GetBasicAttackEffect() const;
+
+	// Returns the optional actor class to spawn when this enemy dies.
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
+	TSubclassOf<AActor> GetDeadBodyActorClass() const;
 
 	// Copies the archetype's granted tags into the output container.
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")

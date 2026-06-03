@@ -40,6 +40,12 @@ void UPlayerStatsTrackingComponent::RecordItemDropped(const FLootDropResult& Res
 {
 	TrackDropRarity(Result.Rarity);
 
+	FName DefinitionKey = Result.ItemDefinitionKey;
+	if (DefinitionKey.IsNone() && Result.ItemDefinition)
+	{
+		DefinitionKey = Result.ItemDefinition->GetDefinitionKey();
+	}
+
 	if (FPlayerLootStats::IsLegendaryRarity(Result.Rarity))
 	{
 		++LootStats.TotalLegendariesDropped;
@@ -50,6 +56,11 @@ void UPlayerStatsTrackingComponent::RecordItemDropped(const FLootDropResult& Res
 	{
 		++LootStats.DropsSinceLastLegendary;
 		UpdateLegendaryRollingWindow(false);
+	}
+
+	if (Result.PityGroup.IsValid())
+	{
+		LootStats.RecordPityAttempt(Result.PityGroup, Result.bCountsAsPitySuccess, DefinitionKey, Result.SourceTag);
 	}
 }
 
@@ -62,10 +73,14 @@ void UPlayerStatsTrackingComponent::RecordItemPickedUp(const UItemDefinition* It
 		++LootStats.TotalLegendariesPickedUp;
 	}
 
-	if (ItemDef && ItemDef->ItemId != NAME_None)
+	if (ItemDef)
 	{
-		int32& Count = LootStats.ItemsPickedUpById.FindOrAdd(ItemDef->ItemId);
-		++Count;
+		const FName DefinitionKey = ItemDef->GetDefinitionKey();
+		if (!DefinitionKey.IsNone())
+		{
+			int32& Count = LootStats.ItemsPickedUpById.FindOrAdd(DefinitionKey);
+			++Count;
+		}
 	}
 }
 

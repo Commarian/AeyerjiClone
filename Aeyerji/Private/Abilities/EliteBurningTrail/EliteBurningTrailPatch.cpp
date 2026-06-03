@@ -5,7 +5,9 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "AeyerjiGameplayTags.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Abilities/AbilityTeamUtils.h"
 #include "Components/SphereComponent.h"
 #include "GameplayEffect.h"

@@ -9,6 +9,7 @@
 #include "Progression/AeyerjiLevelingComponent.h"
 #include "Progression/AeyerjiRewardTuning.h"
 #include "Progression/AeyerjiRewardConfigComponent.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
 #include "Kismet/GameplayStatics.h"
@@ -63,7 +64,7 @@ namespace
             {
                 if (const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>())
                 {
-                    return FMath::Max(1, FMath::RoundToInt(Set->GetLevel()));
+                    return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Set->GetLevel()));
                 }
             }
         }
@@ -77,7 +78,7 @@ namespace
                     {
                         if (const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>())
                         {
-                            return FMath::Max(1, FMath::RoundToInt(Set->GetLevel()));
+                            return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Set->GetLevel()));
                         }
                     }
                 }
@@ -112,13 +113,13 @@ int32 UAeyerjiXPLibrary::GetHighestPlayerLevel(const UObject* WorldContextObject
         const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>();
         if (!Set) continue;
 
-        const int32 Lvl = FMath::RoundToInt(Set->GetLevel());
+        const int32 Lvl = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Set->GetLevel()));
         if (Lvl > Highest)
         {
             Highest = Lvl;
         }
     }
-    return FMath::Max(1, Highest);
+    return UAeyerjiDifficultySettings::ClampGameplayLevel(Highest);
 }
 
 float UAeyerjiXPLibrary::GetBaseXPFromActor(const AActor* Actor)
@@ -177,7 +178,9 @@ void UAeyerjiXPLibrary::SetBaseXPOnActor(AActor* Actor, float BaseXP)
             {
                 OwningActor = AsComp->GetOwner();
             }
-            UAeyerjiRewardAttributeSet* NewSet = NewObject<UAeyerjiRewardAttributeSet>(OwningActor ? (UObject*)OwningActor : (UObject*)ASC);
+            UObject* SetOuter = OwningActor ? static_cast<UObject*>(OwningActor) : static_cast<UObject*>(ASC);
+            const FName RewardSetName = MakeUniqueObjectName(SetOuter, UAeyerjiRewardAttributeSet::StaticClass(), TEXT("AeyerjiRewardAttributeSet"));
+            UAeyerjiRewardAttributeSet* NewSet = NewObject<UAeyerjiRewardAttributeSet>(SetOuter, UAeyerjiRewardAttributeSet::StaticClass(), RewardSetName);
             if (NewSet)
             {
                 ASC->AddAttributeSetSubobject(NewSet);

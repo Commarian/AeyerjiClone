@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "GameplayEffectTypes.h"
+#include "Aeyerji/AeyerjiGameState.h"
 #include "AeyerjiFloatingStatusBarComponent.generated.h"
 
 class UW_AeyerjiStatusBar;
@@ -12,6 +13,8 @@ class UWidgetComponent;
 class UAbilitySystemComponent;
 class UAeyerjiStatusBarOverlayComponent;
 class UUserWidget;
+class AAeyerjiCharacter;
+class AAeyerjiGameState;
 
 UENUM(BlueprintType)
 enum class EStatusBarMode : uint8
@@ -36,6 +39,10 @@ public:
     /** Which technique to use. Recommended: HUD for player, Overlay for enemies. */
     UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar")
     EStatusBarMode Mode ;
+
+    /** When true, HUD mode waits until the run enters InRun before creating the widget. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|HUD")
+    bool bInitializeHUDOnRunStart = true;
 
     /** World offset above actor (used by World & Overlay modes). */
     UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar")
@@ -135,6 +142,9 @@ private:
     UPROPERTY(Transient) UAeyerjiStatusBarOverlayComponent* OverlayMgr = nullptr;
 
     FTimerHandle RetryTimer;
+    FTimerHandle DeferredBindTimer;
+    TWeakObjectPtr<AAeyerjiCharacter> BoundOwnerCharacter;
+    int32 DeferredBindAttempts = 0;
 
     void CreateWorldWidget();
     void CreateHUDWidget();
@@ -142,6 +152,29 @@ private:
     void CleanupOverlay();
     void BindWidget(UW_AeyerjiStatusBar* WB);
     UAbilitySystemComponent* FindASC() const;
+    void RebindLiveWidget();
+    void BindOwnerASCReadyDelegate();
+    void UnbindOwnerASCReadyDelegate();
+
+    UFUNCTION()
+    void HandleOwnerAbilitySystemReady();
+
+    UFUNCTION()
+    void AttemptDeferredRebind();
+
+    UFUNCTION()
+    void HandleRunStateChanged(EAeyerjiRunState NewState, EAeyerjiRunState OldState);
+
+    UFUNCTION()
+    void RetryBindToRunStateChanges();
 
     void LogMissingWidget() const;
+    bool ShouldDeferHUDInitializationToRunStart() const;
+    void InitializeStatusBarPresentation();
+    void BindToRunStateChanges();
+    void UnbindFromRunStateChanges();
+
+    bool bStatusBarInitialized = false;
+    FTimerHandle RunStateBindRetryTimer;
+    TWeakObjectPtr<AAeyerjiGameState> BoundGameState;
 };

@@ -11,7 +11,11 @@
 
 namespace EliteBurningTrailTags
 {
-	const FGameplayTag AbilityTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Elite.BurningTrail"), /*ErrorIfNotFound=*/false);
+	const FGameplayTag& AbilityTag()
+	{
+		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Elite.BurningTrail"), /*ErrorIfNotFound=*/false);
+		return Tag;
+	}
 }
 
 UGA_EliteBurningTrail::UGA_EliteBurningTrail()
@@ -21,10 +25,10 @@ UGA_EliteBurningTrail::UGA_EliteBurningTrail()
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
 	NetSecurityPolicy = EGameplayAbilityNetSecurityPolicy::ServerOnlyExecution;
 	bServerRespectsRemoteAbilityCancellation = true;
-	if (EliteBurningTrailTags::AbilityTag.IsValid())
+	if (EliteBurningTrailTags::AbilityTag().IsValid())
 	{
 		FGameplayTagContainer AssetTags = GetAssetTags();
-		AssetTags.AddTag(EliteBurningTrailTags::AbilityTag);
+		AssetTags.AddTag(EliteBurningTrailTags::AbilityTag());
 		SetAssetTags(AssetTags);
 	}
 

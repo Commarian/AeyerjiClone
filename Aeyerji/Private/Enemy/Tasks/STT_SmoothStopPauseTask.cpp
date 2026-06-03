@@ -1,8 +1,12 @@
 // STT_SmoothStopPauseTask.cpp
 
 #include "Enemy/Tasks/STT_SmoothStopPauseTask.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
 #include "StateTreeExecutionContext.h"
 
@@ -92,4 +96,3 @@ void USTT_SmoothStopPauseTask::ExitState(FStateTreeExecutionContext& Context, co
         CachedMove->MaxWalkSpeed = OriginalMaxWalkSpeed;
     }
 }
-

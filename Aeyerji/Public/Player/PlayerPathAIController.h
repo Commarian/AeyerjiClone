@@ -4,7 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "PlayerPathAIController.generated.h"
 // PlayerPathAIController.h
 UCLASS()

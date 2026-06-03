@@ -23,7 +23,7 @@ struct AEYERJI_API FAeyerjiActiveFXEntry
 	bool bIsEquipFX = false;
 
 	UPROPERTY()
-	EEquipmentSlot Slot = EEquipmentSlot::Offense;
+	EEquipmentSlot Slot = EEquipmentSlot::Assault;
 
 	UPROPERTY()
 	int32 SlotIndex = 0;
@@ -75,5 +75,5 @@ private:
 	UNiagaraComponent* SpawnNiagara(UNiagaraSystem* System, const FAeyerjiPickupVisualConfig& VisualConfig, FName SocketOverride, const FVector& LocalOffset);
 	void ApplyOutlinePulse(const FAeyerjiPickupVisualConfig& VisualConfig);
 	void CleanupStaleFX();
-	void RegisterActiveFX(UNiagaraComponent* Component, bool bIsEquipFX, EEquipmentSlot Slot = EEquipmentSlot::Offense, int32 SlotIndex = 0);
+	void RegisterActiveFX(UNiagaraComponent* Component, bool bIsEquipFX, EEquipmentSlot Slot = EEquipmentSlot::Assault, int32 SlotIndex = 0);
 };

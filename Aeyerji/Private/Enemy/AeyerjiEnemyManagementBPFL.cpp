@@ -22,14 +22,34 @@ APawn* UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 {
 	if (!WorldContextObject || !EnemySet.EnemyClass)
 	{
+		AJ_LOG(WorldContextObject, TEXT("SpawnAndRegisterEnemyFromSet aborted: invalid context/class. Context=%s Class=%s"),
+			*GetNameSafe(WorldContextObject),
+			*GetNameSafe(EnemySet.EnemyClass));
 		return nullptr;
 	}
 
 	UWorld* World = WorldContextObject->GetWorld();
 	if (!World || World->GetNetMode() == NM_Client)
 	{
+		AJ_LOG(WorldContextObject, TEXT("SpawnAndRegisterEnemyFromSet aborted: invalid world or client world. WorldValid=%d NetMode=%d Class=%s"),
+			World ? 1 : 0,
+			World ? static_cast<int32>(World->GetNetMode()) : -1,
+			*GetNameSafe(EnemySet.EnemyClass));
 		return nullptr;
 	}
+
+	AJ_LOG(WorldContextObject, TEXT("SpawnAndRegisterEnemyFromSet request: Class=%s Elite=%d SkipEliteAutoScaling=%d Spawner=%s Owner=%s Instigator=%s AutoActivate=%d ApplyElite=%d ApplyAggro=%d SkipRandomEliteResolution=%d Location=%s"),
+		*GetNameSafe(EnemySet.EnemyClass),
+		EnemySet.bIsElite ? 1 : 0,
+		EnemySet.bSkipEliteAutoScaling ? 1 : 0,
+		*GetNameSafe(Spawner),
+		*GetNameSafe(Owner),
+		*GetNameSafe(InstigatorPawn),
+		bAutoActivate ? 1 : 0,
+		bApplyEliteSettings ? 1 : 0,
+		bApplyAggro ? 1 : 0,
+		bSkipRandomEliteResolution ? 1 : 0,
+		*SpawnTransform.GetLocation().ToCompactString());
 
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
@@ -39,6 +59,9 @@ APawn* UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 	APawn* SpawnedPawn = World->SpawnActor<APawn>(EnemySet.EnemyClass, SpawnTransform, Params);
 	if (!SpawnedPawn)
 	{
+		AJ_LOG(WorldContextObject, TEXT("SpawnAndRegisterEnemyFromSet failed: SpawnActor returned null for Class=%s Location=%s"),
+			*GetNameSafe(EnemySet.EnemyClass),
+			*SpawnTransform.GetLocation().ToCompactString());
 		return nullptr;
 	}
 
@@ -54,6 +77,9 @@ APawn* UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 			ActivationInstigator,
 			ActivationController,
 			bSkipRandomEliteResolution);
+		AJ_LOG(WorldContextObject, TEXT("SpawnAndRegisterEnemyFromSet spawned+registered: Pawn=%s Spawner=%s"),
+			*GetNameSafe(SpawnedPawn),
+			*GetNameSafe(Spawner));
 	}
 	else
 	{

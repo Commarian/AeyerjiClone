@@ -39,7 +39,7 @@ public:
 	/** Copies current loot stats into an external struct (e.g., for saving). */
 	void ExtractLootStats(FPlayerLootStats& OutStats) const;
 
-	/** True if the player has ever picked up the given item identifier. */
+	/** True if the player has ever picked up the given item definition key. */
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|Loot|Stats")
 	bool HasPickedUpItemId(FName ItemId) const;
 

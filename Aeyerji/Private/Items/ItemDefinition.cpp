@@ -2,6 +2,8 @@
 
 #include "Items/ItemDefinition.h"
 #include "Materials/MaterialInterface.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
+#include "UObject/SoftObjectPath.h"
 
 UItemDefinition::UItemDefinition()
 {
@@ -31,15 +33,46 @@ void UItemDefinition::PostLoad()
 		return (Enum && Enum->IsValidEnumValue(static_cast<int64>(Value))) ? Value : DefaultValue;
 	};
 
-	// Ensure assets authored before the enum trim stay within Offense/Defense/Magic.
-	ItemCategory = ClampEnumValue(ItemCategory, EItemCategory::Offense);
-	DefaultSlot = ClampEnumValue(DefaultSlot, EEquipmentSlot::Offense);
+	// Keep assets authored before the lane rename inside the current lane enum range.
+	ItemCategory = ClampEnumValue(ItemCategory, EItemCategory::Assault);
+	DefaultSlot = ClampEnumValue(DefaultSlot, EEquipmentSlot::Assault);
+	RequiredLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(RequiredLevel);
 
-	// Keep slot/category aligned (inventory logic assumes matching ordinals).
-	if (static_cast<int32>(DefaultSlot) != static_cast<int32>(ItemCategory))
+	// Corruption items must default to the Corruption lane; normal items cannot default there.
+	if (ItemCategory == EItemCategory::Corruption)
+	{
+		DefaultSlot = EEquipmentSlot::Corruption;
+		RequiredLevel = UAeyerjiDifficultySettings::GetMaxGameplayLevel();
+	}
+	else if (DefaultSlot == EEquipmentSlot::Corruption)
 	{
 		DefaultSlot = static_cast<EEquipmentSlot>(ItemCategory);
 	}
+}
+
+FName UItemDefinition::GetDefinitionKey() const
+{
+	return MakeDefinitionKey(this);
+}
+
+FName UItemDefinition::MakeDefinitionKey(const UItemDefinition* Definition)
+{
+	if (!Definition)
+	{
+		return NAME_None;
+	}
+
+	return MakeDefinitionKeyFromSoftPath(FSoftObjectPath(Definition));
+}
+
+FName UItemDefinition::MakeDefinitionKeyFromSoftPath(const FSoftObjectPath& DefinitionPath)
+{
+	if (!DefinitionPath.IsValid())
+	{
+		return NAME_None;
+	}
+
+	return FName(*DefinitionPath.ToString());
 }
 
 UMaterialInterface* UItemDefinition::ResolvePreviewMaterial(EItemRarity Rarity)
@@ -163,4 +196,15 @@ bool UItemDefinition::TryGetEquipSynergyColor(
 	}
 
 	return true;
+}
+
+bool UItemDefinition::IsCorruptionItem() const
+{
+	return ItemCategory == EItemCategory::Corruption || DefaultSlot == EEquipmentSlot::Corruption;
+}
+
+int32 UItemDefinition::GetEffectiveRequiredLevel() const
+{
+	const int32 BaseLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(RequiredLevel);
+	return IsCorruptionItem() ? UAeyerjiDifficultySettings::GetMaxGameplayLevel() : BaseLevel;
 }

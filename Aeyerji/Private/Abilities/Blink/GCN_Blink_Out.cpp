@@ -1,7 +1,9 @@
 ﻿
 
 #include "Abilities/Blink/GCN_Blink_Out.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "NiagaraFunctionLibrary.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Kismet/GameplayStatics.h"
 
 bool UGCN_Blink_Out::OnExecute_Implementation(

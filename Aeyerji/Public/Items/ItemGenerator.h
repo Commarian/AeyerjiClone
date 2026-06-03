@@ -2,6 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "UObject/Object.h"
 #include "Items/ItemTypes.h"
 
@@ -31,12 +32,15 @@ public:
 		EEquipmentSlot SlotOverride);
 
 	static void ChooseAffixes(
-		UItemDefinition* Definition,
+		const UItemDefinition* Definition,
+		const TArray<TObjectPtr<UItemAffixDefinition>>& SourcePool,
 		int32 ItemLevel,
 		EEquipmentSlot Slot,
 		int32 AffixCount,
 		FRandomStream& RNG,
+		FGameplayTagContainer& InOutChosenAffixTags,
+		FGameplayTagContainer& InOutChosenExclusionTags,
+		TSet<const UItemAffixDefinition*>& InOutChosenAffixDefinitions,
 		TArray<UItemAffixDefinition*>& OutAffixes,
 		TArray<const FAffixTier*>& OutTiers);
 };
-

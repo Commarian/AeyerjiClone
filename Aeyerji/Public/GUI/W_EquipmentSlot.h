@@ -11,8 +11,9 @@
 class UAeyerjiInventoryComponent;
 class UAeyerjiItemInstance;
 class UAeyerjiItemDragOperation;
-class UBorder;
 class UImage;
+class UMaterialInterface;
+class UTexture2D;
 
 /**
  * Standalone widget that mirrors a single equipment slot from the inventory component.
@@ -24,9 +25,11 @@ class AEYERJI_API UW_EquipmentSlot : public UUserWidget
 	GENERATED_BODY()
 
 public:
+	UW_EquipmentSlot(const FObjectInitializer& ObjectInitializer);
+
 	/** Slot represented by this widget instance (set per BP instance in the designer). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Equipment")
-	EEquipmentSlot SlotType = EEquipmentSlot::Offense;
+	EEquipmentSlot SlotType = EEquipmentSlot::Assault;
 
 	/** Index of this slot within its category (0-based). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Equipment", meta = (ClampMin = "0", UIMin = "0"))
@@ -44,6 +47,27 @@ public:
 	/** True when the mouse is over this slot or its icon. */
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
 	bool IsMouseOverItem() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	bool IsSlotLocked() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	bool IsSlotVisibleForCurrentLevel() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	bool IsSlotInteractionEnabled() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	ESlateVisibility GetSlotVisibility() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	UTexture2D* GetLockedSlotIcon() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	FText GetSlotDisplayText() const;
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Equipment")
+	FText GetSlotTooltipText() const;
 
 	/** Drop the currently equipped item at the owner's feet. */
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Equipment")
@@ -72,20 +96,79 @@ protected:
 		UDragDropOperation *InOperation) override;
 	virtual void NativeOnMouseEnter(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 	virtual void NativeOnMouseLeave(const FPointerEvent& InMouseEvent) override;
-	/** Optional icon/border bound from BP to update visuals. */
+
+	/** Bottom layer: equipped item icon, empty insert, or locked slot image. Preferred BP binding. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UImage> InsideImage = nullptr;
+
+	/** Top layer: lane/category frame texture. Preferred BP binding. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UImage> BorderImage = nullptr;
+
+	/** Legacy inside-image binding kept so older slot BPs keep rendering during migration. */
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UImage> ItemIcon = nullptr;
-
-	UPROPERTY(meta = (BindWidgetOptional))
-	TObjectPtr<UBorder> SlotBorder = nullptr;
-
-	/** Fallback tint when slot is empty so BP children don't need extra code. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment")
-	FLinearColor EmptyTint = FLinearColor::White;
 
 	/** Optional icon to use when the slot is empty. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment")
 	TObjectPtr<UTexture2D> EmptySlotIcon = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Empty")
+	TSoftObjectPtr<UTexture2D> AssaultEmptyIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Empty")
+	TSoftObjectPtr<UTexture2D> GuardEmptyIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Empty")
+	TSoftObjectPtr<UTexture2D> FlowEmptyIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Empty")
+	TSoftObjectPtr<UTexture2D> CorruptionEmptyIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Locked")
+	TSoftObjectPtr<UTexture2D> AssaultLockedIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Locked")
+	TSoftObjectPtr<UTexture2D> GuardLockedIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Locked")
+	TSoftObjectPtr<UTexture2D> FlowLockedIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Locked")
+	TSoftObjectPtr<UTexture2D> CorruptionLockedIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UMaterialInterface> AssaultBorderMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UMaterialInterface> GuardBorderMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UMaterialInterface> FlowBorderMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UMaterialInterface> CorruptionBorderMaterial;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TObjectPtr<UMaterialInterface> GenericBorderMaterial = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	FName RarityColorParameterName = TEXT("RarityColor");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UTexture2D> AssaultBorderIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UTexture2D> GuardBorderIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UTexture2D> FlowBorderIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TSoftObjectPtr<UTexture2D> CorruptionBorderIcon;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment|Visual Layers")
+	TObjectPtr<UTexture2D> GenericBorderIcon = nullptr;
 
 	/** Optional drag visual to instantiate when items are dragged from this slot. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Aeyerji|Equipment")
@@ -104,6 +187,11 @@ private:
 	bool CanAcceptDragOperation(UAeyerjiItemDragOperation *DragOp) const;
 	bool IsItemCompatible(const UAeyerjiItemInstance *Item) const;
 	bool TryEquipFromDragOperation(UAeyerjiItemDragOperation *DragOp);
+	UTexture2D* GetEmptySlotIcon() const;
+	UTexture2D* GetBorderSlotIcon() const;
+	UMaterialInterface* GetBorderSlotMaterial() const;
+	UImage* GetInsideImageWidget() const;
+	void UpdateBorderVisual(const UAeyerjiItemInstance* Item);
 
 	void ClearItemDelegate();
 

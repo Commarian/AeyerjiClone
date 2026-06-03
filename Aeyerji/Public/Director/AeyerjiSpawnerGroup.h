@@ -12,6 +12,7 @@
 
 class UBoxComponent;
 class UPrimitiveComponent;
+class AAeyerjiEncounterDirector;
 class AAeyerjiLevelDirector;
 class UAeyerjiGameplayEventSubsystem;
 class AController;
@@ -20,6 +21,7 @@ class UAeyerjiEncounterDefinition;
 class UNiagaraSystem;
 class UGameplayEffect;
 class UGameplayAbility;
+class UAbilitySystemComponent;
 struct FGameplayEventData;
 
 USTRUCT(BlueprintType)
@@ -87,6 +89,14 @@ struct AEYERJI_API FEnemySet
 	/** Optional flag used for presentation/VFX (outline tint, scale, etc.). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn")
 	bool bIsElite = false;
+
+	/** Keeps elite tags/VFX but skips automatic elite stat/affix/xp scaling; useful for pre-tuned elite classes. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
+	bool bSkipEliteAutoScaling = false;
+
+	/** Optional elite class pool used when this set is promoted to elite (or authored as elite). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(AdvancedDisplay))
+	TArray<TSubclassOf<APawn>> EliteEnemyClassPoolOverride;
 
 	/** Escalates elite tuning/FX; useful for rare mini bosses. (Note: only supported via RegisterExternalEnemy, not via wave data.) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides))
@@ -200,9 +210,11 @@ enum class EAeyerjiSpawnPointMode : uint8
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpawnerClearedSignature, class AAeyerjiSpawnerGroup*, Spawner);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpawnerStartedSignature, class AAeyerjiSpawnerGroup*, Spawner);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FSpawnerBossDefeatedSignature, class AAeyerjiSpawnerGroup*, Spawner, AActor*, BossEnemy);
 
 /**
- * Handles spawning and sequencing of a single encounter room.
+ * Mechanical spawn executor for one encounter room.
+ * Run selection, boss plans, dynamic pacing, and zone ownership belong to the Level/Encounter directors and their definition assets.
  */
 UCLASS(Blueprintable)
 class AEYERJI_API AAeyerjiSpawnerGroup : public AActor
@@ -223,6 +235,13 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category="Spawner")
 	void ActivateEncounter(AActor* ActivationInstigator = nullptr, AController* ActivationController = nullptr);
+
+	/**
+	 * Arms this encounter with caller-provided runtime waves instead of the placed actor/asset waves.
+	 * Used by mission directors that generate round content while keeping this actor as a spawn executor.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Spawner")
+	void ActivateEncounterWithRuntimeWaves(const TArray<FWaveDefinition>& RuntimeWaves, AActor* ActivationInstigator = nullptr, AController* ActivationController = nullptr);
 
 	/**
 	 * Returns the encounter to its idle setup state after a player wipe or level reset (authority only).
@@ -255,6 +274,10 @@ public:
 	/** True once all waves are complete and no tracked enemies remain. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	bool IsCleared() const { return bCleared; }
+
+	/** True while this encounter is currently active and has not yet cleared. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	bool IsActive() const { return bActive; }
 
 	/**
 	 * When assigned, the encounter auto-starts when the player pawn overlaps this box.
@@ -299,6 +322,50 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn")
 	EAeyerjiSpawnPointMode SpawnPointMode = EAeyerjiSpawnPointMode::Random;
 
+	/** Reject spawn candidates that cannot build a nav path to the current aggro/player location. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability")
+	bool bRequireSpawnReachableFromTarget = true;
+
+	/** If no aggro/player actor exists yet, use the first PlayerStart as the reachability reference. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(EditCondition="bRequireSpawnReachableFromTarget"))
+	bool bFallbackReachabilityTargetToPlayerStart = true;
+
+	/** Closest allowed spawn distance from the reachability target. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnMinDistanceFromTarget = 1200.f;
+
+	/** Farthest allowed spawn distance from the reachability target. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnMaxDistanceFromTarget = 10000.f;
+
+	/** Number of region samples tried before falling back to a random reachable point near the target. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="1"))
+	int32 SpawnRegionSearchAttempts = 48;
+
+	/** Nav projection extent used for region-based survival spawn points. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="0.0", Units="cm"))
+	FVector SpawnNavProjectionExtent = FVector(1200.f, 1200.f, 2000.f);
+
+	/** Height above a spawn region used when tracing down to find real ground. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnGroundTraceUpOffset = 500.f;
+
+	/** Distance below a spawn region searched by the ground trace. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnGroundTraceDownDistance = 5000.f;
+
+	/** Extra vertical clearance added on top of the spawned pawn capsule half-height. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnGroundClearance = 5.f;
+
+	/** Adds the configured cull-ignore actor tag to spawned wave enemies. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability")
+	bool bTagSpawnedEnemiesAsCullIgnored = true;
+
+	/** Actor tag used by the view culling component to leave combat spawns alone. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Spawn|Reachability", meta=(EditCondition="bTagSpawnedEnemiesAsCullIgnored"))
+	FName SpawnedEnemyCullIgnoreActorTag = FName(TEXT("ViewCull.Ignore"));
+
 	/** Optional reusable encounter asset. If set, this overrides the inline Waves at activation time. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Waves", meta=(EditCondition="bPreferEncounterAsset", DisplayName="Encounter Definition Asset"))
 	TObjectPtr<UAeyerjiEncounterDefinition> EncounterDefinition = nullptr;
@@ -340,6 +407,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="Spawner|Events")
 	FSpawnerClearedSignature OnEncounterCleared;
 
+	/** Fired as soon as a tracked boss enemy dies, even if the spawner still owns other enemies. */
+	UPROPERTY(BlueprintAssignable, Category="Spawner|Events")
+	FSpawnerBossDefeatedSignature OnBossDefeated;
+
 	/** Returns the current number of alive enemies spawned by this encounter. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	int32 GetLiveEnemyCount() const { return LiveEnemies; }
@@ -355,6 +426,14 @@ public:
 	/** Chance (0..1) for a non-elite spawn to become an elite. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.0", ClampMax="1.0", UIMin="0.0", UIMax="1.0", EditCondition="bAllowRandomElites"))
 	float RandomEliteChance = 0.1f;
+
+	/** Fallback elite class pool used when a set does not provide EliteEnemyClassPoolOverride. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(EditCondition="bAllowRandomElites", AdvancedDisplay))
+	TArray<TSubclassOf<APawn>> EliteEnemyClassPool;
+
+	/** Requires an elite class pool to resolve before non-elite enemies can be promoted. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(EditCondition="bAllowRandomElites", AdvancedDisplay))
+	bool bRequireEliteClassPoolForRandomPromotion = true;
 
 	/** Base stat bumps applied to any enemy sets flagged as elite (before affixes). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
@@ -497,10 +576,16 @@ protected:
 	void KickoffFirstWave();
 
 	/** Picks a location/orientation for the next enemy to appear. */
-	FTransform ChooseSpawnTransform();
+	bool ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, FTransform& OutTransform);
 
 	/** Spawns one pawn from the provided wave/set definition and begins tracking it. */
-	void SpawnOneFromSet(int32 WaveIndex, int32 SetIndex);
+	bool SpawnOneFromSet(int32 WaveIndex, int32 SetIndex);
+
+	/** Resolves the player/PlayerStart location used for survival reachability checks. */
+	bool ResolveSpawnReferenceLocation(FVector& OutLocation) const;
+
+	/** Returns true if a candidate is distance-valid and path-reachable from the target reference. */
+	bool IsSpawnCandidateReachable(const FVector& CandidateLocation, const FVector& ReferenceLocation) const;
 
 	/** Utilities for toggling door actors on activation/reset. */
 	void SetDoorArrayEnabled(const TArray<TObjectPtr<AActor>>& Targets, bool bEnabled);
@@ -509,10 +594,26 @@ protected:
 	UFUNCTION()
 	void OnEnemyDestroyed(AActor* DestroyedEnemy);
 
+	/** Called as soon as a tracked enemy reports death so completion does not wait on corpse cleanup. */
+	UFUNCTION()
+	void OnEnemyDied(AActor* DeadEnemy);
+
+	/** Removes a tracked enemy exactly once, regardless of whether death or destroy fires first. */
+	void HandleTrackedEnemyRemoved(AActor* EnemyActor);
+
+	/** Unhooks delegate bindings for a tracked enemy before it leaves the live set. */
+	void UnbindTrackedEnemy(AActor* EnemyActor);
+
+	/** Clears the tracked enemy set and detaches any per-enemy delegates. */
+	void ResetTrackedEnemies();
+
+	/** Registers this enemy with the encounter director for progress tracking if needed. */
+	void RegisterProgressEnemy(APawn* SpawnedPawn);
+
 	/** Applies elite presentation (scale/VFX) when the enemy set is flagged as elite. */
 	void ApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<const FEliteAffixDefinition*>& Affixes, bool bApplyScale = true);
 
-	/** Returns a copy of the enemy set with random elite promotion applied, if enabled. */
+	/** Returns a copy of the enemy set with elite promotion/class resolution applied, if enabled. */
 	FEnemySet ResolveEliteSpawnSet(const FEnemySet& EnemySet) const;
 
 	/** Multicast cosmetic-only RPC so dedicated servers can still show elite FX on clients. */
@@ -520,21 +621,30 @@ protected:
 	void MulticastApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<FGameplayTag>& AffixTags);
 
 	/** Applies elite stat bumps to the pawn's attribute set (server only). */
-	void ApplyEliteStats(APawn* SpawnedPawn, float HealthMultiplier, float DamageMultiplier, float RangeMultiplier);
+	void ApplyEliteStats(APawn* SpawnedPawn, float HealthMultiplier, float DamageMultiplier, float RangeMultiplier, bool bPreserveHealthRatio = false);
 	/** Pushes gameplay tags, abilities, and affix-driven effects. */
-	void ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes);
+	void ApplyEliteGameplay(APawn* SpawnedPawn, const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes, bool bApplyXPMultipliers = true);
 	/** Rolls affixes for a given elite set (forced + random). */
 	TArray<const FEliteAffixDefinition*> BuildEliteAffixLoadout(const FEnemySet& EnemySet) const;
 	const FEliteAffixDefinition* FindAffixDefinition(const FGameplayTag& Tag) const;
 	float ComputeEliteScale(const FEnemySet& EnemySet, const TArray<const FEliteAffixDefinition*>& Affixes) const;
 	void ApplyAffixVFX(APawn* SpawnedPawn, const FEliteAffixDefinition& Affix);
 	void ApplyElitePackage(APawn* SpawnedPawn, const FEnemySet& EnemySet);
+
+public:
+	/** Applies shared enemy scaling from the cached spawn template. Reuses cached baselines on later refreshes to avoid compounding. */
 	void ApplyEnemyScaling(APawn* SpawnedPawn, const FEnemySet& EnemySet);
+	/** Recomputes scaling for every tracked live enemy owned by this spawner. */
+	void RefreshTrackedEnemyScaling(TSet<TWeakObjectPtr<AActor>>& OutHandledEnemies);
 	const FEnemyScalingRow* FindScalingRow(const FGameplayTag& ArchetypeTag) const;
 	int32 ResolvePlayerLevelForScaling() const;
 	FGameplayAttribute ResolveAttribute(const FName& AttributeName) const;
 
 protected:
+	/** Captures an unscaled attribute value the first time we see it so later refreshes can rebuild from that baseline. */
+	void CaptureTrackedBaseValueIfNeeded(const TWeakObjectPtr<AActor>& EnemyKey, UAbilitySystemComponent* ASC, const FGameplayAttribute& Attribute, const FName& AttributeName);
+	/** Preserves the current resource percentage during a live rescale instead of hard-healing to full. */
+	static float ResolvePreservedResourceValue(float OldCurrent, float OldMax, float NewMax, bool bPreserveRatio);
 	/** Callback for gameplay events used to trigger encounter activation. */
 	void HandleActivationEvent(const FGameplayTag& EventTag, const FGameplayEventData& Payload);
 	void CacheActivationStimulus(AActor* InstigatorActor, AController* InstigatorController);
@@ -561,6 +671,25 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category="Spawner|State")
 	int32 LiveEnemies = 0;
+
+	/** Live enemy set used to make death/destroy callbacks idempotent. */
+	TSet<TWeakObjectPtr<AActor>> TrackedLiveEnemies;
+
+	/** Boss subset used to signal boss defeat without requiring the whole spawner to clear. */
+	TSet<TWeakObjectPtr<AActor>> TrackedBossEnemies;
+
+	struct FTrackedEnemyScalingState
+	{
+		FEnemySet ResolvedTemplate;
+		TMap<FName, float> BaseAttributeValues;
+		float EliteHealthMultiplier = 1.f;
+		float EliteDamageMultiplier = 1.f;
+		float EliteRangeMultiplier = 1.f;
+		bool bHasEliteAutoScaling = false;
+	};
+
+	/** Runtime scaling cache so resyncs can recompute from the original baseline instead of compounding. */
+	TMap<TWeakObjectPtr<AActor>, FTrackedEnemyScalingState> TrackedEnemyScalingStates;
 
 	/** Remaining spawn counts for each wave/set (runtime state). */
 	TArray<TArray<int32>> PendingSpawnCounts;

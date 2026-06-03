@@ -1,8 +1,10 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
+// Fill out your copyright notice in the Description page of Project Settings.
 
 #include "AeyerjiCharacterMovementComponent.h"
 #include "AbilitySystemComponent.h"
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/Pawn.h"
 #include "AbilitySystemInterface.h"
@@ -21,7 +23,7 @@ UAeyerjiCharacterMovementComponent::UAeyerjiCharacterMovementComponent()
 	MaxNetUpdateFrequency = 100.0f;
 	ClientPredictionFudgeFactor = 0.0f;
 	NetworkSmoothingMode = ENetworkSmoothingMode::Linear;
-	NetworkMaxSmoothUpdateDistance = 120.f;  // how far we’ll smooth server corrections
+	NetworkMaxSmoothUpdateDistance = 120.f;  // how far we�ll smooth server corrections
     NetworkNoSmoothUpdateDistance  = 250.f;  // snap if farther than this
 }
 
@@ -159,4 +161,33 @@ void UAeyerjiCharacterMovementComponent::TickComponent(float DeltaTime, ELevelTi
 			}
 		}
 	}
+}
+
+void UAeyerjiCharacterMovementComponent::SmoothCorrection(const FVector& OldLocation, const FQuat& OldRotation, const FVector& NewLocation, const FQuat& NewRotation)
+{
+	const float CorrectionDistance = FVector::Dist(OldLocation, NewLocation);
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetTimeSeconds() : 0.0;
+	const bool bCanLog = bLogMovementCorrections
+		&& CorrectionDistance >= FMath::Max(0.f, MovementCorrectionLogThresholdCm)
+		&& (LastMovementCorrectionLogTime < 0.0 || MovementCorrectionLogInterval <= 0.f || (Now - LastMovementCorrectionLogTime) >= MovementCorrectionLogInterval);
+
+	if (bCanLog)
+	{
+		const APawn* OwningPawn = GetPawnOwner();
+		const AController* Controller = OwningPawn ? OwningPawn->GetController() : nullptr;
+		const UPathFollowingComponent* PathFollowing = Controller ? Controller->FindComponentByClass<UPathFollowingComponent>() : nullptr;
+		const EPathFollowingStatus::Type PathStatus = PathFollowing ? PathFollowing->GetStatus() : EPathFollowingStatus::Idle;
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[MoveDiag] SmoothCorrection Dist=%.2f Old=%s New=%s Pawn=%s Role=%d Velocity=%s PathStatus=%d"),
+			CorrectionDistance,
+			*OldLocation.ToCompactString(),
+			*NewLocation.ToCompactString(),
+			*GetNameSafe(OwningPawn),
+			OwningPawn ? static_cast<int32>(OwningPawn->GetLocalRole()) : -1,
+			*Velocity.ToCompactString(),
+			static_cast<int32>(PathStatus));
+		LastMovementCorrectionLogTime = Now;
+	}
+
+	Super::SmoothCorrection(OldLocation, OldRotation, NewLocation, NewRotation);
 }
