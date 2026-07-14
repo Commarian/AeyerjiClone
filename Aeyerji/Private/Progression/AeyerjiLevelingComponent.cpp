@@ -1,7 +1,9 @@
 #include "Progression/AeyerjiLevelingComponent.h"
+#include "Progression/AeyerjiProgressionLibrary.h"
 
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
+#include "Aeyerji/AeyerjiPlayerState.h"
 #include "GameplayEffect.h"
 #include "GameplayEffectTypes.h"
 
@@ -65,7 +67,6 @@ void UAeyerjiLevelingComponent::AddXP(float DeltaXP)
     {
         return;
     }
-
     UAbilitySystemComponent* ASC = GetASC();
     const UAeyerjiAttributeSet* Attr = GetAttr();
     if (!ASC || !Attr) return;
@@ -94,6 +95,14 @@ void UAeyerjiLevelingComponent::AddXP(float DeltaXP)
 
     if (bLeveled)
     {
+        if (APawn* Pawn = Cast<APawn>(GetOwner()))
+        {
+            if (AAeyerjiPlayerState* AeyerjiPS = Pawn->GetPlayerState<AAeyerjiPlayerState>())
+            {
+                AeyerjiPS->GrantAbilityPoints(Level - OldLevel);
+            }
+        }
+
         RefreshOwnedAbilities();
         ReapplyInfiniteEffects();
         OnLevelUp.Broadcast(OldLevel, Level);
@@ -172,7 +181,13 @@ const UAeyerjiAttributeSet* UAeyerjiLevelingComponent::GetAttr() const
 
 float UAeyerjiLevelingComponent::ComputeXPMaxForLevel(int32 Level) const
 {
-    // Best practice in 5.6: use the RowHandle's Eval() instead of grabbing the FRealCurve*
+    const float SharedXPRequirement = UAeyerjiProgressionLibrary::GetXPRequiredForLevel(Level);
+    if (SharedXPRequirement > 0.f)
+    {
+        return SharedXPRequirement;
+    }
+
+    // Legacy fallback for projects that still carry a per-component curve override.
     if (!XPToReachLevelRow.IsNull())
     {
         const float Y =
@@ -221,6 +236,14 @@ void UAeyerjiLevelingComponent::TryProcessLevelUps()
         ServerSetLevel(Level);
         ServerSetXPMax(XPMax);
         ServerSetXP(FMath::Clamp(XP, 0.f, XPMax));
+
+        if (APawn* Pawn = Cast<APawn>(GetOwner()))
+        {
+            if (AAeyerjiPlayerState* AeyerjiPS = Pawn->GetPlayerState<AAeyerjiPlayerState>())
+            {
+                AeyerjiPS->GrantAbilityPoints(Level - OldLevel);
+            }
+        }
 
         RefreshOwnedAbilities();
         ReapplyInfiniteEffects();

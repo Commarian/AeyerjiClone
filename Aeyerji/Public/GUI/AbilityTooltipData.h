@@ -9,7 +9,7 @@
 class UAbilitySystemComponent;
 class UGameplayAbility;
 class UTexture2D;
-struct FAeyerjiAbilityTableRow;
+struct FAeyerjiAbilityResolvedConfig;
 
 /** Source widget requesting the ability tooltip (action bar vs picker). */
 UENUM(BlueprintType)
@@ -58,6 +58,24 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category="Ability|Progression")
 	bool bUnlockedByDefault = false;
 
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Damage")
+	bool bUsesDamageVariance = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Damage")
+	bool bCanCrit = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Damage")
+	bool bCanBeDodged = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Damage")
+	bool bCanLifeSteal = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Damage")
+	bool bCanTriggerOnHit = false;
+
+	UPROPERTY(BlueprintReadOnly, Category="Ability|Damage")
+	bool bCanStagger = false;
+
 	UPROPERTY(BlueprintReadOnly, Category="Ability|UI")
 	EAbilityTooltipSource Source = EAbilityTooltipSource::ActionBar;
 
@@ -67,6 +85,6 @@ public:
 		const FAeyerjiAbilitySlot& Slot,
 		EAbilityTooltipSource Source = EAbilityTooltipSource::ActionBar);
 
-	/** Resolves the global ability table row for the supplied ability class or slot tag. */
-	static const FAeyerjiAbilityTableRow* ResolveAbilityRow(const FAeyerjiAbilitySlot& Slot);
+	/** Resolves the merged ability config for the supplied slot and its mirrored rank. */
+	static bool ResolveAbilityConfig(const FAeyerjiAbilitySlot& Slot, FAeyerjiAbilityResolvedConfig& OutConfig);
 };

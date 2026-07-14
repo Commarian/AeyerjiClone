@@ -6,6 +6,13 @@
 
 #include "ExecCalc_DamagePhysical.generated.h"
 
+/** Result of rolling pre-mitigation attack damage. */
+struct AEYERJI_API FAeyerjiDamageRollResult
+{
+	float DamageBeforeMitigation = 0.f;
+	bool bWasCritical = false;
+};
+
 /**
  * Executes physical damage mitigation using target armor and a soft-cap curve.
  */
@@ -17,7 +24,26 @@ class AEYERJI_API UExecCalc_DamagePhysical : public UGameplayEffectExecutionCalc
 public:
 	UExecCalc_DamagePhysical();
 
-	// Applies physical damage mitigation and writes the final HP delta.
+	/** Resolves average damage into a rolled pre-mitigation value using caller-supplied random samples. */
+	static FAeyerjiDamageRollResult ResolveDamageRoll(float AverageDamage,
+	                                                   float VarianceFraction,
+	                                                   float CritChanceFraction,
+	                                                   float CriticalMultiplier,
+	                                                   bool bUseVariance,
+	                                                   bool bCanCrit,
+	                                                   float DamageRollAlpha,
+	                                                   float CritRollAlpha);
+
+	/** Returns true only when the source opted into dodge and the roll is below target dodge chance. */
+	static bool ResolveDodge(bool bCanBeDodged, float DodgeChanceFraction, float DodgeRollAlpha);
+
+	/** Combines persistent and per-spec penetration under the configured cap. */
+	static float ResolveArmorPenetration(float SourcePenetration, float SpecPenetration, float MaximumPenetration);
+
+	/** Calculates post-overkill life steal without exceeding the source's missing health. */
+	static float ResolveLifeSteal(float ActualDamage, float LifeStealFraction, float MissingHealth, bool bCanLifeSteal);
+
+	// Resolves a server-authoritative physical hit and writes combat meta attributes.
 	virtual void Execute_Implementation(const FGameplayEffectCustomExecutionParameters& ExecutionParams,
 	                                    FGameplayEffectCustomExecutionOutput& OutExecutionOutput) const override;
 

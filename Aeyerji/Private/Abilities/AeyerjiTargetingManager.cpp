@@ -14,6 +14,7 @@
 #include "CharacterStatsLibrary.h"
 #include "CollisionQueryParams.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/GameInstance.h"
 #include "Logging/AeyerjiLog.h"
 #include "UObject/UnrealType.h"
 
@@ -120,7 +121,7 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 			{
 				if (UWorld* World = OwnerPC->GetWorld())
 				{
-					FCollisionQueryParams Params(SCENE_QUERY_STAT(TargetingPawnTrace), /*bTraceComplex=*/false);
+					FCollisionQueryParams Params(SCENE_QUERY_STAT(TargetingEnemyClickTrace), /*bTraceComplex=*/false);
 					if (const APawn* MyPawn = OwnerPC->GetPawn())
 					{
 						Params.AddIgnoredActor(MyPawn);
@@ -160,7 +161,7 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 					for (int32 Pass = 0; Pass < 4; ++Pass)
 					{
 						FHitResult PawnHit;
-						if (!World->LineTraceSingleByChannel(PawnHit, TraceStart, TraceEnd, ECC_Pawn, Params))
+						if (!World->LineTraceSingleByChannel(PawnHit, TraceStart, TraceEnd, ECC_GameTraceChannel3, Params))
 						{
 							break;
 						}
@@ -292,11 +293,19 @@ float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbility
 		}
 	}
 
-	if (const FAeyerjiAbilityTableRow* Row = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
-		UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
-		AbilityTag))
+	const UAeyerjiAbilityTuningSubsystem* Tuning = nullptr;
+	if (OwnerPC)
 	{
-		Range = FMath::Max(Row->PreviewRange, Row->MaxRange);
+		if (UGameInstance* GameInstance = OwnerPC->GetGameInstance())
+		{
+			Tuning = GameInstance->GetSubsystem<UAeyerjiAbilityTuningSubsystem>();
+		}
+	}
+
+	FAeyerjiAbilityResolvedConfig Config;
+	if (Tuning && Tuning->ResolveAbilityConfig(AbilityTag, FMath::Max(1, Slot.Level), Config))
+	{
+		Range = FMath::Max(Config.PreviewRange, Config.MaxRange);
 	}
 
 	if (Slot.Class)
@@ -330,11 +339,10 @@ float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbility
 					}
 				}
 
-				if (const FAeyerjiAbilityTableRow* Row = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
-					UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
-					AbilityTag))
+				FAeyerjiAbilityResolvedConfig ConfigFromClass;
+				if (Tuning && Tuning->ResolveAbilityConfig(AbilityTag, FMath::Max(1, Slot.Level), ConfigFromClass))
 				{
-					Range = FMath::Max(Range, FMath::Max(Row->PreviewRange, Row->MaxRange));
+					Range = FMath::Max(Range, FMath::Max(ConfigFromClass.PreviewRange, ConfigFromClass.MaxRange));
 				}
 			}
 

@@ -29,8 +29,6 @@ bool FAeyerjiLootSourceRuleSetProfileTest::RunTest(const FString& Parameters)
 	Rule.Profile.BaseLegendaryChance = 0.35f;
 	Rule.Profile.MinimumRarity = EItemRarity::Rare;
 	Rule.Profile.PitySuccessRarity = EItemRarity::Epic;
-	Rule.Profile.ItemLevelJitterMin = -1;
-	Rule.Profile.ItemLevelJitterMax = 3;
 	Rule.Profile.PitySoftStartOverride = 5;
 	Rule.Profile.PitySoftSlopeOverride = 0.02f;
 	Rule.Profile.PityHardAttemptsOverride = 25;
@@ -82,8 +80,6 @@ bool FAeyerjiLootSourceRuleSetSanitizesTest::RunTest(const FString& Parameters)
 
 	RuleSet->DefaultProfile.BaseLegendaryChance = 2.0f;
 	RuleSet->DefaultProfile.DifficultyScale = -3.0f;
-	RuleSet->DefaultProfile.ItemLevelJitterMin = 4;
-	RuleSet->DefaultProfile.ItemLevelJitterMax = -2;
 	RuleSet->DefaultProfile.PitySoftStartOverride = -20;
 	RuleSet->DefaultProfile.PitySoftSlopeOverride = -0.2f;
 	RuleSet->DefaultProfile.PityHardAttemptsOverride = -30;
@@ -99,8 +95,6 @@ bool FAeyerjiLootSourceRuleSetSanitizesTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Legendary chance clamps to probability."), Resolved.BaseLegendaryChance, 1.0f);
 	TestEqual(TEXT("Invalid difficulty scale falls back to 1."), Resolved.DifficultyScale, 1.0f);
-	TestEqual(TEXT("Jitter min is swapped below max."), Resolved.ItemLevelJitterMin, -2);
-	TestEqual(TEXT("Jitter max is swapped above min."), Resolved.ItemLevelJitterMax, 4);
 	TestEqual(TEXT("Negative soft pity start normalizes to default sentinel."), Resolved.PitySoftStartOverride, -1);
 	TestEqual(TEXT("Negative soft pity slope normalizes to default sentinel."), Resolved.PitySoftSlopeOverride, -1.0f);
 	TestEqual(TEXT("Negative hard pity normalizes to default sentinel."), Resolved.PityHardAttemptsOverride, -1);

@@ -148,13 +148,13 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.0"))
     float ConeStrikeDelay = 0.05f;
 
-    /** How long to keep sweeping the cone once the strike starts (unscaled seconds). */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.0"))
-    float ConeStrikeDuration = 0.22f;
+    /** Multiplies AttackRange for a target that was valid when this swing started, allowing animation follow-through to land. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|Targeting", meta=(ClampMin="1.0"))
+    float LockedTargetGraceRangeMultiplier = 2.5f;
 
-    /** Interval between cone sweeps while the strike window is active (unscaled seconds). */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.01"))
-    float ConeStrikeTickInterval = 0.05f;
+    /** Refaces the attacker at impact when the locked target has moved this far off the current forward direction. */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|Targeting", meta=(ClampMin="0.0", ClampMax="180.0", Units="deg"))
+    float LockedTargetRefacingThresholdDegrees = 90.f;
 
 private:
     /** Active montage task for the current swing. */
@@ -217,21 +217,38 @@ private:
     /** Runtime list of montages resolved from the avatar/interface for this activation. */
     TArray<TWeakObjectPtr<UAnimMontage>> RuntimeComboMontages;
 
-    /** Timer driving repeated cone sweeps during the strike. */
-    FTimerHandle ConeTraceTimerHandle;
+    /** Timer that resolves the one authoritative strike for the current combo stage. */
+    FTimerHandle DeterministicStrikeTimerHandle;
 
     /** Failsafe timer that forces the ability to finish if montage callbacks never arrive. */
     FTimerHandle MontageFailsafeTimerHandle;
 
+    /** Monotonic id used to correlate deterministic strike logs for a stage. */
+    int32 DeterministicStrikeSequence = 0;
+
+    /** Id of the currently pending deterministic strike, or INDEX_NONE when idle. */
+    int32 ActiveDeterministicStrikeId = INDEX_NONE;
+
+    /** Combo stage associated with the currently pending deterministic strike. */
+    int32 ActiveDeterministicStrikeComboIndex = INDEX_NONE;
+
+    /** True while an accepted combo stage still owes one deterministic strike resolution. */
+    bool bDeterministicStrikePending = false;
+
+    /** True once the current deterministic strike has either resolved or been discarded. */
+    bool bDeterministicStrikeResolved = false;
+
+    /** Target captured at stage acceptance; AI target is preferred, then the startup clicked target. */
+    TWeakObjectPtr<AActor> DeterministicStrikeTarget;
+
+    /** Source label for the captured deterministic target, used by diagnostics. */
+    FName DeterministicStrikeTargetSource;
+
+    /** Attack-speed-scaled delay used for the current deterministic strike. */
+    float DeterministicStrikeImpactDelay = 0.f;
+
     /** Cached play rate for the active montage so cone timings scale with speed. */
     float CurrentMontagePlayRate = 1.f;
-
-    /** Accumulated time spent sweeping during the active strike window. */
-    float ActiveConeStrikeElapsed = 0.f;
-
-    /** Duration and interval for the current strike after play-rate scaling. */
-    float ActiveConeStrikeDuration = 0.f;
-    float ActiveConeStrikeInterval = 0.f;
 
     /** Optional: cached clicked target captured at activation to guarantee inclusion during the swing. */
     TWeakObjectPtr<AActor> StartupClickedTarget;
@@ -243,18 +260,6 @@ private:
     mutable double LastCooldownDebugTime = -1.0;
     FVector CachedHitForward;
     bool bCachedHitShapeValid = false;
-
-    /** Enables debug drawing for the cone trace fallback. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(AllowPrivateAccess="true"))
-    bool bDrawConeTraceDebug = false;
-
-    /** Duration for the debug cone/points when enabled. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(AllowPrivateAccess="true", EditCondition="bDrawConeTraceDebug", ClampMin="0.0"))
-    float ConeTraceDebugDuration = 0.2f;
-
-    /** Color for cone trace debug drawing. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(AllowPrivateAccess="true", EditCondition="bDrawConeTraceDebug"))
-    FColor ConeTraceDebugColor = FColor::Red;
 
     bool bCompletionBroadcasted;
 
@@ -276,9 +281,11 @@ private:
     float ResolveAttackRange() const;
     float GetNumericAttributeOrDefault(const FGameplayAttribute& Attribute, float DefaultValue) const;
     void GatherConeTraceTargets(AActor* InstigatorActor, float Range, float AngleDegrees, TArray<FHitResult>& OutHits, const FVector* OverrideOrigin = nullptr, const FVector* OverrideForward = nullptr) const;
-    AActor* ResolvePreferredClickedTarget(const FGameplayAbilityActorInfo* ActorInfo, float MaxAgeSeconds = 1.5f) const;
     bool TryBuildHitFromActor(AActor* InstigatorActor, AActor* TargetActor, float MaxRange, FHitResult& OutHit) const;
     bool TryResolveTargetCollisionPoint(AActor* TargetActor, const FVector& QueryOrigin, FVector& OutTargetPoint, UPrimitiveComponent*& OutTargetComponent) const;
+    bool IsValidDeterministicTarget(AActor* InstigatorActor, AActor* TargetActor) const;
+    bool TryFindNearestForwardTarget(AActor* InstigatorActor, float Range, FHitResult& OutHit) const;
+    void RefaceInstigatorTowardTargetIfNeeded(AActor* InstigatorActor, AActor* TargetActor) const;
 
     FGameplayAbilityTargetDataHandle MakeUniqueTargetData(const TArray<FHitResult>& Hits);
 
@@ -306,9 +313,13 @@ private:
     void SetMovementLock(bool bEnable);
 
     void StartConeStrike();
-    void TickConeStrike();
-    void ExecuteConeTraceSweep();
-    void ClearConeTraceTimer();
+    bool ScheduleDeterministicStrike(int32 ComboIndex, float AttackSpeed);
+    void ResolveDeterministicStrike();
+    void CancelDeterministicStrike(const TCHAR* Reason);
+    void ClearDeterministicStrikeTimer();
+    void ResetDeterministicStrikeState();
+    void CaptureDeterministicStrikeShape(AActor* InstigatorActor);
+    bool IsDeadForDeterministicStrike(AActor* TargetActor) const;
     float CalculateMontagePlayRate(float AttackSpeed) const;
     void ApplyAilmentsToTargetData(const FGameplayAbilityTargetDataHandle& TargetData);
     bool ResolveAilmentMagnitudes(const FGameplayTag& AilmentTypeTag, float& OutAmount, float& OutDuration) const;

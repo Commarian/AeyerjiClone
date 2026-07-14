@@ -51,7 +51,7 @@ bool USTC_AscHasTagCondition::TestCondition(FStateTreeExecutionContext& Context)
 	bool bMatch = false;
 	if (bMatchExactly)
 	{
-		bMatch = Owned.HasAll(Tags) && (Owned.Num() == Tags.Num());
+		bMatch = bMatchAll ? Owned.HasAllExact(Tags) : Owned.HasAnyExact(Tags);
 	}
 	else if (bMatchAll)
 	{

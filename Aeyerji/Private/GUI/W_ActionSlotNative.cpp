@@ -45,6 +45,12 @@ void UW_ActionSlotNative::UpdateCooldownDisplay(float TimeRemaining, float Total
 		? FMath::Max(1, FMath::RoundToInt(CooldownTimeRemaining))
 		: 0;
 
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownTotalTime);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownTimeRemaining);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::bIsCoolingDown);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownPercent);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownDisplaySeconds);
+
 	// AJ_LOG(this, TEXT("UpdateCooldownDisplay SlotIndex=%d Remaining=%.2f Total=%.2f Percent=%.2f DisplaySeconds=%d"),
 	// 	StoredSlotIndex,
 	// 	CooldownTimeRemaining,
@@ -67,6 +73,12 @@ void UW_ActionSlotNative::ClearCooldownDisplay()
 	bIsCoolingDown = false;
 	CooldownDisplaySeconds = 0;
 
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownPercent);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownTimeRemaining);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownTotalTime);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::bIsCoolingDown);
+	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownDisplaySeconds);
+
 	if (CooldownProgress)
 	{
 		CooldownProgress->SetPercent(0.f);
@@ -77,16 +89,6 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonDown(
 		const FGeometry& InGeometry,
 		const FPointerEvent& InMouseEvent)
 {
-	bool bIsPotionSlot = false;
-	for (const FGameplayTag& Tag : StoredSlotData.Tag)
-	{
-		if (Tag.GetTagName().ToString().StartsWith(TEXT("Ability.Potion")))
-		{
-			bIsPotionSlot = true;
-			break;
-		}
-	}
-
 	if (!bIsPotionSlot && InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
 	{
 		OnSlotRightClicked.Broadcast(StoredSlotIndex);
@@ -108,16 +110,6 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonDoubleClick(
 	const FGeometry& InGeometry,
 	const FPointerEvent& InMouseEvent)
 {
-	bool bIsPotionSlot = false;
-	for (const FGameplayTag& Tag : StoredSlotData.Tag)
-	{
-		if (Tag.GetTagName().ToString().StartsWith(TEXT("Ability.Potion")))
-		{
-			bIsPotionSlot = true;
-			break;
-		}
-	}
-
 	if (!bIsPotionSlot && InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)
 	{
 		OnSlotRightClicked.Broadcast(StoredSlotIndex);
@@ -140,16 +132,6 @@ FReply UW_ActionSlotNative::NativeOnMouseButtonUp(
 	if (InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
 		return FReply::Handled();
-	}
-
-	bool bIsPotionSlot = false;
-	for (const FGameplayTag& Tag : StoredSlotData.Tag)
-	{
-		if (Tag.GetTagName().ToString().StartsWith(TEXT("Ability.Potion")))
-		{
-			bIsPotionSlot = true;
-			break;
-		}
 	}
 
 	if (!bIsPotionSlot && InMouseEvent.GetEffectingButton() == EKeys::RightMouseButton)

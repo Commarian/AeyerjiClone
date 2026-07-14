@@ -6,6 +6,7 @@
 #include "AeyerjiSpawnRegion.generated.h"
 
 class UBoxComponent;
+class UEnemySpawnGroupDefinition;
 
 /**
  * Defines a weighted world region used when seeding fixed population clusters.
@@ -18,9 +19,16 @@ class AEYERJI_API AAeyerjiSpawnRegion : public AActor
 public:
 	AAeyerjiSpawnRegion();
 
+	/** Shared Actor Tag that excludes a region from Greater Rift discovery without requiring unique tags. */
+	static const FName RiftExcludedActorTag;
+
 	/** Returns the region bounds in world space. */
 	UFUNCTION(BlueprintPure, Category="SpawnRegion")
 	FBox GetRegionBounds() const;
+
+	/** Untagged regions are eligible by default; add Rift.Excluded to Actor Tags for boss or unsafe areas. */
+	UFUNCTION(BlueprintPure, Category="SpawnRegion|Rift")
+	bool IsRiftEncounterEligible() const;
 
 public:
 	/** Collision volume used to describe the region footprint. */
@@ -46,4 +54,8 @@ public:
 	/** When false, elites are suppressed for clusters seeded in this region. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SpawnRegion")
 	bool bAllowElites = true;
+
+	/** Authored encounter-group composition emitted once when this anchor is activated by a Rift. Empty uses the director fallback pool. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SpawnRegion|Rift")
+	TObjectPtr<UEnemySpawnGroupDefinition> RiftEncounterGroup = nullptr;
 };

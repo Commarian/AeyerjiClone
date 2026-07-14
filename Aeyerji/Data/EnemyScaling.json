@@ -1,0 +1,185 @@
+[
+	{
+		"Name": "Boss",
+		"ArchetypeTag":
+		{
+			"TagName": "Enemy.Role.Boss"
+		},
+		"SourceTag":
+		{
+			"TagName": "Enemy.Role.Boss"
+		},
+		"BaseLevel": 1,
+		"MaxLevelAdvantage": 0,
+		"DifficultyExponent": 1.4,
+		"Attributes": [
+			{
+				"AttributeName": "AeyerjiAttributeSet.Armor",
+				"PerLevelMultiplier": 0.16,
+				"PerLevelAdd": 2.5,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 3,
+				"MinValue": 5,
+				"MaxValue": 12000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.AttackDamage",
+				"PerLevelMultiplier": 0.22,
+				"PerLevelAdd": 5,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 3.5,
+				"MinValue": 10,
+				"MaxValue": 40000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.AttackSpeed",
+				"PerLevelMultiplier": 0.01,
+				"PerLevelAdd": 0.6,
+				"DifficultyMinMultiplier": 0.9,
+				"DifficultyMaxMultiplier": 1.5,
+				"MinValue": 35,
+				"MaxValue": 200
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.HPMax",
+				"PerLevelMultiplier": 0.3,
+				"PerLevelAdd": 70,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 4,
+				"MinValue": 350,
+				"MaxValue": 500000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.RunSpeed",
+				"PerLevelMultiplier": 0.004,
+				"PerLevelAdd": 0.75,
+				"DifficultyMinMultiplier": 0.9,
+				"DifficultyMaxMultiplier": 1.3,
+				"MinValue": 290,
+				"MaxValue": 820
+			}
+		]
+	},
+	{
+		"Name": "Melee",
+		"ArchetypeTag":
+		{
+			"TagName": "Enemy.Role.Mob.Melee"
+		},
+		"SourceTag":
+		{
+			"TagName": "Enemy.Role.Mob.Melee"
+		},
+		"BaseLevel": 1,
+		"MaxLevelAdvantage": 0,
+		"DifficultyExponent": 1.25,
+		"Attributes": [
+			{
+				"AttributeName": "AeyerjiAttributeSet.Armor",
+				"PerLevelMultiplier": 0.08,
+				"PerLevelAdd": 0.35,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 2.5,
+				"MinValue": 0,
+				"MaxValue": 3500
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.AttackDamage",
+				"PerLevelMultiplier": 0.18,
+				"PerLevelAdd": 2.25,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 3,
+				"MinValue": 1.5,
+				"MaxValue": 12000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.AttackSpeed",
+				"PerLevelMultiplier": 0.01,
+				"PerLevelAdd": 0.5,
+				"DifficultyMinMultiplier": 0.9,
+				"DifficultyMaxMultiplier": 1.4,
+				"MinValue": 45,
+				"MaxValue": 180
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.HPMax",
+				"PerLevelMultiplier": 0.24,
+				"PerLevelAdd": 16,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 3.5,
+				"MinValue": 24,
+				"MaxValue": 150000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.RunSpeed",
+				"PerLevelMultiplier": 0.004,
+				"PerLevelAdd": 1,
+				"DifficultyMinMultiplier": 0.9,
+				"DifficultyMaxMultiplier": 1.2,
+				"MinValue": 280,
+				"MaxValue": 760
+			}
+		]
+	},
+	{
+		"Name": "Ranged",
+		"ArchetypeTag":
+		{
+			"TagName": "Enemy.Role.Mob.Ranged"
+		},
+		"SourceTag":
+		{
+			"TagName": "Enemy.Role.Mob.Ranged"
+		},
+		"BaseLevel": 1,
+		"MaxLevelAdvantage": 0,
+		"DifficultyExponent": 1.25,
+		"Attributes": [
+			{
+				"AttributeName": "AeyerjiAttributeSet.Armor",
+				"PerLevelMultiplier": 0.06,
+				"PerLevelAdd": 0.25,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 2.5,
+				"MinValue": 0,
+				"MaxValue": 2500
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.AttackDamage",
+				"PerLevelMultiplier": 0.2,
+				"PerLevelAdd": 2.5,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 3,
+				"MinValue": 1.5,
+				"MaxValue": 12000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.AttackSpeed",
+				"PerLevelMultiplier": 0.012,
+				"PerLevelAdd": 0.6,
+				"DifficultyMinMultiplier": 0.9,
+				"DifficultyMaxMultiplier": 1.4,
+				"MinValue": 45,
+				"MaxValue": 190
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.HPMax",
+				"PerLevelMultiplier": 0.18,
+				"PerLevelAdd": 10,
+				"DifficultyMinMultiplier": 1,
+				"DifficultyMaxMultiplier": 3.5,
+				"MinValue": 20,
+				"MaxValue": 100000
+			},
+			{
+				"AttributeName": "AeyerjiAttributeSet.RunSpeed",
+				"PerLevelMultiplier": 0.003,
+				"PerLevelAdd": 0.75,
+				"DifficultyMinMultiplier": 0.9,
+				"DifficultyMaxMultiplier": 1.2,
+				"MinValue": 280,
+				"MaxValue": 740
+			}
+		]
+	}
+]

@@ -7,6 +7,7 @@
 #include "CharacterStatsLibrary.h"
 
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "Attributes/AeyerjiStatEngineComponent.h"
 #include "Components/AeyerjiPickupFXComponent.h"
 #include "Components/WeaponEquipmentComponent.h"
 #include "Items/InventoryComponent.h"
@@ -16,6 +17,7 @@
 #include "Aeyerji/AeyerjiPlayerController.h"
 
 #include "Aeyerji/AeyerjiPlayerState.h"
+#include "Aeyerji/AeyerjiGameState.h"
 
 #include "Aeyerji/AeyerjiSaveGame.h"
 
@@ -548,6 +550,7 @@ void APlayerParentNative::InitAbilityActorInfo()
 
   BindDeathEvent();
   BindCrowdControlEvents();
+  BindRuntimeAttributeHooks();
 
   // Configure leveling component from BP (if present)
 
@@ -570,6 +573,11 @@ void APlayerParentNative::InitAbilityActorInfo()
         // Apply immediately on the authority path so freshly possessed pawns do not
         // spend a frame using constructor fallback combat stats.
         Leveling->ForceRefreshForCurrentLevel();
+      }
+
+      if (StatEngine)
+      {
+        StatEngine->EnsureRegenerationActive();
       }
     }
 
@@ -670,6 +678,13 @@ void APlayerParentNative::OnDeath_Implementation()
 
 {
   // Native death presentation is handled externally; keep the player hook logic-only.
+  if (HasAuthority())
+  {
+    if (AAeyerjiGameState* GameState = GetWorld() ? GetWorld()->GetGameState<AAeyerjiGameState>() : nullptr)
+    {
+      GameState->Server_NotifyPlayerDeath(GetPlayerState<AAeyerjiPlayerState>());
+    }
+  }
 }
 
 float APlayerParentNative::GetHealthPercent()

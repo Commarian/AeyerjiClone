@@ -1,0 +1,130 @@
+[
+    {
+        "Name":  "AeyerjiAttributeSet.ManaMax",
+        "BaseValue":  20,
+        "MinValue":  1,
+        "MaxValue":  1000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.Mana",
+        "BaseValue":  20,
+        "MinValue":  0,
+        "MaxValue":  1000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.HP",
+        "BaseValue":  500,
+        "MinValue":  0,
+        "MaxValue":  10000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.HPMax",
+        "BaseValue":  500,
+        "MinValue":  1,
+        "MaxValue":  10000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.RunSpeed",
+        "BaseValue":  350,
+        "MinValue":  50,
+        "MaxValue":  3000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.WalkSpeed",
+        "BaseValue":  300,
+        "MinValue":  10,
+        "MaxValue":  1500,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.AttackRange",
+        "BaseValue":  155,
+        "MinValue":  25,
+        "MaxValue":  100000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.AttackAngle",
+        "BaseValue":  110,
+        "MinValue":  5,
+        "MaxValue":  360,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.AttackDamage",
+        "BaseValue":  30,
+        "MinValue":  0,
+        "MaxValue":  10000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.AttackSpeed",
+        "BaseValue":  47.19,
+        "MinValue":  0.1,
+        "MaxValue":  100000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.Armor",
+        "BaseValue":  27,
+        "MinValue":  0,
+        "MaxValue":  100000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.ProjectilePredictionAmount",
+        "BaseValue":  0,
+        "MinValue":  0,
+        "MaxValue":  100,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.ProjectileSpeedRanged",
+        "BaseValue":  0,
+        "MinValue":  0,
+        "MaxValue":  200000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.PatrolRadius",
+        "BaseValue":  2200,
+        "MinValue":  100,
+        "MaxValue":  200000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.XP",
+        "BaseValue":  55,
+        "MinValue":  0,
+        "MaxValue":  10000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    },
+    {
+        "Name":  "AeyerjiAttributeSet.XPMax",
+        "BaseValue":  190,
+        "MinValue":  1,
+        "MaxValue":  10000000,
+        "DerivedAttributeInfo":  "",
+        "bCanStack":  false
+    }
+]

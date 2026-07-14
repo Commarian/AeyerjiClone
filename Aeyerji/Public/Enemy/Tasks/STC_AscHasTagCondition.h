@@ -22,7 +22,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ASC")
 	bool bMatchAll = false;
 
-	/** If true, require ASC's owned tags to match exactly the provided Tags (same set, same count). */
+	/** If true, only exact leaf tags match; otherwise parent tags such as State.CrowdControl match their children. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="ASC")
 	bool bMatchExactly = false;
 

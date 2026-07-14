@@ -14,6 +14,7 @@
 #include "CharacterStatsLibrary.h"
 #include "EngineUtils.h"
 #include "Logging/AeyerjiLog.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/Pawn.h"
@@ -73,11 +74,36 @@ namespace
 		return Loaded;
 	}
 
-	FVector SnapDropLocationToGround(UWorld* World, const FVector& DesiredLocation, const AActor* ActorToIgnore)
+	FAeyerjiNavSafetyResolveParams MakeInventoryLootDropHardNavFallbackParams()
+	{
+		FAeyerjiNavSafetyResolveParams Params;
+		Params.ProjectionExtent = FVector(50000.f, 50000.f, 10000.f);
+		Params.SearchRadius = 50000.f;
+		Params.SearchStep = 5000.f;
+		Params.AdditionalGroundOffset = 2.f;
+		Params.bRequireClearLocation = false;
+		return Params;
+	}
+
+	FVector ResolveDropLocationToNavOrGround(
+		const UObject* WorldContextObject,
+		UWorld* World,
+		const FVector& DesiredLocation,
+		const AActor* ActorToIgnore)
 	{
 		if (!World)
 		{
 			return DesiredLocation;
+		}
+
+		FAeyerjiNavSafetyResult NavResult;
+		if (UAeyerjiNavSafetyLibrary::ResolveNearestNavGroundLocation(
+				WorldContextObject ? WorldContextObject : World,
+				DesiredLocation,
+				MakeInventoryLootDropHardNavFallbackParams(),
+				NavResult))
+		{
+			return NavResult.GroundedLocation;
 		}
 
 		FCollisionQueryParams Params(SCENE_QUERY_STAT(AeyerjiLootDropSnap), /*bTraceComplex=*/false);
@@ -90,12 +116,18 @@ namespace
 		const FVector TraceEnd = DesiredLocation - FVector(0.f, 0.f, 5000.f);
 
 		FHitResult Hit;
-		if (World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params) ||
-			World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_WorldStatic, Params))
+		FCollisionObjectQueryParams ObjectParams;
+		ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
+
+		if (World->LineTraceSingleByObjectType(Hit, TraceStart, TraceEnd, ObjectParams, Params) && Hit.bBlockingHit)
 		{
 			return Hit.ImpactPoint;
 		}
 
+		UE_LOG(LogAeyerji, Warning,
+			TEXT("[LootReward] Drop location could not resolve to nav or ground; using requested location Desired=%s ActorToIgnore=%s"),
+			*DesiredLocation.ToCompactString(),
+			*GetNameSafe(ActorToIgnore));
 		return DesiredLocation;
 	}
 
@@ -215,6 +247,144 @@ namespace
 			ItemInstance,
 			SpawnTransform,
 			LootPickupClass);
+	}
+
+	FVector ResolveBatchSpawnLocation(
+		const FVector& BaseLocation,
+		const int32 ResultIndex,
+		const int32 ResultCount,
+		const float ScatterRadius,
+		const float ScatterYawOffset)
+	{
+		if (ResultCount <= 1 || ScatterRadius <= KINDA_SMALL_NUMBER)
+		{
+			return BaseLocation;
+		}
+
+		const float AngleDegrees = ScatterYawOffset + (360.f * static_cast<float>(ResultIndex) / static_cast<float>(ResultCount));
+		const float AngleRadians = FMath::DegreesToRadians(AngleDegrees);
+		const FVector ScatterOffset(FMath::Cos(AngleRadians) * ScatterRadius, FMath::Sin(AngleRadians) * ScatterRadius, 0.f);
+		return BaseLocation + ScatterOffset;
+	}
+
+	void AccumulateLootSpawnSummary(FAeyerjiLootSpawnSummary& Total, const FAeyerjiLootSpawnSummary& Added)
+	{
+		Total.RequestedResultCount += Added.RequestedResultCount;
+		Total.SpawnedPickupCount += Added.SpawnedPickupCount;
+		Total.FailedSpawnCount += Added.FailedSpawnCount;
+		if (Added.LastSpawnedPickup)
+		{
+			Total.LastSpawnedPickup = Added.LastSpawnedPickup;
+		}
+		Total.SpawnedPickups.Append(Added.SpawnedPickups);
+	}
+
+	FAeyerjiLootSpawnSummary SpawnLootFromResultInternal(
+		UObject* WorldContextObject,
+		const FLootDropResult& Result,
+		FVector Location,
+		FRotator Rotation,
+		int32 SeedOverride,
+		EItemDropDistributionMode DropMode,
+		AActor* Instigator)
+	{
+		FAeyerjiLootSpawnSummary Summary;
+		Summary.RequestedResultCount = 1;
+
+		if (!WorldContextObject)
+		{
+			AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootFromResult aborted - null WorldContext"));
+			++Summary.FailedSpawnCount;
+			return Summary;
+		}
+
+		UWorld* World = WorldContextObject->GetWorld();
+		if (!World || World->GetNetMode() == NM_Client)
+		{
+			AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootFromResult aborted - World=%s NetMode=%d"),
+				*GetNameSafe(World),
+				World ? static_cast<int32>(World->GetNetMode()) : -1);
+			++Summary.FailedSpawnCount;
+			return Summary;
+		}
+
+		UItemDefinition* Definition = Result.ItemDefinition;
+		if (!Definition && Result.ItemDefinitionKey != NAME_None)
+		{
+			Definition = UCharacterStatsLibrary::ResolveItemDefinitionByKey(WorldContextObject, Result.ItemDefinitionKey);
+		}
+
+		if (!Definition)
+		{
+			AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootFromResult aborted - missing item definition DefinitionKey=%s"),
+				*Result.ItemDefinitionKey.ToString());
+			++Summary.FailedSpawnCount;
+			return Summary;
+		}
+
+		const EItemRarity Rarity = Result.Rarity;
+		const bool bUniquePerPlayer = (DropMode == EItemDropDistributionMode::DropUniqueItemForEveryPlayer);
+		const int32 BaseSeed = (Result.Seed != 0) ? Result.Seed : (SeedOverride != 0 ? SeedOverride : FMath::Rand());
+
+		TArray<AActor*> Recipients;
+		CollectRecipients(World, DropMode, Instigator, Recipients);
+		if (Recipients.Num() == 0)
+		{
+			Recipients.Add(nullptr);
+		}
+
+		const FVector SnappedLocation = ResolveDropLocationToNavOrGround(WorldContextObject, World, Location, Instigator);
+
+		for (int32 Idx = 0; Idx < Recipients.Num(); ++Idx)
+		{
+			AActor* Recipient = Recipients[Idx] ? Recipients[Idx] : Instigator;
+			const int32 ItemLevel = ResolveDirectSpawnItemLevel(Result.ItemLevel, Recipient);
+			if (ItemLevel < Definition->GetEffectiveRequiredLevel())
+			{
+				AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootFromResult rejected - Def=%s RequestedLevel=%d ResolvedLevel=%d Recipient=%s RequiredLevel=%d"),
+					*GetNameSafe(Definition),
+					Result.ItemLevel,
+					ItemLevel,
+					*GetNameSafe(Recipient),
+					Definition->GetEffectiveRequiredLevel());
+				++Summary.FailedSpawnCount;
+				continue;
+			}
+
+			const int32 Seed = bUniquePerPlayer ? (BaseSeed + Idx + 1) : BaseSeed;
+			UAeyerjiItemInstance* Instance = UItemGenerator::RollItemInstance(WorldContextObject, Definition, ItemLevel, Rarity, Seed, Definition->DefaultSlot);
+			if (!Instance)
+			{
+				AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootFromResult failed to roll item instance for %s DefinitionKey=%s Recipient=%s"),
+					*GetNameSafe(Definition),
+					*Result.ItemDefinitionKey.ToString(),
+					*GetNameSafe(Recipient));
+				++Summary.FailedSpawnCount;
+				continue;
+			}
+
+			AAeyerjiLootPickup* SpawnedPickup = SpawnPickupWithInstance(WorldContextObject, World, Instance, FTransform(Rotation, SnappedLocation));
+			if (SpawnedPickup)
+			{
+				++Summary.SpawnedPickupCount;
+				Summary.LastSpawnedPickup = SpawnedPickup;
+				Summary.SpawnedPickups.Add(SpawnedPickup);
+			}
+			else
+			{
+				++Summary.FailedSpawnCount;
+			}
+
+			AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootFromResult Context=%s Mode=%d Recipient=%s Seed=%d Location=%s Pickup=%s"),
+				*GetNameSafe(WorldContextObject),
+				static_cast<int32>(DropMode),
+				*GetNameSafe(Recipient),
+				Seed,
+				*SnappedLocation.ToString(),
+				*GetNameSafe(SpawnedPickup));
+		}
+
+		return Summary;
 	}
 }
 
@@ -397,7 +567,7 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootByDefinition(
 		Recipients.Add(nullptr); // fallback: behave like instigator-only
 	}
 
-	const FVector SnappedLocation = SnapDropLocationToGround(World, Location, Instigator);
+	const FVector SnappedLocation = ResolveDropLocationToNavOrGround(WorldContextObject, World, Location, Instigator);
 
 	AAeyerjiLootPickup* LastSpawned = nullptr;
 	for (int32 Idx = 0; Idx < Recipients.Num(); ++Idx)
@@ -480,7 +650,7 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootByInstance(
 		Recipients.Add(nullptr);
 	}
 
-	const FVector SnappedLocation = SnapDropLocationToGround(World, Location, Instigator);
+	const FVector SnappedLocation = ResolveDropLocationToNavOrGround(WorldContextObject, World, Location, Instigator);
 
 	AAeyerjiLootPickup* LastSpawned = nullptr;
 	for (int32 Idx = 0; Idx < Recipients.Num(); ++Idx)
@@ -518,81 +688,65 @@ AAeyerjiLootPickup* UAeyerjiInventoryBPFL::SpawnLootFromResult(
 	EItemDropDistributionMode DropMode,
 	AActor* Instigator)
 {
-	if (!WorldContextObject)
+	const FAeyerjiLootSpawnSummary Summary = SpawnLootFromResultInternal(
+		WorldContextObject,
+		Result,
+		Location,
+		Rotation,
+		SeedOverride,
+		DropMode,
+		Instigator);
+	return Summary.LastSpawnedPickup;
+}
+
+FAeyerjiLootSpawnSummary UAeyerjiInventoryBPFL::SpawnLootResults(
+	UObject* WorldContextObject,
+	const TArray<FLootDropResult>& Results,
+	FVector Location,
+	FRotator Rotation,
+	int32 SeedOverride,
+	EItemDropDistributionMode DropMode,
+	AActor* Instigator,
+	float LootReleaseScatterRadius,
+	float LootReleaseScatterYawOffset)
+{
+	FAeyerjiLootSpawnSummary Summary;
+	if (Results.IsEmpty())
 	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult aborted - null WorldContext"));
-		return nullptr;
+		AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootResults skipped - no results Context=%s"),
+			*GetNameSafe(WorldContextObject));
+		return Summary;
 	}
 
-	UWorld* World = WorldContextObject->GetWorld();
-	if (!World || World->GetNetMode() == NM_Client)
+	for (int32 ResultIndex = 0; ResultIndex < Results.Num(); ++ResultIndex)
 	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult aborted - World=%s NetMode=%d"),
-			*GetNameSafe(World),
-			World ? static_cast<int32>(World->GetNetMode()) : -1);
-		return nullptr;
+		const FVector SpawnLocation = ResolveBatchSpawnLocation(
+			Location,
+			ResultIndex,
+			Results.Num(),
+			FMath::Max(0.f, LootReleaseScatterRadius),
+			LootReleaseScatterYawOffset);
+
+		const FAeyerjiLootSpawnSummary ResultSummary = SpawnLootFromResultInternal(
+			WorldContextObject,
+			Results[ResultIndex],
+			SpawnLocation,
+			Rotation,
+			SeedOverride,
+			DropMode,
+			Instigator);
+		AccumulateLootSpawnSummary(Summary, ResultSummary);
 	}
 
-	UItemDefinition* Definition = Result.ItemDefinition;
-	if (!Definition && Result.ItemDefinitionKey != NAME_None)
-	{
-		Definition = UCharacterStatsLibrary::ResolveItemDefinitionByKey(WorldContextObject, Result.ItemDefinitionKey);
-	}
-
-	if (!Definition)
-	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult aborted - missing item definition (DefinitionKey=%s)"), *Result.ItemDefinitionKey.ToString());
-		return nullptr;
-	}
-
-	const int32 ItemLevel = ResolveDirectSpawnItemLevel(Result.ItemLevel, Instigator);
-	if (ItemLevel < Definition->GetEffectiveRequiredLevel())
-	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult rejected - Def=%s RequestedLevel=%d ResolvedLevel=%d Instigator=%s RequiredLevel=%d"),
-			*GetNameSafe(Definition),
-			Result.ItemLevel,
-			ItemLevel,
-			*GetNameSafe(Instigator),
-			Definition->GetEffectiveRequiredLevel());
-		return nullptr;
-	}
-	const EItemRarity Rarity = Result.Rarity;
-	const bool bUniquePerPlayer = (DropMode == EItemDropDistributionMode::DropUniqueItemForEveryPlayer);
-	const int32 BaseSeed = (Result.Seed != 0) ? Result.Seed : (SeedOverride != 0 ? SeedOverride : FMath::Rand());
-
-	TArray<AActor*> Recipients;
-	CollectRecipients(World, DropMode, Instigator, Recipients);
-	if (Recipients.Num() == 0)
-	{
-		Recipients.Add(nullptr); // fallback: behave like instigator-only
-	}
-
-	const FVector SnappedLocation = SnapDropLocationToGround(World, Location, Instigator);
-
-	AAeyerjiLootPickup* LastSpawned = nullptr;
-	for (int32 Idx = 0; Idx < Recipients.Num(); ++Idx)
-	{
-		const int32 Seed = bUniquePerPlayer ? (BaseSeed + Idx + 1) : BaseSeed;
-
-		UAeyerjiItemInstance* Instance = UItemGenerator::RollItemInstance(WorldContextObject, Definition, ItemLevel, Rarity, Seed, Definition->DefaultSlot);
-		if (!Instance)
-		{
-			AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult failed to roll item instance for %s (DefinitionKey=%s)"), *GetNameSafe(Definition), *Result.ItemDefinitionKey.ToString());
-			continue;
-		}
-
-		LastSpawned = SpawnPickupWithInstance(WorldContextObject, World, Instance, FTransform(Rotation, SnappedLocation));
-
-		AJ_LOG(WorldContextObject, TEXT("SpawnLootFromResult %s Mode=%d Recipient=%s Seed=%d Location=%s Result=%s"),
-			*GetNameSafe(WorldContextObject),
-			static_cast<int32>(DropMode),
-			*GetNameSafe(Recipients[Idx]),
-			Seed,
-			*SnappedLocation.ToString(),
-			*GetNameSafe(LastSpawned));
-	}
-
-	return LastSpawned;
+	AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnLootResults complete Context=%s RequestedResults=%d SpawnedPickups=%d FailedSpawns=%d DropMode=%d ScatterRadius=%.1f Location=%s"),
+		*GetNameSafe(WorldContextObject),
+		Summary.RequestedResultCount,
+		Summary.SpawnedPickupCount,
+		Summary.FailedSpawnCount,
+		static_cast<int32>(DropMode),
+		FMath::Max(0.f, LootReleaseScatterRadius),
+		*Location.ToCompactString());
+	return Summary;
 }
 
 void UAeyerjiInventoryBPFL::SpawnMultiDropFromContext(
@@ -606,14 +760,14 @@ void UAeyerjiInventoryBPFL::SpawnMultiDropFromContext(
 {
 	if (!WorldContextObject)
 	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnMultiDropFromContext aborted - null WorldContext"));
+		AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnMultiDropFromContext aborted - null WorldContext"));
 		return;
 	}
 
 	UWorld* World = WorldContextObject->GetWorld();
 	if (!World || World->GetNetMode() == NM_Client)
 	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnMultiDropFromContext aborted - World=%s NetMode=%d"),
+		AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnMultiDropFromContext aborted - World=%s NetMode=%d"),
 			*GetNameSafe(World),
 			World ? static_cast<int32>(World->GetNetMode()) : -1);
 		return;
@@ -622,7 +776,7 @@ void UAeyerjiInventoryBPFL::SpawnMultiDropFromContext(
 	ULootService* LootService = UCharacterStatsLibrary::GetLootService(WorldContextObject);
 	if (!LootService)
 	{
-		AJ_LOG(WorldContextObject, TEXT("SpawnMultiDropFromContext aborted - LootService missing"));
+		AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnMultiDropFromContext aborted - LootService missing"));
 		return;
 	}
 
@@ -637,10 +791,21 @@ void UAeyerjiInventoryBPFL::SpawnMultiDropFromContext(
 		return;
 	}
 
-	for (const FLootDropResult& Result : Results)
-	{
-		SpawnLootFromResult(WorldContextObject, Result, Location, Rotation, /*SeedOverride=*/0, DropMode, Instigator);
-	}
+	const FAeyerjiLootSpawnSummary Summary = SpawnLootResults(
+		WorldContextObject,
+		Results,
+		Location,
+		Rotation,
+		/*SeedOverride=*/0,
+		DropMode,
+		Instigator);
+	AJ_LOG(WorldContextObject, TEXT("[LootReward] SpawnMultiDropFromContext SourceTag=%s RolledResults=%d SpawnedPickups=%d FailedSpawns=%d Buckets=%d Location=%s"),
+		*BaseContext.SourceTag.ToString(),
+		Results.Num(),
+		Summary.SpawnedPickupCount,
+		Summary.FailedSpawnCount,
+		Config.Buckets.Num(),
+		*Location.ToCompactString());
 }
 
 void UAeyerjiInventoryBPFL::SpawnDistributedLootFromContext(

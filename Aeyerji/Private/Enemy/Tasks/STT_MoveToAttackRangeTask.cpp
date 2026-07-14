@@ -14,14 +14,20 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "AbilitySystemComponent.h"
+#include "AeyerjiCharacter.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "Components/BoxComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "StateTreeExecutionContext.h"
 #include "Enemy/EnemyAIController.h"
+#include "World/AeyerjiSurvivalDefenseObjectiveActor.h"
 
-#define MOVE_TO_ATTACK_RANGE_LOGGING 0
+#define MOVE_TO_ATTACK_RANGE_LOGGING 1
 
 #if MOVE_TO_ATTACK_RANGE_LOGGING
 DEFINE_LOG_CATEGORY_STATIC(LogMoveToAttackRangeTask, Log, All);
+static constexpr const TCHAR* MoveToAttackRangeTask_LogTag = TEXT("[MoveToAttackRange]");
 
 static const TCHAR* MoveToAttackRangeTask_GetNetModeString(const UWorld* World)
 {
@@ -110,8 +116,9 @@ static void MoveToAttackRangeTask_LogMovementSnapshot(const TCHAR* Phase, const 
 
 	UE_LOG(
 		LogMoveToAttackRangeTask,
-		Log,
-		TEXT("MoveToAttackRangeTask: [%s] World=%s NetMode=%s AI=%s Pawn=%s Role=%d Authority=%d PawnLoc=%s PawnVel=%s Speed=%.1f MoveComp=%s Active=%d Updated=%s CharMove=%s Active=%d MaxWalkSpeed=%.1f RootPhysics=%d Target=%s TargetLoc=%s Dist=%.1f AttackRange=%.1f Reduction=%.1f AcceptRadius=%.1f PathStatus=%s PathPoints=%d Partial=%d NavSys=%s"),
+		VeryVerbose,
+		TEXT("%s Snapshot Phase=%s World=%s NetMode=%s AI=%s Pawn=%s Role=%d Authority=%d PawnLoc=%s PawnVel=%s Speed=%.1f MoveComp=%s Active=%d Updated=%s CharMove=%s Active=%d MaxWalkSpeed=%.1f RootPhysics=%d Target=%s TargetLoc=%s Dist=%.1f AttackRange=%.1f Reduction=%.1f AcceptRadius=%.1f PathStatus=%s PathPoints=%d Partial=%d NavSys=%s"),
+		MoveToAttackRangeTask_LogTag,
 		Phase,
 		World ? *World->GetName() : TEXT("None"),
 		MoveToAttackRangeTask_GetNetModeString(World),
@@ -140,12 +147,271 @@ static void MoveToAttackRangeTask_LogMovementSnapshot(const TCHAR* Phase, const 
 		bNavPathIsPartial ? 1 : 0,
 		NavSys ? TEXT("Valid") : TEXT("None"));
 }
-#define MOVE_LOG(Verbosity, Format, ...) UE_LOG(LogMoveToAttackRangeTask, Verbosity, Format, ##__VA_ARGS__)
+#define MOVE_LOG(Verbosity, Format, ...) UE_LOG(LogMoveToAttackRangeTask, Verbosity, TEXT("[MoveToAttackRange] " Format), ##__VA_ARGS__)
 #define MOVE_SNAPSHOT(Phase, AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius) MoveToAttackRangeTask_LogMovementSnapshot(Phase, AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius)
 #else
 #define MOVE_LOG(Verbosity, Format, ...)
 #define MOVE_SNAPSHOT(Phase, AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius)
 #endif
+
+namespace
+{
+	bool MoveToAttackRangeTask_StopIfCrowdControlled(AAIController* AI, APawn* Pawn, const TCHAR* Phase)
+	{
+		const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(Pawn);
+		if (!ControlledCharacter || !ControlledCharacter->IsCrowdControlled())
+		{
+			return false;
+		}
+
+		if (AI)
+		{
+			AI->StopMovement();
+			AI->ClearFocus(EAIFocusPriority::Gameplay);
+			AI->ClearFocus(EAIFocusPriority::Move);
+		}
+
+		if (UMovementComponent* MovementComponent = Pawn ? Pawn->GetMovementComponent() : nullptr)
+		{
+			MovementComponent->StopMovementImmediately();
+		}
+
+		MOVE_LOG(Verbose, TEXT("%s crowd-controlled pawn; stopping movement and failing task. AI=%s Pawn=%s"),
+			Phase,
+			*GetNameSafe(AI),
+			*GetNameSafe(Pawn));
+		return true;
+	}
+
+	bool MoveToAttackRangeTask_ShouldUseSurfaceRange(const AActor* TargetActor)
+	{
+		return TargetActor && !TargetActor->IsA<APawn>();
+	}
+
+	bool MoveToAttackRangeTask_TryGetPreferredCollisionPoint(const AActor* TargetActor, const FVector& QueryOrigin, FVector& OutClosestPoint)
+	{
+		const AAeyerjiSurvivalDefenseObjectiveActor* DefenseObjective = Cast<AAeyerjiSurvivalDefenseObjectiveActor>(TargetActor);
+		const UPrimitiveComponent* TargetCollision = DefenseObjective ? DefenseObjective->TargetCollision.Get() : nullptr;
+		if (!TargetCollision
+			|| !TargetCollision->IsRegistered()
+			|| TargetCollision->GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+		{
+			return false;
+		}
+
+		float DistanceSq = 0.f;
+		return TargetCollision->GetSquaredDistanceToCollision(QueryOrigin, DistanceSq, OutClosestPoint);
+	}
+
+	bool MoveToAttackRangeTask_TryGetClosestCollisionPoint(const AActor* TargetActor, const FVector& QueryOrigin, FVector& OutClosestPoint)
+	{
+		if (!TargetActor)
+		{
+			return false;
+		}
+
+		TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents;
+		TargetActor->GetComponents(PrimitiveComponents);
+
+		float BestDistanceSq = TNumericLimits<float>::Max();
+		bool bFoundPoint = false;
+		for (const UPrimitiveComponent* PrimitiveComponent : PrimitiveComponents)
+		{
+			if (!PrimitiveComponent
+				|| !PrimitiveComponent->IsRegistered()
+				|| PrimitiveComponent->GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+			{
+				continue;
+			}
+
+			float DistanceSq = 0.f;
+			FVector ClosestPoint = FVector::ZeroVector;
+			if (!PrimitiveComponent->GetSquaredDistanceToCollision(QueryOrigin, DistanceSq, ClosestPoint))
+			{
+				continue;
+			}
+
+			if (!bFoundPoint || DistanceSq < BestDistanceSq)
+			{
+				BestDistanceSq = DistanceSq;
+				OutClosestPoint = ClosestPoint;
+				bFoundPoint = true;
+			}
+		}
+
+		return bFoundPoint;
+	}
+
+	FVector MoveToAttackRangeTask_GetTargetReferencePoint(const AActor* TargetActor, const FVector& FromLocation)
+	{
+		if (!MoveToAttackRangeTask_ShouldUseSurfaceRange(TargetActor))
+		{
+			return TargetActor ? TargetActor->GetActorLocation() : FVector::ZeroVector;
+		}
+
+		FVector ClosestCollisionPoint = FVector::ZeroVector;
+		if (MoveToAttackRangeTask_TryGetPreferredCollisionPoint(TargetActor, FromLocation, ClosestCollisionPoint))
+		{
+			return ClosestCollisionPoint;
+		}
+
+		if (MoveToAttackRangeTask_TryGetClosestCollisionPoint(TargetActor, FromLocation, ClosestCollisionPoint))
+		{
+			return ClosestCollisionPoint;
+		}
+
+		const FBox TargetBounds = TargetActor->GetComponentsBoundingBox(/*bNonColliding=*/false);
+		if (TargetBounds.IsValid)
+		{
+			return TargetBounds.GetClosestPointTo(FromLocation);
+		}
+
+		return TargetActor->GetActorLocation();
+	}
+
+	float MoveToAttackRangeTask_GetDistanceToTarget(const APawn* Pawn, const AActor* TargetActor)
+	{
+		if (!Pawn || !TargetActor)
+		{
+			return TNumericLimits<float>::Max();
+		}
+
+		const FVector PawnLocation = Pawn->GetActorLocation();
+		const FVector TargetPoint = MoveToAttackRangeTask_GetTargetReferencePoint(TargetActor, PawnLocation);
+		return FVector::Dist(PawnLocation, TargetPoint);
+	}
+
+	bool MoveToAttackRangeTask_GetObjectiveMoveLocation(
+		APawn* Pawn,
+		const AActor* TargetActor,
+		const float DesiredSurfaceDistance,
+		FVector& OutMoveLocation)
+	{
+		if (!Pawn || !TargetActor)
+		{
+			return false;
+		}
+
+		const FVector PawnLocation = Pawn->GetActorLocation();
+		const FVector TargetSurfacePoint = MoveToAttackRangeTask_GetTargetReferencePoint(TargetActor, PawnLocation);
+		FVector Direction = PawnLocation - TargetSurfacePoint;
+		Direction.Z = 0.f;
+		if (!Direction.Normalize())
+		{
+			Direction = PawnLocation - TargetActor->GetActorLocation();
+			Direction.Z = 0.f;
+			if (!Direction.Normalize())
+			{
+				Direction = FVector::ForwardVector;
+			}
+		}
+
+		const FVector DesiredLocation = TargetSurfacePoint + (Direction * FMath::Max(0.f, DesiredSurfaceDistance));
+		MOVE_LOG(Verbose,
+			TEXT("Objective destination selected. Pawn=%s Target=%s TargetClass=%s PawnLoc=%s TargetActorLoc=%s TargetSurfacePoint=%s DesiredSurfaceDistance=%.1f DesiredLocation=%s Direction=%s"),
+			*GetNameSafe(Pawn),
+			*GetNameSafe(TargetActor),
+			TargetActor ? *TargetActor->GetClass()->GetName() : TEXT("None"),
+			*PawnLocation.ToString(),
+			*TargetActor->GetActorLocation().ToString(),
+			*TargetSurfacePoint.ToString(),
+			DesiredSurfaceDistance,
+			*DesiredLocation.ToString(),
+			*Direction.ToString());
+
+		FAeyerjiNavSafetyResolveParams NavParams;
+		NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+		NavParams.SearchRadius = 900.f;
+		NavParams.SearchStep = 100.f;
+
+		FAeyerjiNavSafetyResult NavResult;
+		if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(Pawn, DesiredLocation, Pawn, NavParams, NavResult))
+		{
+			MOVE_LOG(Warning,
+				TEXT("Objective destination nav resolve FAILED. Pawn=%s Target=%s Requested=%s FailureReason=%s ProjectionExtent=%s SearchRadius=%.1f SearchStep=%.1f"),
+				*GetNameSafe(Pawn),
+				*GetNameSafe(TargetActor),
+				*DesiredLocation.ToString(),
+				*NavResult.FailureReason.ToString(),
+				*NavParams.ProjectionExtent.ToString(),
+				NavParams.SearchRadius,
+				NavParams.SearchStep);
+			return false;
+		}
+
+		OutMoveLocation = NavResult.NavLocation;
+		MOVE_LOG(Verbose,
+			TEXT("Objective destination nav resolve succeeded. Pawn=%s Target=%s Requested=%s NavLocation=%s GroundedLocation=%s"),
+			*GetNameSafe(Pawn),
+			*GetNameSafe(TargetActor),
+			*NavResult.RequestedLocation.ToString(),
+			*NavResult.NavLocation.ToString(),
+			*NavResult.GroundedLocation.ToString());
+		return true;
+	}
+
+	EPathFollowingRequestResult::Type MoveToAttackRangeTask_RequestMove(
+		AAIController* AI,
+		APawn* Pawn,
+		AActor* TargetActor,
+		const float DesiredSurfaceDistance,
+		const float AcceptMoveRadius)
+	{
+		if (MoveToAttackRangeTask_ShouldUseSurfaceRange(TargetActor))
+		{
+			FVector MoveLocation = FVector::ZeroVector;
+			if (!MoveToAttackRangeTask_GetObjectiveMoveLocation(Pawn, TargetActor, DesiredSurfaceDistance, MoveLocation))
+			{
+				MOVE_LOG(Warning,
+					TEXT("Move request skipped: no objective move location. AI=%s Pawn=%s Target=%s DesiredSurfaceDistance=%.1f AcceptMoveRadius=%.1f"),
+					*GetNameSafe(AI),
+					*GetNameSafe(Pawn),
+					*GetNameSafe(TargetActor),
+					DesiredSurfaceDistance,
+					AcceptMoveRadius);
+				return EPathFollowingRequestResult::Failed;
+			}
+
+			constexpr float MoveLocationAcceptanceRadius = 50.f;
+			const EPathFollowingRequestResult::Type Result = AI->MoveToLocation(
+				MoveLocation,
+				/*AcceptanceRadius=*/MoveLocationAcceptanceRadius,
+				/*bStopOnOverlap=*/false,
+				/*bUsePathfinding=*/true,
+				/*bProjectDestinationToNavigation=*/false,
+				/*bCanStrafe=*/false,
+				/*FilterClass=*/nullptr,
+				/*bAllowPartialPath=*/false);
+			MOVE_LOG(Verbose,
+				TEXT("MoveToLocation requested. AI=%s Pawn=%s Target=%s Destination=%s DesiredSurfaceDistance=%.1f MoveAcceptanceRadius=%.1f bProjectDestinationToNavigation=0 bAllowPartialPath=0 Result=%s"),
+				*GetNameSafe(AI),
+				*GetNameSafe(Pawn),
+				*GetNameSafe(TargetActor),
+				*MoveLocation.ToString(),
+				DesiredSurfaceDistance,
+				MoveLocationAcceptanceRadius,
+				MoveToAttackRangeTask_GetMoveRequestResultString(Result));
+			return Result;
+		}
+
+		const EPathFollowingRequestResult::Type Result = AI->MoveToActor(
+			TargetActor,
+			AcceptMoveRadius,
+			/*bStopOnOverlap=*/false,
+			/*bUsePathfinding=*/true,
+			/*bCanStrafe=*/false,
+			/*FilterClass=*/nullptr,
+			/*bAllowPartialPath=*/false);
+		MOVE_LOG(Verbose,
+			TEXT("MoveToActor requested. AI=%s Pawn=%s Target=%s AcceptMoveRadius=%.1f bAllowPartialPath=0 Result=%s"),
+			*GetNameSafe(AI),
+			*GetNameSafe(Pawn),
+			*GetNameSafe(TargetActor),
+			AcceptMoveRadius,
+			MoveToAttackRangeTask_GetMoveRequestResultString(Result));
+		return Result;
+	}
+}
 
 USTT_MoveToAttackRangeTask::USTT_MoveToAttackRangeTask(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -165,11 +431,16 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 			*GetNameSafe(Pawn));
 		return EStateTreeRunStatus::Failed;
 	}
+	if (MoveToAttackRangeTask_StopIfCrowdControlled(AI, Pawn, TEXT("EnterState")))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
 
 	AActor* TargetActor = nullptr;
-	if (AI->IsA<AEnemyAIController>())
+	if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
 	{
-		TargetActor = Cast<AEnemyAIController>(AI)->GetTargetActor();
+		EnemyAI->RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
+		TargetActor = EnemyAI->GetTargetActor();
 	}
 	if (!TargetActor)
 	{
@@ -185,7 +456,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 	if (UAbilitySystemComponent* ASC = Pawn->FindComponentByClass<UAbilitySystemComponent>())
 	{
 		AttackRange = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackRangeAttribute());
-		MOVE_LOG(Log, TEXT("MoveToAttackRangeTask: [EnterState] Found ASC=%s AttackRangeAttribute=%.2f"),
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [EnterState] Found ASC=%s AttackRangeAttribute=%.2f"),
 			*GetNameSafe(ASC),
 			AttackRange);
 	}
@@ -212,36 +483,45 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 		}
 	}
 
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+	FVector SafePawnLocation = Pawn->GetActorLocation();
+	if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
 	// Already in range? succeed and let the parent transition to Attack
-	const float EnterDistance = FVector::Dist(Pawn->GetActorLocation(), TargetActor->GetActorLocation());
+	const float EnterDistance = MoveToAttackRangeTask_GetDistanceToTarget(Pawn, TargetActor);
 	if (EnterDistance <= AcceptMoveRadius)
 	{
-		MOVE_LOG(Log, TEXT("MoveToAttackRangeTask: [EnterState] Already within radius. Distance=%.1f AcceptRadius=%.1f -> Succeeded"),
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [EnterState] Already within radius. Distance=%.1f AcceptRadius=%.1f -> Succeeded"),
 			EnterDistance,
 			AcceptMoveRadius);
 		return EStateTreeRunStatus::Succeeded;
 	}
 
-	// Aim to stop just inside attack range
-	// Aim to stop just inside attack range, measuring center-to-center only.
-	const EPathFollowingRequestResult::Type Result = AI->MoveToActor(
+	// Aim to stop just inside attack range. Static objectives use their collision surface instead of actor origin.
+	const EPathFollowingRequestResult::Type Result = MoveToAttackRangeTask_RequestMove(
+		AI,
+		Pawn,
 		TargetActor,
 		AcceptMoveRadius,
-		/*bStopOnOverlap=*/false /* do not add agent/goal radii */);
+		AcceptMoveRadius);
 
-	MOVE_LOG(Log, TEXT("MoveToAttackRangeTask: [EnterState] MoveToActor(Target=%s, AcceptRadius=%.1f, StopOnOverlap=false) -> %s"),
+	MOVE_LOG(Verbose, TEXT("Move request issued from EnterState. Target=%s AcceptRadius=%.1f StopOnOverlap=false Result=%s"),
 		*GetNameSafe(TargetActor),
 		AcceptMoveRadius,
 		MoveToAttackRangeTask_GetMoveRequestResultString(Result));
 	MOVE_SNAPSHOT(TEXT("EnterState-AfterMoveTo"), AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius);
 	if (Result == EPathFollowingRequestResult::Failed)
 	{
-		MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [EnterState] MoveToActor FAILED. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
+		MOVE_LOG(Warning, TEXT("Move request FAILED from EnterState. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
 		return EStateTreeRunStatus::Failed;
 	}
 	if (Result == EPathFollowingRequestResult::AlreadyAtGoal)
 	{
-		MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [EnterState] MoveToActor returned AlreadyAtGoal (Distance=%.1f AcceptRadius=%.1f). This typically means acceptance radius is too large or goal location is considered reached."),
+		MOVE_LOG(Warning, TEXT("Move request returned AlreadyAtGoal from EnterState. Distance=%.1f AcceptRadius=%.1f. This typically means acceptance radius is too large or goal location is considered reached."),
 			EnterDistance,
 			AcceptMoveRadius);
 	}
@@ -261,11 +541,19 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 			*GetNameSafe(Pawn));
 		return EStateTreeRunStatus::Failed;
 	}
+	if (MoveToAttackRangeTask_StopIfCrowdControlled(AI, Pawn, TEXT("Tick")))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
 
 	AActor* TargetActor = nullptr;
-	if (AI->IsA<AEnemyAIController>())
+	bool bRetargeted = false;
+	if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
 	{
-		TargetActor = Cast<AEnemyAIController>(AI)->GetTargetActor();
+		const AActor* PreviousTargetActor = EnemyAI->GetTargetActor();
+		bRetargeted = EnemyAI->RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
+		TargetActor = EnemyAI->GetTargetActor();
+		bRetargeted = bRetargeted && PreviousTargetActor != TargetActor;
 	}
 	if (!TargetActor)
 	{
@@ -283,8 +571,27 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 		AttackRange = 150.f;
 	}
 
-	const float Distance = FVector::Dist(Pawn->GetActorLocation(), TargetActor->GetActorLocation());
+	const float Distance = MoveToAttackRangeTask_GetDistanceToTarget(Pawn, TargetActor);
 	const float AcceptMoveRadius = FMath::Max(0.f, AttackRange - AttackRangeReduction);
+
+	if (bRetargeted && Distance > AttackRange)
+	{
+		// Target arbitration can switch between player and defense objective while this task is running.
+		// Re-issue immediately so path-following does not keep walking toward the old target until it idles.
+		AI->StopMovement();
+		const EPathFollowingRequestResult::Type Result = MoveToAttackRangeTask_RequestMove(
+			AI,
+			Pawn,
+			TargetActor,
+			AcceptMoveRadius,
+			AcceptMoveRadius);
+		if (Result == EPathFollowingRequestResult::Failed)
+		{
+			MOVE_LOG(Warning, TEXT("Move request FAILED after retarget. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
+			return EStateTreeRunStatus::Failed;
+		}
+		return EStateTreeRunStatus::Running;
+	}
 
 	if (const UWorld* World = Pawn->GetWorld())
 	{
@@ -332,7 +639,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 	}
 	if (Distance <= AttackRange)
 	{
-		MOVE_LOG(Log, TEXT("MoveToAttackRangeTask: [Tick] Within AttackRange. Distance=%.1f AttackRange=%.1f (AcceptRadius=%.1f) -> Succeeded"),
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [Tick] Within AttackRange. Distance=%.1f AttackRange=%.1f (AcceptRadius=%.1f) -> Succeeded"),
 			Distance,
 			AttackRange,
 			AcceptMoveRadius);
@@ -349,25 +656,35 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 		MoveStatus == EPathFollowingStatus::Paused ||
 		MoveStatus == EPathFollowingStatus::Waiting)
 	{
-		MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] PathFollowingStatus=%s; re-issuing MoveToActor. Distance=%.1f AttackRange=%.1f AcceptRadius=%.1f"),
+		FAeyerjiNavSafetyResolveParams NavParams;
+		NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+		FVector SafePawnLocation = Pawn->GetActorLocation();
+		if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
+		{
+			return EStateTreeRunStatus::Failed;
+		}
+
+		MOVE_LOG(Warning, TEXT("PathFollowingStatus=%s; re-issuing move request. Distance=%.1f AttackRange=%.1f AcceptRadius=%.1f"),
 			MoveToAttackRangeTask_GetPathStatusString(MoveStatus),
 			Distance,
 			AttackRange,
 			AcceptMoveRadius);
 
-		const EPathFollowingRequestResult::Type Result = AI->MoveToActor(
+		const EPathFollowingRequestResult::Type Result = MoveToAttackRangeTask_RequestMove(
+			AI,
+			Pawn,
 			TargetActor,
 			AcceptMoveRadius,
-			/*bStopOnOverlap=*/false);
+			AcceptMoveRadius);
 
-		MOVE_LOG(Log, TEXT("MoveToAttackRangeTask: [Tick] MoveToActor(Target=%s, AcceptRadius=%.1f, StopOnOverlap=false) -> %s"),
+		MOVE_LOG(Verbose, TEXT("Move request re-issued from Tick. Target=%s AcceptRadius=%.1f StopOnOverlap=false Result=%s"),
 			*GetNameSafe(TargetActor),
 			AcceptMoveRadius,
 			MoveToAttackRangeTask_GetMoveRequestResultString(Result));
 		MOVE_SNAPSHOT(TEXT("Tick-AfterReissueMoveTo"), AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius);
 		if (Result == EPathFollowingRequestResult::Failed)
 		{
-			MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] MoveToActor FAILED on re-issue. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
+			MOVE_LOG(Warning, TEXT("Move request FAILED on re-issue. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
 			return EStateTreeRunStatus::Failed;
 		}
 		return EStateTreeRunStatus::Running;
@@ -381,7 +698,7 @@ void USTT_MoveToAttackRangeTask::ExitState(FStateTreeExecutionContext& Context, 
 	// Ensure movement is stopped when leaving this state (in case of abort or transition)
 	if (AAIController* AI = Cast<AAIController>(Context.GetOwner()))
 	{
-		MOVE_LOG(Log, TEXT("MoveToAttackRangeTask: [ExitState] StopMovement. AI=%s Pawn=%s"), *GetNameSafe(AI), *GetNameSafe(AI->GetPawn()));
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [ExitState] StopMovement. AI=%s Pawn=%s"), *GetNameSafe(AI), *GetNameSafe(AI->GetPawn()));
 		AI->StopMovement();
 	}
 	else

@@ -1,0 +1,255 @@
+{
+  "DestinationPath": "/Game/Inventory/Items/JsonImported",
+  "Items": [
+    {
+      "AssetName": "DI_Shield_Json",
+      "DisplayName": "Shield",
+      "Description": "A basic shield with a basic description.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 1,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_SilverHeart_Json",
+      "DisplayName": "Silver Heart",
+      "Description": "A boost to the vitality of the holder at a small cost of sanity.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 1,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": 50.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_BasicSword_Json",
+      "DisplayName": "Basic Sword",
+      "Description": "A basic sword that grants (20) attack speed to the wielder.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 1,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": 20.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_BasicHammer_Json",
+      "DisplayName": "Basic Hammer",
+      "Description": "A basic hammer with a basic description",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 1,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 15.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_PoisonousDagger_Json",
+      "DisplayName": "Poisonous Dagger",
+      "Description": "It tastes funny",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 1,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    }
+  ]
+}

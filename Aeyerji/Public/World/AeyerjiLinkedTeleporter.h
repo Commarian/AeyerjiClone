@@ -14,6 +14,7 @@ class USphereComponent;
 class UPrimitiveComponent;
 class UStaticMesh;
 class UStaticMeshComponent;
+class APlayerState;
 
 /**
  * Replicated two-point teleporter that only activates from an explicit player click request.
@@ -57,6 +58,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Teleporter")
 	bool TryTeleport(AAeyerjiPlayerController* Controller, uint8 EndpointIndex);
 
+	/** Authority-owned direction configuration replicated for client interaction presentation. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Teleporter|Direction")
+	void SetAllowedDirections(bool bAllowAToB, bool bAllowBToA);
+
+	/** Server-side boss-entry fact; endpoint A remains available to participants who have not entered yet. */
+	bool HasPlayerEnteredFromEndpointA(const APlayerState* PlayerState) const;
+
 protected:
 	/** Updates endpoint transforms, mesh assignments, and interaction radii from editor properties. */
 	void ApplyEndpointConfiguration();
@@ -64,6 +72,9 @@ protected:
 	/** Applies replicated endpoint layout changes to client-side visual and interaction components. */
 	UFUNCTION()
 	void OnRep_EndpointBRelativeTransform();
+
+	UFUNCTION()
+	void OnRep_AllowedDirections();
 
 	/** Returns the scene component for an endpoint index, or null for an invalid index. */
 	USceneComponent* GetEndpointScene(uint8 EndpointIndex) const;
@@ -125,10 +136,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Teleporter", meta=(ClampMin="1.0", Units="cm"))
 	float InteractionRadius = 140.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Teleporter|Direction")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing=OnRep_AllowedDirections, Category="Aeyerji|Teleporter|Direction")
 	bool bAllowEndpointAToB = true;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Teleporter|Direction")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, ReplicatedUsing=OnRep_AllowedDirections, Category="Aeyerji|Teleporter|Direction")
 	bool bAllowEndpointBToA = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Teleporter", meta=(ClampMin="0.0", Units="s"))
@@ -139,4 +150,5 @@ protected:
 
 private:
 	TMap<FObjectKey, FTimerHandle> ControllerCooldownTimers;
+	TSet<TWeakObjectPtr<APlayerState>> PlayersEnteredFromEndpointA;
 };

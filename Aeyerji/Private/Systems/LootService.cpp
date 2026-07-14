@@ -26,7 +26,6 @@ static bool RollPercentChance(float PercentageChance);
 static bool PassesEntrySetGate(const UAeyerjiLootEntrySet* Set, FLootEntrySetGateCache* GateCache);
 static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity Rarity, const FLootTablePool* Pool, TObjectPtr<UItemDefinition>& OutDefinition, FName& OutDefinitionKey, bool& bOutDropSuppressed, FLootEntrySetGateCache* GateCache, EItemRarity* OutResolvedRarity = nullptr);
 static void CollectEntries(const FLootTablePool* Pool, TArray<const FLootTableEntry*>& OutEntries, FLootEntrySetGateCache* GateCache);
-static int32 TriangularRollInt(int32 Min, int32 Mode, int32 Max);
 static int32 ResolveEffectiveLootLevel(const FLootContext& Context);
 
 namespace
@@ -183,6 +182,29 @@ namespace
 			GEngine->AddOnScreenDebugMessage(-1, Duration, Color, Message);
 		}
 	}
+
+	void ApplyRewardQualityBias(TMap<EItemRarity, float>& RarityWeights, const float RewardQualityMultiplier)
+	{
+		const float Quality = FMath::Max(RewardQualityMultiplier, 0.f);
+		if (RarityWeights.IsEmpty() || FMath::IsNearlyEqual(Quality, 1.f))
+		{
+			return;
+		}
+
+		for (TPair<EItemRarity, float>& Pair : RarityWeights)
+		{
+			if (Pair.Key == EItemRarity::Legendary || Pair.Value <= 0.f)
+			{
+				continue;
+			}
+
+			// Common remains the anchor. Epic receives the full bias, with intermediate
+			// and post-Epic authored rarities receiving a smooth monotonic progression.
+			const float RarityRank = static_cast<float>(static_cast<uint8>(Pair.Key));
+			const float Exponent = FMath::Clamp(RarityRank / static_cast<float>(static_cast<uint8>(EItemRarity::Epic)), 0.f, 2.f);
+			Pair.Value *= FMath::Pow(Quality, Exponent);
+		}
+	}
 }
 
 FLootDropResult ULootService::RollLoot(const FLootContext& Context)
@@ -256,25 +278,12 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 	{
 		RarityContext.RarityWeights = Context.RarityWeights;
 	}
+	ApplyRewardQualityBias(RarityContext.RarityWeights, Context.RewardQualityMultiplier);
 
 	// Rarity rolls come from the pool weights when present; ensure your pool has entries with >0 weight for any rarity you allow here.
 	Result.Rarity = ChooseRarity(RarityContext, FinalLegendaryChance, RarityContext.MinimumRarity);
-	const int32 BaseItemLevel = EffectivePlayerLevelForEligibility;
-	int32 ItemLevel = BaseItemLevel;
-	{
-		int32 Low = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel + Context.ItemLevelJitterMin);
-		int32 High = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel + Context.ItemLevelJitterMax);
-		if (Low > High)
-		{
-			Swap(Low, High);
-		}
-
-		if (Low != High)
-		{
-			ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(TriangularRollInt(Low, ItemLevel, High));
-		}
-	}
-	Result.ItemLevel = ItemLevel;
+	// Item level is intentionally exact. If the character is level 50, every rolled item is level 50.
+	Result.ItemLevel = EffectivePlayerLevelForEligibility;
 	Result.Seed = FMath::Rand();
 	const int32 EffectivePlayerLevel = EffectivePlayerLevelForEligibility;
 
@@ -879,38 +888,6 @@ static void CollectEntries(const FLootTablePool* Pool, TArray<const FLootTableEn
 
 		AppendEntries(Set->Entries);
 	}
-}
-
-static int32 TriangularRollInt(int32 Min, int32 Mode, int32 Max)
-{
-	if (Min > Max)
-	{
-		Swap(Min, Max);
-	}
-
-	if (Min == Max)
-	{
-		return Min;
-	}
-
-	const float FMin = static_cast<float>(Min);
-	const float FMax = static_cast<float>(Max);
-	const float FMode = FMath::Clamp(static_cast<float>(Mode), FMin, FMax);
-
-	const float U = FMath::FRand();
-	const float C = (FMode - FMin) / (FMax - FMin);
-
-	float Sample = 0.f;
-	if (U <= C)
-	{
-		Sample = FMin + FMath::Sqrt(U * (FMax - FMin) * (FMode - FMin));
-	}
-	else
-	{
-		Sample = FMax - FMath::Sqrt((1.f - U) * (FMax - FMin) * (FMax - FMode));
-	}
-
-	return FMath::RoundToInt(Sample);
 }
 
 // Scans cached item definitions to find a drop candidate for the provided context and rarity.

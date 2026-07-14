@@ -6,9 +6,9 @@
 #include "Abilities/GameplayAbility.h"
 #include "Abilities/AeyerjiAbilityTuning.h"
 #include "Abilities/GA_AeyerjiBase.h"
-#include "UObject/UnrealType.h"
+#include "Abilities/GA_AeyerjiTargetedEffectBase.h"
 
-const FAeyerjiAbilityTableRow* FAeyerjiAbilityTooltipData::ResolveAbilityRow(const FAeyerjiAbilitySlot& Slot)
+bool FAeyerjiAbilityTooltipData::ResolveAbilityConfig(const FAeyerjiAbilitySlot& Slot, FAeyerjiAbilityResolvedConfig& OutConfig)
 {
 	FGameplayTag AbilityTag;
 	if (Slot.Tag.Num() > 0)
@@ -54,9 +54,33 @@ const FAeyerjiAbilityTableRow* FAeyerjiAbilityTooltipData::ResolveAbilityRow(con
 		}
 	}
 
-	return UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(
-		UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable(),
-		AbilityTag);
+	if (!AbilityTag.IsValid())
+	{
+		OutConfig = FAeyerjiAbilityResolvedConfig();
+		return false;
+	}
+
+	const UDataTable* BaseTable = UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable();
+	const FAeyerjiAbilityTableRow* BaseRow = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(BaseTable, AbilityTag);
+	if (!BaseRow || !UAeyerjiAbilityTuningSubsystem::MakeResolvedConfigFromBaseRow(*BaseRow, OutConfig))
+	{
+		OutConfig = FAeyerjiAbilityResolvedConfig();
+		return false;
+	}
+
+	OutConfig.Rank = FMath::Max(1, Slot.Level);
+	if (OutConfig.Rank > 1)
+	{
+		if (const UDataTable* RankTable = UAeyerjiAbilityTuningSubsystem::ResolveConfiguredRankTable())
+		{
+			if (const FAeyerjiAbilityRankTableRow* RankRow = UAeyerjiAbilityTuningSubsystem::FindAbilityRankRowInTable(RankTable, AbilityTag, OutConfig.Rank))
+			{
+				UAeyerjiAbilityTuningSubsystem::ApplyRankOverrides(*RankRow, OutConfig);
+			}
+		}
+	}
+
+	return true;
 }
 
 namespace
@@ -68,7 +92,7 @@ namespace
 			return nullptr;
 		}
 
-		return Icon.LoadSynchronous();
+		return Icon.Get();
 	}
 }
 
@@ -86,33 +110,45 @@ FAeyerjiAbilityTooltipData FAeyerjiAbilityTooltipData::FromSlot(
 
 	const UGameplayAbility* AbilityCDO = Slot.Class ? Slot.Class->GetDefaultObject<UGameplayAbility>() : nullptr;
 	const UGA_AeyerjiBase* AeyerjiAbilityCDO = Cast<UGA_AeyerjiBase>(AbilityCDO);
-	if (const FAeyerjiAbilityTableRow* Row = ResolveAbilityRow(Slot))
+	FAeyerjiAbilityResolvedConfig Config;
+	if (ResolveAbilityConfig(Slot, Config))
 	{
-		if (!Row->DisplayName.IsEmpty())
+		if (!Config.DisplayName.IsEmpty())
 		{
-			Data.DisplayName = Row->DisplayName;
+			Data.DisplayName = Config.DisplayName;
 		}
 
-		if (!Row->Description.IsEmpty())
+		if (!Config.Description.IsEmpty())
 		{
-			Data.Description = Row->Description;
+			Data.Description = Config.Description;
 		}
 
 		if (!Data.Icon)
 		{
-			Data.Icon = LoadIcon(Row->Icon);
+			Data.Icon = LoadIcon(Config.Icon);
 		}
 
-		Data.ManaCost = Row->Cost.ManaCost;
-		Data.CooldownSeconds = Row->Cost.Cooldown;
-		Data.RequiredLevel = FMath::Max(1, Row->RequiredLevel);
-		Data.bUnlockedByDefault = Row->bUnlockedByDefault;
+		Data.ManaCost = Config.Cost.ManaCost;
+		Data.CooldownSeconds = Config.Cost.Cooldown;
+		Data.RequiredLevel = FMath::Max(1, Config.RequiredLevel);
+		Data.bUnlockedByDefault = Config.bUnlockedByDefault;
+		Data.bUsesDamageVariance = Config.Damage.bUseDamageVariance;
+		Data.bCanCrit = Config.Damage.bCanCrit;
+		Data.bCanBeDodged = Config.Damage.bCanBeDodged;
+		Data.bCanLifeSteal = Config.Damage.bCanLifeSteal;
+		Data.bCanTriggerOnHit = Config.Damage.bCanTriggerOnHit;
+		Data.bCanStagger = Config.Damage.bCanStagger;
 	}
-	else if (AeyerjiAbilityCDO)
+	// Non-table-driven abilities apply their class defaults at runtime, even when a row supplies UI metadata.
+	if (AeyerjiAbilityCDO && !Cast<UGA_AeyerjiTargetedEffectBase>(AeyerjiAbilityCDO))
 	{
-		// Deprecated fallback for un-migrated rows; runtime ability logic still uses table data only.
-		Data.RequiredLevel = FMath::Max(1, AeyerjiAbilityCDO->RequiredLevel);
-		Data.bUnlockedByDefault = AeyerjiAbilityCDO->bUnlockedByDefault;
+		const FAeyerjiDamageRuleConfig& Rules = AeyerjiAbilityCDO->GetDefaultDamageRules();
+		Data.bUsesDamageVariance = Rules.bUseVariance;
+		Data.bCanCrit = Rules.bCanCrit;
+		Data.bCanBeDodged = Rules.bCanBeDodged;
+		Data.bCanLifeSteal = Rules.bCanLifeSteal;
+		Data.bCanTriggerOnHit = Rules.bCanTriggerOnHit;
+		Data.bCanStagger = Rules.bCanStagger;
 	}
 
 	(void)ASC;

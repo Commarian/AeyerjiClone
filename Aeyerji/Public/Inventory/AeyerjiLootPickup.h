@@ -7,6 +7,7 @@
 #include "Components/OutlineHighlightComponent.h"
 #include "GameplayTagContainer.h"
 #include "GameplayEffectTypes.h"
+#include "Interaction/AeyerjiInteractable.h"
 
 #include "AeyerjiLootPickup.generated.h"
 
@@ -25,13 +26,14 @@ class UNiagaraSystem;
 class UPhysicalMaterial;
 class UAeyerjiLootTable;
 class UTextRenderComponent;
+class APlayerState;
 
 /**
  * Authoritative loot pickup actor that works with the native inventory system.
  * Provides highlight/material hooks and Blueprint-friendly accessors for UI.
  */
 UCLASS()
-class AEYERJI_API AAeyerjiLootPickup : public AActor
+class AEYERJI_API AAeyerjiLootPickup : public AActor, public IAeyerjiInteractable
 {
 	GENERATED_BODY()
 
@@ -59,19 +61,17 @@ public:
 
 	// --- Interaction ----------------------------------------------------
 
-	UFUNCTION(Server, Reliable)
-	void Server_AddPickupIntent(AAeyerjiPlayerController* Controller);
+	/** Returns whether this pickup still contains an item for the supplied player. */
+	virtual bool CanInteract_Implementation(AAeyerjiPlayerController* Controller) override;
 
-	UFUNCTION(Server, Reliable)
-	void Server_RemovePickupIntent(AAeyerjiPlayerController* Controller);
+	/** Returns the pickup volume center used for pathing and server validation. */
+	virtual FVector GetInteractionLocation_Implementation() override;
 
-	void AddPickupIntent(AAeyerjiPlayerController* Controller);
-	void RemovePickupIntent(AAeyerjiPlayerController* Controller);
+	/** Returns the pickup volume radius used for pathing and server validation. */
+	virtual float GetInteractionRadius_Implementation() override;
 
-	/** Attempt to pick up the loot (SERVER only). */
-	void ExecutePickup(AAeyerjiPlayerController* Controller);
-
-	void RequestPickupFromClient(AAeyerjiPlayerController* Controller);
+	/** Executes the server-authoritative inventory transfer. */
+	virtual void Interact_Implementation(AAeyerjiPlayerController* Controller) override;
 
 	// --- UI Helpers -----------------------------------------------------
 
@@ -101,6 +101,13 @@ public:
 
 	bool IsHoverTargetComponent(const UPrimitiveComponent* Component) const;
 
+	/** Reserves this pickup for one authoritative PlayerState; all other manual/auto pickup attempts are rejected. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Loot|Ownership")
+	void ReserveForPlayerState(APlayerState* PlayerState);
+
+	UFUNCTION(BlueprintPure, Category="Loot|Ownership")
+	APlayerState* GetReservedPlayerState() const { return ReservedPlayerState; }
+
 	// --- Drop motion -------------------------------------------------------
 
 	/** Start the fling+arc drop from the current actor location (SERVER only). */
@@ -112,6 +119,7 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual bool ReplicateSubobjects(UActorChannel* Channel, FOutBunch* Bunch, FReplicationFlags* RepFlags) override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void NotifyActorBeginCursorOver() override;
@@ -202,6 +210,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop", meta = (EditCondition = "bEnableDropMotion"))
 	bool bAutoStartDrop = true;
 
+	/** Enables detailed drop-motion logs for debugging physics/arc placement. Warnings still log when disabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop")
+	bool bVerboseDropMotionLogging = false;
+
 	/** How long the drop animation lasts, in seconds. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop", meta = (EditCondition = "bEnableDropMotion"))
 	float DropDuration = 0.6f;
@@ -284,6 +296,38 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Physics", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff", ClampMin = "0.0", ClampMax = "1.0"))
 	float PhysicsRestitution = 0.0f;
 
+	/** When true, physics drops are recovered if they fall too far, approach KillZ, or run too long without sleeping. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff"))
+	bool bEnableDropSafetyGuard = true;
+
+	/** Max distance a physics drop or safety recovery ground may sit below its original drop anchor before being reset to the anchor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyMaxFallBelowAnchor = 180.f;
+
+	/** Max distance safety recovery is allowed to snap downward from the saved anchor; farther hits are treated as under-map surfaces. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyMaxRecoverySnapBelowAnchor = 180.f;
+
+	/** Max seconds a physics drop may simulate before being forced to settle. Set to 0 to disable the timeout guard. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyMaxPhysicsSeconds = 5.f;
+
+	/** Height above the saved drop anchor used when searching for recovery ground. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyGroundTraceStartHeight = 1000.f;
+
+	/** Distance below the saved drop anchor used when searching for recovery ground. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyGroundTraceDistance = 3000.f;
+
+	/** Height above recovered ground where the pickup is placed after a safety reset. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyGroundOffset = 2.f;
+
+	/** Extra KillZ buffer; crossing this server-side threshold triggers a safety reset before world cleanup can remove the pickup. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot|Drop|Safety", meta = (EditCondition = "bEnableDropMotion && bEnablePhysicsHandoff && bEnableDropSafetyGuard", ClampMin = "0.0"))
+	float DropSafetyKillZBuffer = 250.f;
+
 	UPROPERTY(Transient)
 	TObjectPtr<UPhysicalMaterial> RuntimePhysicsMaterial;
 
@@ -302,8 +346,9 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Replicated, Category = "Loot")
 	int32 SeedOverride = 0;
 
-	UPROPERTY()
-	TSet<TWeakObjectPtr<AAeyerjiPlayerController>> PickupIntents;
+	/** Explicit recipient for per-player rewards. Null preserves legacy public-loot behavior. */
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category="Loot|Ownership")
+	TObjectPtr<APlayerState> ReservedPlayerState = nullptr;
 
 	UPROPERTY()
 	bool bHighlighted = false;
@@ -332,6 +377,8 @@ protected:
 	FLinearColor ResolveBeamColor() const;
 	bool IsOverlappingPawn(APawn* Pawn) const;
 	bool CanPawnLoot(const AAeyerjiPlayerController* Controller) const;
+	/** Transfers this item to the player's inventory after authoritative eligibility checks. */
+	void ExecutePickup(AAeyerjiPlayerController* Controller);
 	void ApplyDefinitionMesh();
 	UAeyerjiItemInstance* GiveLootToInventory(AAeyerjiPlayerController* Controller, UAeyerjiItemInstance* GrantedItem);
 	void BroadcastPickupEvent(AAeyerjiPlayerController* Controller, UAeyerjiItemInstance* GrantedItem);
@@ -347,6 +394,9 @@ protected:
 	UFUNCTION(NetMulticast, Reliable)
 	void Multicast_PlayPickupFX(AActor* FXTarget, const FAeyerjiPickupVisualConfig& VisualConfig);
 
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_HidePickupAfterGranted();
+
 private:
 	// --- Drop motion runtime state --------------------------------------
 
@@ -360,12 +410,20 @@ private:
 	bool bLoggedMidTick = false;
 	bool bPhysicsHandoffStarted = false;
 	bool bPhysicsHandoffAttempted = false;
+	bool bHasDropSafetyAnchor = false;
+	float PhysicsHandoffElapsedSeconds = 0.f;
+	FVector DropSafetyAnchorLocation = FVector::ZeroVector;
 	FTransform PrePhysicsMeshRelative = FTransform::Identity;
 	FRotator PrePhysicsActorRotation = FRotator::ZeroRotator;
 
 	void ComputeDropEndpoints();
 	void FinalSnapToGround();
 	bool StartPhysicsHandoff(bool bForceImmediate = false);
+	bool TryFindDropSafetyGround(const FVector& DesiredLocation, FVector& OutGroundLocation) const;
+	void FinishPhysicsDropAtLocation(const FVector& FinalLocation, const TCHAR* Reason, bool bWarn);
+	bool TrySettlePhysicsDropAtCurrentLocation(const TCHAR* Reason, bool bWarn);
+	void AbortPhysicsDropToSafeLocation(const TCHAR* Reason);
+	void PrepareForPickupRemoval(const TCHAR* Reason);
 	void UpdateLootBeamAnchor();
 	void UpdateLabelVisibility();
 

@@ -44,7 +44,7 @@ void AAeyerjiWeaponActor::SetWeaponMeshes(UStaticMesh* StaticMesh, USkeletalMesh
 {
 	if (SkeletalMeshComponent)
 	{
-		SkeletalMeshComponent->SetSkeletalMesh(SkeletalMesh);
+		SkeletalMeshComponent->SetSkinnedAssetAndUpdate(SkeletalMesh);
 		SkeletalMeshComponent->SetVisibility(SkeletalMesh != nullptr);
 	}
 

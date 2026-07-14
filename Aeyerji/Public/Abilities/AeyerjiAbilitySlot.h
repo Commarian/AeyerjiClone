@@ -58,12 +58,71 @@ struct FAeyerjiAbilitySlot
 
 		if (!SavedAbilityClass.IsNull())
 		{
-			Class = SavedAbilityClass.LoadSynchronous();
+			Class = SavedAbilityClass.Get();
+			if (!Class)
+			{
+				Class = SavedAbilityClass.LoadSynchronous();
+			}
 		}
 
 		if (!SavedIcon.IsNull())
 		{
-			Icon = SavedIcon.LoadSynchronous();
+			Icon = SavedIcon.Get();
+			if (!Icon)
+			{
+				Icon = SavedIcon.LoadSynchronous();
+			}
 		}
 	}
 };
+
+namespace AeyerjiAbilitySlotUtils
+{
+	/** Returns true when a slot has no runtime or saved ability identity. */
+	FORCEINLINE bool IsAbilitySlotEmpty(const FAeyerjiAbilitySlot& Slot)
+	{
+		return Slot.Tag.IsEmpty()
+			&& Slot.Class == nullptr
+			&& Slot.SavedAbilityClass.IsNull();
+	}
+
+	/** The potion slot is the fixed final action-bar slot. */
+	FORCEINLINE int32 GetPotionSlotIndex(const int32 ActionBarSize)
+	{
+		return ActionBarSize > 0 ? ActionBarSize - 1 : INDEX_NONE;
+	}
+
+	/** Returns true if SlotIndex points at the fixed final potion slot. */
+	FORCEINLINE bool IsPotionSlotIndex(const int32 SlotIndex, const int32 ActionBarSize)
+	{
+		return SlotIndex != INDEX_NONE && SlotIndex == GetPotionSlotIndex(ActionBarSize);
+	}
+
+	/** Returns true for any Ability.Potion.* gameplay tag in the container. */
+	FORCEINLINE bool IsPotionAbilityTagContainer(const FGameplayTagContainer& Tags)
+	{
+		static const FString PotionTagPrefix(TEXT("Ability.Potion"));
+		for (const FGameplayTag& Tag : Tags)
+		{
+			if (Tag.IsValid() && Tag.ToString().StartsWith(PotionTagPrefix))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/** Validates the slot's ability category against the fixed potion-slot rule. */
+	FORCEINLINE bool IsSlotAllowedAtIndex(const FAeyerjiAbilitySlot& Slot, const int32 SlotIndex, const int32 ActionBarSize)
+	{
+		if (IsAbilitySlotEmpty(Slot))
+		{
+			return true;
+		}
+
+		const bool bIsPotionSlot = IsPotionSlotIndex(SlotIndex, ActionBarSize);
+		const bool bIsPotionAbility = IsPotionAbilityTagContainer(Slot.Tag);
+		return bIsPotionSlot == bIsPotionAbility;
+	}
+}

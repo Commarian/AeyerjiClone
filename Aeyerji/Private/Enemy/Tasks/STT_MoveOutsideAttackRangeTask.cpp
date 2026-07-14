@@ -6,17 +6,42 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "AeyerjiCharacter.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Enemy/EnemyAIController.h"
+#include "GameFramework/MovementComponent.h"
 #include "GameFramework/Pawn.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "Navigation/PathFollowingComponent.h"
-#include "NavigationSystem.h"
 #include "StateTreeExecutionContext.h"
 
 namespace
 {
 	constexpr float FallbackAttackRange = 150.0f;
 	const FVector NavigationProjectionExtent(500.0f, 500.0f, 1000.0f);
+
+	bool StopMoveOutsideAttackRangeTaskIfCrowdControlled(AAIController* AI, APawn* Pawn)
+	{
+		const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(Pawn);
+		if (!ControlledCharacter || !ControlledCharacter->IsCrowdControlled())
+		{
+			return false;
+		}
+
+		if (AI)
+		{
+			AI->StopMovement();
+			AI->ClearFocus(EAIFocusPriority::Gameplay);
+			AI->ClearFocus(EAIFocusPriority::Move);
+		}
+
+		if (UMovementComponent* MovementComponent = Pawn ? Pawn->GetMovementComponent() : nullptr)
+		{
+			MovementComponent->StopMovementImmediately();
+		}
+
+		return true;
+	}
 
 	// Pulls the live attack range from GAS and falls back to a small default when it is unavailable.
 	float GetMoveOutsideAttackRangeTask_AttackRange(const APawn* Pawn)
@@ -58,12 +83,6 @@ namespace
 			return false;
 		}
 
-		UNavigationSystemV1* NavigationSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Pawn->GetWorld());
-		if (!NavigationSystem)
-		{
-			return false;
-		}
-
 		FVector AwayDirection = Pawn->GetActorLocation() - TargetActor->GetActorLocation();
 		if (!AwayDirection.Normalize())
 		{
@@ -75,13 +94,16 @@ namespace
 		}
 
 		const FVector DesiredLocation = TargetActor->GetActorLocation() + (AwayDirection * DesiredDistance);
-		FNavLocation ProjectedLocation;
-		if (!NavigationSystem->ProjectPointToNavigation(DesiredLocation, ProjectedLocation, NavigationProjectionExtent))
+		FAeyerjiNavSafetyResolveParams NavParams;
+		NavParams.ProjectionExtent = NavigationProjectionExtent;
+		NavParams.SearchRadius = 600.f;
+		FAeyerjiNavSafetyResult DestinationResult;
+		if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(Pawn, DesiredLocation, Pawn, NavParams, DestinationResult))
 		{
 			return false;
 		}
 
-		OutDestination = ProjectedLocation.Location;
+		OutDestination = DestinationResult.NavLocation;
 		return true;
 	}
 
@@ -101,7 +123,7 @@ namespace
 			/*bProjectGoalLocation=*/false,
 			/*bCanStrafe=*/false,
 			/*FilterClass=*/nullptr,
-			/*bAllowPartialPath=*/true);
+			/*bAllowPartialPath=*/false);
 	}
 }
 
@@ -116,6 +138,18 @@ EStateTreeRunStatus USTT_MoveOutsideAttackRangeTask::EnterState(FStateTreeExecut
 	AAIController* AI = Cast<AAIController>(Context.GetOwner());
 	APawn* Pawn = AI ? AI->GetPawn() : nullptr;
 	if (!AI || !Pawn)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+	if (StopMoveOutsideAttackRangeTaskIfCrowdControlled(AI, Pawn))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = NavigationProjectionExtent;
+	FVector SafePawnLocation = Pawn->GetActorLocation();
+	if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
 	{
 		return EStateTreeRunStatus::Failed;
 	}
@@ -163,6 +197,18 @@ EStateTreeRunStatus USTT_MoveOutsideAttackRangeTask::Tick(FStateTreeExecutionCon
 	AAIController* AI = Cast<AAIController>(Context.GetOwner());
 	APawn* Pawn = AI ? AI->GetPawn() : nullptr;
 	if (!AI || !Pawn)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+	if (StopMoveOutsideAttackRangeTaskIfCrowdControlled(AI, Pawn))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = NavigationProjectionExtent;
+	FVector SafePawnLocation = Pawn->GetActorLocation();
+	if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
 	{
 		return EStateTreeRunStatus::Failed;
 	}

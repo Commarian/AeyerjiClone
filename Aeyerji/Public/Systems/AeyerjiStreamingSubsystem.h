@@ -4,6 +4,7 @@
 #include "Containers/Ticker.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Systems/AeyerjiStreamingManifest.h"
+#include "Frontend/AeyerjiFrontendTypes.h"
 #include "AeyerjiStreamingSubsystem.generated.h"
 
 class UAeyerjiStreamingSaveGame;
@@ -70,8 +71,20 @@ public:
 	FName GetCurrentZoneId() const { return CurrentZoneId; }
 
 	/** Chooses the next gameplay map (random or campaign sequential) and travels to it. */
-	UFUNCTION(BlueprintCallable, Category="Aeyerji|Flow")
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Flow", meta=(DeprecatedFunction, DeprecationMessage="Legacy direct-map launch. Use the authoritative frontend lobby launch request."))
 	bool StartGameplaySession(bool bCampaignMode);
+
+	/** Server-only: validates map selection and preserves the exact lobby activity/tier across travel. */
+	bool PrepareFrontendRunLaunch(EAeyerjiRiftActivityType ActivityType, int32 ExcursionTier, FAeyerjiPendingRunLaunchRequest& OutRequest);
+
+	/** Server-only: performs travel for the prepared request without consuming its gameplay handoff. */
+	bool ExecutePendingFrontendRunLaunch();
+
+	/** Peeks the unconsumed authoritative launch handoff in the destination gameplay world. */
+	bool GetPendingFrontendRunLaunch(FAeyerjiPendingRunLaunchRequest& OutRequest) const;
+
+	/** Consumes the exact request once after the gameplay activity snapshot freezes successfully. */
+	bool ConsumePendingFrontendRunLaunch(int32 RequestId);
 
 	/** Restarts the current gameplay map with an optional zone override without advancing map rotation state. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Flow")
@@ -189,6 +202,12 @@ protected:
 	/** One-shot startup zone override carried across hard map travel for retry/restart flows. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Flow")
 	FName PendingStartupZoneOverride = NAME_None;
+
+	/** One-shot server launch handoff retained by the GameInstance through seamless travel. */
+	FAeyerjiPendingRunLaunchRequest PendingFrontendRunLaunch;
+
+	/** Monotonic authority-issued request id. */
+	int32 NextFrontendRunLaunchRequestId = 1;
 
 private:
 	/** Resolves this subsystem from world context internally. */

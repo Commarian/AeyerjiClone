@@ -1,0 +1,447 @@
+[
+	{
+		"Name": "Ability.Blink",
+		"AbilityClass": "/Game/Abilities/Blink/BGA_Blink.BGA_Blink_C",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Blink"
+		},
+		"TargetMode": "GroundLocation",
+		"DisplayName": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Blink_DisplayName\", \"Blink\")",
+		"Description": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Blink_Description\", \"Teleport to the targeted point.\")",
+		"Icon": "/Game/Abilities/Blink/BlinkAbilityIcon.BlinkAbilityIcon",
+		"UIOrder": 100,
+		"RequiredLevel": 1,
+		"bUnlockedByDefault": true,
+		"Cost":
+		{
+			"ManaCost": 30,
+			"Cooldown": 1
+		},
+		"CooldownTag":
+		{
+			"TagName": "Cooldown.Blink"
+		},
+		"PreviewRange": 1200,
+		"MaxRange": 1200,
+		"Shape": "SingleActor",
+		"TargetTeam": "Self",
+		"Radius": 0,
+		"ArcAngleDegrees": 360,
+		"MaxTargets": 1,
+		"Damage":
+		{
+			"FlatValue": 0,
+			"SourceStat": "None",
+			"SourceStatScalar": 0,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": false,
+			"bCanCrit": false,
+			"bCanBeDodged": false,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": false,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"AdditionalEffects": [],
+		"Visuals":
+		{
+			"Montage": "None",
+			"MontagePlayRate": 1,
+			"ImpactDelaySeconds": -1,
+			"NiagaraSystem": "None",
+			"bAttachNiagaraToOwnerMesh": false,
+			"NiagaraAttachSocket": "None",
+			"NiagaraOffset":
+			{
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"NiagaraScale":
+			{
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			}
+		},
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	},
+	{
+		"Name": "Ability.Abdominoplasty",
+		"AbilityClass": "/Game/Abilities/Abdominoplasty/BGA_Abdomino.BGA_Abdomino_C",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Abdominoplasty"
+		},
+		"TargetMode": "GroundLocation",
+		"DisplayName": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Abdominoplasty_DisplayName\", \"Abdominoplasty\")",
+		"Description": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Abdominoplasty_Description\", \"Blink to the targeted point and damage enemies on landing.\")",
+		"Icon": "/Game/Abilities/Abdominoplasty/Abdominoplasty.Abdominoplasty",
+		"UIOrder": 200,
+		"RequiredLevel": 1,
+		"bUnlockedByDefault": true,
+		"Cost":
+		{
+			"ManaCost": 30,
+			"Cooldown": 2
+		},
+		"CooldownTag":
+		{
+			"TagName": "Cooldown.Abdominoplasty"
+		},
+		"PreviewRange": 1200,
+		"MaxRange": 1200,
+		"Shape": "SingleActor",
+		"TargetTeam": "Enemy",
+		"Radius": 500,
+		"ArcAngleDegrees": 360,
+		"MaxTargets": 0,
+		"Damage":
+		{
+			"FlatValue": 50,
+			"SourceStat": "None",
+			"SourceStatScalar": 0,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": true,
+			"bCanCrit": true,
+			"bCanBeDodged": true,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": true,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"AdditionalEffects": [],
+		"Visuals":
+		{
+			"Montage": "None",
+			"MontagePlayRate": 1,
+			"ImpactDelaySeconds": -1,
+			"NiagaraSystem": "None",
+			"bAttachNiagaraToOwnerMesh": false,
+			"NiagaraAttachSocket": "None",
+			"NiagaraOffset":
+			{
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"NiagaraScale":
+			{
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			}
+		},
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	},
+	{
+		"Name": "Ability.AG.GravitonPull",
+		"AbilityClass": "/Game/Abilities/GravitonPull/BGA_GravitonPull.BGA_GravitonPull_C",
+		"AbilityTag":
+		{
+			"TagName": "Ability.AG.GravitonPull"
+		},
+		"TargetMode": "Instant",
+		"DisplayName": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.AG.GravitonPull_DisplayName\", \"Graviton Pull\")",
+		"Description": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.AG.GravitonPull_Description\", \"Release a graviton pulse around the caster, damaging nearby enemies.\")",
+		"Icon": "/Game/Abilities/GravitonPull/GravitonPull.GravitonPull",
+		"UIOrder": 300,
+		"RequiredLevel": 1,
+		"bUnlockedByDefault": true,
+		"Cost":
+		{
+			"ManaCost": 20,
+			"Cooldown": 4
+		},
+		"CooldownTag":
+		{
+			"TagName": "Cooldown.Graviton"
+		},
+		"PreviewRange": 500,
+		"MaxRange": 0,
+		"Shape": "OwnerRadius",
+		"TargetTeam": "Enemy",
+		"Radius": 500,
+		"ArcAngleDegrees": 360,
+		"MaxTargets": 0,
+		"Damage":
+		{
+			"FlatValue": 18,
+			"SourceStat": "AttackDamage",
+			"SourceStatScalar": 0.35,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": true,
+			"bCanCrit": true,
+			"bCanBeDodged": true,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": true,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"AdditionalEffects": [],
+		"Visuals":
+		{
+			"Montage": "None",
+			"MontagePlayRate": 1,
+			"ImpactDelaySeconds": 0,
+			"NiagaraSystem": "None",
+			"bAttachNiagaraToOwnerMesh": false,
+			"NiagaraAttachSocket": "None",
+			"NiagaraOffset":
+			{
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"NiagaraScale":
+			{
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			}
+		},
+		"FloatTunables": [
+			{
+				"Key":
+				{
+					"TagName": "Ability.Param.Pull.Distance"
+				},
+				"Value": 600
+			},
+			{
+				"Key":
+				{
+					"TagName": "Ability.Param.Pull.HeavyTargetScale"
+				},
+				"Value": 0.5
+			}
+		],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	},
+	{
+		"Name": "Ability.Stomp",
+		"AbilityClass": "/Script/Aeyerji.GA_Stomp",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Stomp"
+		},
+		"TargetMode": "Instant",
+		"DisplayName": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Stomp_DisplayName\", \"Stomp\")",
+		"Description": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Stomp_Description\", \"Slam the ground, dealing minor damage and briefly stunning nearby enemies.\")",
+		"Icon": "/Game/Abilities/Stomp/StompImage.StompImage",
+		"UIOrder": 400,
+		"RequiredLevel": 1,
+		"bUnlockedByDefault": true,
+		"Cost":
+		{
+			"ManaCost": 25,
+			"Cooldown": 5
+		},
+		"CooldownTag":
+		{
+			"TagName": "Cooldown.Stomp"
+		},
+		"PreviewRange": 450,
+		"MaxRange": 0,
+		"Shape": "OwnerRadius",
+		"TargetTeam": "Enemy",
+		"Radius": 450,
+		"ArcAngleDegrees": 360,
+		"MaxTargets": 0,
+		"Damage":
+		{
+			"FlatValue": 12,
+			"SourceStat": "AttackDamage",
+			"SourceStatScalar": 0.25,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": true,
+			"bCanCrit": true,
+			"bCanBeDodged": true,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": true,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"AdditionalEffects": [
+			{
+				"GameplayEffectClass": "/Script/Aeyerji.GE_Stun",
+				"SetByCallerTag":
+				{
+					"TagName": "SetByCaller.Stun.Duration"
+				},
+				"Magnitude": 1.25,
+				"EffectLevel": 1
+			}
+		],
+		"Visuals":
+		{
+			"Montage": "None",
+			"MontagePlayRate": 1,
+			"ImpactDelaySeconds": -1,
+			"NiagaraSystem": "None",
+			"bAttachNiagaraToOwnerMesh": false,
+			"NiagaraAttachSocket": "None",
+			"NiagaraOffset":
+			{
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"NiagaraScale":
+			{
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			}
+		},
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	},
+	{
+		"Name": "Ability.Potion.Heal",
+		"AbilityClass": "/Script/Aeyerji.GA_HealPotion",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Potion.Heal"
+		},
+		"TargetMode": "Instant",
+		"DisplayName": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Potion.Heal_DisplayName\", \"Basic Heal Potion\")",
+		"Description": "NSLOCTEXT(\"NewAbilityDataTable [6294143DDD227E93327928379FE9B8CD]\", \"Ability.Potion.Heal_Description\", \"Consume a potion to restore health.\")",
+		"Icon": "/Game/Abilities/Potions/BaseHealPotion/BaseHealPotionTexture.BaseHealPotionTexture",
+		"UIOrder": 9000,
+		"RequiredLevel": 1,
+		"bUnlockedByDefault": true,
+		"Cost":
+		{
+			"ManaCost": 0,
+			"Cooldown": 1
+		},
+		"CooldownTag":
+		{
+			"TagName": "Cooldown.Potion"
+		},
+		"PreviewRange": 0,
+		"MaxRange": 0,
+		"Shape": "SingleActor",
+		"TargetTeam": "Self",
+		"Radius": 0,
+		"ArcAngleDegrees": 360,
+		"MaxTargets": 1,
+		"Damage":
+		{
+			"FlatValue": 0,
+			"SourceStat": "None",
+			"SourceStatScalar": 0,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": false,
+			"bCanCrit": false,
+			"bCanBeDodged": false,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": false,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"AdditionalEffects": [],
+		"Visuals":
+		{
+			"Montage": "None",
+			"MontagePlayRate": 1,
+			"ImpactDelaySeconds": -1,
+			"NiagaraSystem": "None",
+			"bAttachNiagaraToOwnerMesh": false,
+			"NiagaraAttachSocket": "None",
+			"NiagaraOffset":
+			{
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"NiagaraScale":
+			{
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			}
+		},
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	}
+]

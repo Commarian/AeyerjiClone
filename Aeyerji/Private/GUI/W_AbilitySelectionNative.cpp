@@ -2,6 +2,7 @@
 
 #include "GUI/W_AbilitySelectionNative.h"
 
+#include "Aeyerji/AeyerjiPlayerState.h"
 #include "Abilities/AeyerjiAbilityTuning.h"
 #include "Blueprint/WidgetTree.h"
 #include "AbilitySystemComponent.h"
@@ -14,6 +15,13 @@
 void UW_AbilitySelectionNative::NativeConstruct()
 {
 	Super::NativeConstruct();
+
+	if (AAeyerjiPlayerState* PlayerState = ResolveOwningPlayerState())
+	{
+		PlayerState->OnAbilityProgressionChanged.RemoveDynamic(this, &UW_AbilitySelectionNative::HandleAbilityProgressionChanged);
+		PlayerState->OnAbilityProgressionChanged.AddDynamic(this, &UW_AbilitySelectionNative::HandleAbilityProgressionChanged);
+		BoundPlayerState = PlayerState;
+	}
 
 	if (bPopulateAbilitiesOnConstruct)
 	{
@@ -30,6 +38,17 @@ void UW_AbilitySelectionNative::NativeConstruct()
 			UpdateUniformGridSizing(*GridPanel);
 		}
 	}
+}
+
+void UW_AbilitySelectionNative::NativeDestruct()
+{
+	if (AAeyerjiPlayerState* PlayerState = BoundPlayerState.Get())
+	{
+		PlayerState->OnAbilityProgressionChanged.RemoveDynamic(this, &UW_AbilitySelectionNative::HandleAbilityProgressionChanged);
+	}
+
+	BoundPlayerState.Reset();
+	Super::NativeDestruct();
 }
 
 void UW_AbilitySelectionNative::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -54,6 +73,22 @@ void UW_AbilitySelectionNative::NativeTick(const FGeometry& MyGeometry, float In
 void UW_AbilitySelectionNative::SetAbilitySystemForTooltip(UAbilitySystemComponent* InAbilitySystem)
 {
 	AbilitySystemForTooltip = InAbilitySystem;
+}
+
+void UW_AbilitySelectionNative::SetPotionSlotContext(const bool bInEditingPotionSlot)
+{
+	bEditingPotionSlot = bInEditingPotionSlot;
+}
+
+void UW_AbilitySelectionNative::SetPickerMode(const EAeyerjiAbilityPickerMode InPickerMode)
+{
+	if (PickerMode == InPickerMode)
+	{
+		return;
+	}
+
+	PickerMode = InPickerMode;
+	RebuildAbilityGrid();
 }
 
 void UW_AbilitySelectionNative::RebuildAbilityGrid()
@@ -88,8 +123,15 @@ void UW_AbilitySelectionNative::RebuildAbilityGrid()
 	UniformGridPanel_Abilities->ClearChildren();
 
 	const int32 ColumnCount = FMath::Max(1, AbilityGridColumns);
+	int32 VisibleIndex = 0;
 	for (int32 Index = 0; Index < AbilitySlots.Num(); ++Index)
 	{
+		const bool bIsPotionAbility = AeyerjiAbilitySlotUtils::IsPotionAbilityTagContainer(AbilitySlots[Index].Tag);
+		if (bIsPotionAbility != bEditingPotionSlot)
+		{
+			continue;
+		}
+
 		UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: Creating icon %d Tag=%s Class=%s"),
 			Index,
 			*AbilitySlots[Index].Tag.ToString(),
@@ -103,14 +145,18 @@ void UW_AbilitySelectionNative::RebuildAbilityGrid()
 			continue;
 		}
 
+		FAeyerjiAbilityPickerEntryData EntryData;
+		BuildPickerEntryData(AbilitySlots[Index], EntryData);
+
 		if (UW_AbilityIconNative* AbilityIcon = Cast<UW_AbilityIconNative>(IconWidget))
 		{
-			AbilityIcon->InitializeAbilityIcon(AbilitySlots[Index], this);
+			AbilityIcon->InitializeAbilityIcon(EntryData.Slot, EntryData, this);
 		}
 
-		const int32 Row = Index / ColumnCount;
-		const int32 Column = Index % ColumnCount;
+		const int32 Row = VisibleIndex / ColumnCount;
+		const int32 Column = VisibleIndex % ColumnCount;
 		UniformGridPanel_Abilities->AddChildToUniformGrid(IconWidget, Row, Column);
+		++VisibleIndex;
 
 		UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: Grid child count = %d"),
 			UniformGridPanel_Abilities->GetChildrenCount());
@@ -126,6 +172,69 @@ void UW_AbilitySelectionNative::RebuildAbilityGrid()
 			UpdateUniformGridSizing(*GridPanel);
 		}
 	}
+}
+
+void UW_AbilitySelectionNative::RequestUpgradeAbility(const FAeyerjiAbilitySlot& SlotData)
+{
+	if (AAeyerjiPlayerState* PlayerState = ResolveOwningPlayerState())
+	{
+		for (const FGameplayTag& Tag : SlotData.Tag)
+		{
+			if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
+			{
+				OnAbilityUpgradeRequested.Broadcast(Tag);
+				PlayerState->Server_RequestAbilityRankUp(Tag);
+				break;
+			}
+		}
+	}
+}
+
+bool UW_AbilitySelectionNative::BuildPickerEntryData(const FAeyerjiAbilitySlot& SlotData, FAeyerjiAbilityPickerEntryData& OutEntryData) const
+{
+	OutEntryData = FAeyerjiAbilityPickerEntryData();
+	OutEntryData.Slot = SlotData;
+
+	FGameplayTag AbilityTag;
+	for (const FGameplayTag& Tag : SlotData.Tag)
+	{
+		if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
+		{
+			AbilityTag = Tag;
+			break;
+		}
+	}
+
+	OutEntryData.AbilityTag = AbilityTag;
+	if (!AbilityTag.IsValid())
+	{
+		return false;
+	}
+
+	UGameInstance* GameInstance = GetGameInstance();
+	UAeyerjiAbilityTuningSubsystem* TuningSubsystem = GameInstance ? GameInstance->GetSubsystem<UAeyerjiAbilityTuningSubsystem>() : nullptr;
+	AAeyerjiPlayerState* PlayerState = ResolveOwningPlayerState();
+	if (!TuningSubsystem || !PlayerState)
+	{
+		return false;
+	}
+
+	OutEntryData.CurrentRank = PlayerState->GetAbilityRank(AbilityTag);
+	OutEntryData.MaxRank = TuningSubsystem->GetMaxAbilityRank(AbilityTag);
+	OutEntryData.bBaseUnlocked = PlayerState->IsAbilityBaseUnlocked(AbilityTag);
+	OutEntryData.RemainingAbilityPoints = PlayerState->GetUnspentAbilityPoints();
+	OutEntryData.Slot.Level = FMath::Max(1, OutEntryData.CurrentRank);
+
+	const int32 NextRank = OutEntryData.CurrentRank > 0 ? OutEntryData.CurrentRank + 1 : 2;
+	if (const FAeyerjiAbilityRankTableRow* NextRankRow = TuningSubsystem->FindAbilityRankRow(AbilityTag, NextRank))
+	{
+		OutEntryData.PointCost = NextRankRow->PointCost;
+		OutEntryData.RequiredPlayerLevel = NextRankRow->RequiredPlayerLevel;
+	}
+
+	FText FailureReason;
+	OutEntryData.bCanUpgrade = PlayerState->CanUpgradeAbility(AbilityTag, FailureReason);
+	return true;
 }
 
 void UW_AbilitySelectionNative::ShowAbilityTooltip(const FAeyerjiAbilitySlot& SlotData, FVector2D ScreenPosition, UWidget* SourceWidget)
@@ -165,6 +274,29 @@ void UW_AbilitySelectionNative::SetActiveTooltipSource(UWidget* SourceWidget)
 	}
 
 	ActiveTooltipSource = SourceWidget;
+}
+
+AAeyerjiPlayerState* UW_AbilitySelectionNative::ResolveOwningPlayerState() const
+{
+	if (AAeyerjiPlayerState* PlayerState = BoundPlayerState.Get())
+	{
+		return PlayerState;
+	}
+
+	if (APlayerController* PlayerController = GetOwningPlayer())
+	{
+		return PlayerController->GetPlayerState<AAeyerjiPlayerState>();
+	}
+
+	return nullptr;
+}
+
+void UW_AbilitySelectionNative::HandleAbilityProgressionChanged(const TArray<FAeyerjiAbilityProgressEntry>& ProgressEntries, int32 RemainingPoints, int32 TotalPointSpends)
+{
+	(void)ProgressEntries;
+	(void)RemainingPoints;
+	(void)TotalPointSpends;
+	RebuildAbilityGrid();
 }
 
 void UW_AbilitySelectionNative::RefreshManagedUniformGrids()

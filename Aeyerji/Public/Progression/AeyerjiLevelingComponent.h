@@ -62,7 +62,7 @@ private:
     UPROPERTY(EditAnywhere, Category="Aeyerji|Leveling")
     bool bInitializeXPMaxFromCurve = true;
 
-    /** Curve row: X = Level, Y = XP required to reach NEXT level. */
+    /** Legacy editor override retained for old Blueprint children. Runtime uses the shared XP_Needed progression curve first. */
     UPROPERTY(EditAnywhere, Category="Aeyerji|Leveling")
     FCurveTableRowHandle XPToReachLevelRow;
 

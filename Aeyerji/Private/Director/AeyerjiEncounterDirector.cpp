@@ -17,6 +17,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Curves/CurveFloat.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavigationSystem.h"
+#include "NavigationPath.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
@@ -27,6 +28,10 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Components/CapsuleComponent.h"
 #include "HAL/IConsoleManager.h"
 #include "Net/UnrealNetwork.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
+#include "Systems/AeyerjiRiftRules.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogEncounterDirector, Log, All);
 
@@ -182,6 +187,9 @@ void AAeyerjiEncounterDirector::GetLifetimeReplicatedProps(TArray<FLifetimePrope
 
 	DOREPLIFETIME(AAeyerjiEncounterDirector, TotalToKill);
 	DOREPLIFETIME(AAeyerjiEncounterDirector, KilledCount);
+	DOREPLIFETIME(AAeyerjiEncounterDirector, EnemiesDefeated);
+	DOREPLIFETIME(AAeyerjiEncounterDirector, WeightedProgressPoints);
+	DOREPLIFETIME(AAeyerjiEncounterDirector, WeightedProgressTarget);
 	DOREPLIFETIME(AAeyerjiEncounterDirector, bBossSpawned);
 }
 
@@ -260,6 +268,10 @@ void AAeyerjiEncounterDirector::ApplyDirectorDefinition()
 	GroundTraceUpOffset = FMath::Max(0.f, DirectorDefinition->GroundTraceUpOffset);
 	GroundTraceDownDistance = FMath::Max(10.f, DirectorDefinition->GroundTraceDownDistance);
 	SpawnGroundOffset = FMath::Max(0.f, DirectorDefinition->SpawnGroundOffset);
+	RiftMinimumSpawnDistanceFromPlayers = FMath::Max(0.f, DirectorDefinition->RiftMinimumSpawnDistanceFromPlayers);
+	RiftPressureEvaluationInterval = FMath::Max(0.1f, DirectorDefinition->RiftPressureEvaluationInterval);
+	RiftMinimumActiveEnemyPressure = FMath::Max(0, DirectorDefinition->RiftMinimumActiveEnemyPressure);
+	bRiftPreferHiddenSpawnLocations = DirectorDefinition->bRiftPreferHiddenSpawnLocations;
 	bEnableEnemyLODThrottling = DirectorDefinition->bEnableEnemyLODThrottling;
 	EnemyLODUpdateInterval = FMath::Max(0.05f, DirectorDefinition->EnemyLODUpdateInterval);
 	EnemyLODNearDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODNearDistance);
@@ -324,26 +336,37 @@ void AAeyerjiEncounterDirector::RegisterExternalEnemy(AEnemyParentNative* Enemy,
 	}
 }
 
-void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy)
+void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy, const int32 ProgressPoints, const int32 RunSerial)
 {
 	if (GetNetMode() == NM_Client || !IsValid(Enemy))
 	{
 		return;
 	}
 
-	for (const TWeakObjectPtr<AActor>& Tracked : LiveEnemies)
+	const TWeakObjectPtr<AActor> EnemyKey(Enemy);
+	if (RegisteredProgressEnemyPoints.Contains(EnemyKey))
 	{
-		if (Tracked.Get() == Enemy)
+		UE_LOG(LogEncounterDirector, Verbose,
+			TEXT("[RiftRun][Registration] Duplicate ignored RunSerial=%d Enemy=%s"),
+			WeightedProgressRunSerial, *GetNameSafe(Enemy));
+		return;
+	}
+	if (WeightedProgressRunSerial > 0)
+	{
+		if (bWeightedProgressFrozen || (RunSerial > 0 && RunSerial != WeightedProgressRunSerial))
 		{
 			return;
 		}
+		RegisteredProgressEnemyPoints.Add(EnemyKey, FMath::Max(ProgressPoints, 1));
 	}
-
-	for (const TWeakObjectPtr<AActor>& Tracked : ProgressOnlyEnemies)
+	else
 	{
-		if (Tracked.Get() == Enemy)
+		for (const TWeakObjectPtr<AActor>& Tracked : ProgressOnlyEnemies)
 		{
-			return;
+			if (Tracked.Get() == Enemy)
+			{
+				return;
+			}
 		}
 	}
 
@@ -352,7 +375,920 @@ void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy)
 	Enemy->OnEnemyDied.AddDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
 	Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
 	Enemy->OnDestroyed.AddDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+	UE_LOG(LogEncounterDirector, Verbose,
+		TEXT("[RiftRun][Registration] RunSerial=%d Enemy=%s Points=%d Registered=%d"),
+		WeightedProgressRunSerial, *GetNameSafe(Enemy), FMath::Max(ProgressPoints, 1),
+		RegisteredProgressEnemyPoints.Num());
 }
+
+void AAeyerjiEncounterDirector::BeginWeightedProgressRun(const int32 RunSerial, const int32 ProgressTargetPoints)
+{
+	if (!HasAuthority() || RunSerial <= 0 || ProgressTargetPoints <= 0)
+	{
+		return;
+	}
+
+	for (const TWeakObjectPtr<AActor>& EnemyPtr : ProgressOnlyEnemies)
+	{
+		if (AActor* Enemy = EnemyPtr.Get())
+		{
+			if (AEnemyParentNative* TypedEnemy = Cast<AEnemyParentNative>(Enemy))
+			{
+				TypedEnemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+			}
+			Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+		}
+	}
+	ProgressOnlyEnemies.Reset();
+	RegisteredProgressEnemyPoints.Reset();
+	WeightedProgressRunSerial = RunSerial;
+	bWeightedProgressFrozen = false;
+	EnemiesDefeated = 0;
+	WeightedProgressPoints = 0;
+	WeightedProgressTarget = FMath::Max(ProgressTargetPoints, 1);
+	KilledCount = 0;
+	TotalToKill = WeightedProgressTarget;
+	bBossSpawned = false;
+	HandleProgressChanged();
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][Progress] Began RunSerial=%d Target=%d"), RunSerial, WeightedProgressTarget);
+}
+
+bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
+	const int32 RunSerial,
+	const int32 RunSeed,
+	const int32 ProgressTargetPoints,
+	const int32 EnemyBudget,
+	const float ActivationDistance,
+	const float DensityMultiplier,
+	const float EliteRateMultiplier,
+	const float EncounterSizeMultiplier,
+	const float ProgressMultiplier,
+	AAeyerjiSpawnerGroup* SpawnManager,
+	AAeyerjiLevelDirector* LevelDirector,
+	FString& OutReason)
+{
+	OutReason.Reset();
+	if (!HasAuthority() || RunSerial <= 0 || ProgressTargetPoints <= 0 || EnemyBudget <= 0)
+	{
+		OutReason = TEXT("Invalid Rift region run serial, target, or enemy budget");
+		return false;
+	}
+
+	ResetRiftRegionRun();
+	RiftRegionRunSerial = RunSerial;
+	RiftRegionActivationDistance = FMath::Max(ActivationDistance, 0.f);
+	RiftEliteRateMultiplier = FMath::Max(EliteRateMultiplier, 0.f);
+	RiftProgressMultiplier = FMath::Max(ProgressMultiplier, 0.1f);
+	NextRiftPressureEvaluationTime = 0.0;
+	RiftSpawnStream.Initialize(RunSeed != 0 ? RunSeed : RunSerial);
+	// Never repurpose the boss executor as the common population manager. A missing
+	// or conflicting world-population reference is safely replaced at runtime.
+	RiftPopulationSpawner = LevelDirector && SpawnManager == LevelDirector->BossSpawner
+		? nullptr
+		: SpawnManager;
+	if (SpawnManager && !RiftPopulationSpawner.IsValid())
+	{
+		UE_LOG(LogEncounterDirector, Warning,
+			TEXT("[RiftRun][RegionPlan] Ignoring boss spawner %s as the population executor; creating a private runtime executor"),
+			*GetNameSafe(SpawnManager));
+	}
+	RiftLevelDirector = LevelDirector;
+
+	TArray<const UEnemySpawnGroupDefinition*> ValidGroups;
+	for (const UEnemySpawnGroupDefinition* Group : SpawnGroups)
+	{
+		if (IsValid(Group) && !Group->EnemyTypes.IsEmpty())
+		{
+			ValidGroups.Add(Group);
+		}
+	}
+	ValidGroups.Sort([](const UEnemySpawnGroupDefinition& Left, const UEnemySpawnGroupDefinition& Right)
+	{
+		return Left.GetPathName() < Right.GetPathName();
+	});
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		OutReason = TEXT("Rift region planning has no world");
+		ResetRiftRegionRun();
+		return false;
+	}
+
+	for (TActorIterator<AAeyerjiSpawnRegion> It(World); It; ++It)
+	{
+		AAeyerjiSpawnRegion* Region = *It;
+		if (!IsValid(Region) || !Region->IsRiftEncounterEligible())
+		{
+			continue;
+		}
+
+		FRiftRegionPlan Plan;
+		Plan.Region = Region;
+		Plan.Bounds = Region->GetRegionBounds();
+		Plan.StableKey = Region->GetPathName();
+		Plan.Weight = FMath::Max(Region->RegionWeight, 0.f);
+		Plan.EncounterGroup = Region->RiftEncounterGroup;
+		if (Plan.EncounterGroup.IsValid() && Plan.EncounterGroup->EnemyTypes.IsEmpty())
+		{
+			OutReason = FString::Printf(TEXT("Encounter anchor %s references empty group %s"),
+				*Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()));
+			ResetRiftRegionRun();
+			return false;
+		}
+		RiftRegionPlans.Add(MoveTemp(Plan));
+	}
+	RiftRegionPlans.Sort([](const FRiftRegionPlan& Left, const FRiftRegionPlan& Right)
+	{
+		return Left.StableKey < Right.StableKey;
+	});
+	if (RiftRegionPlans.IsEmpty())
+	{
+		OutReason = TEXT("No eligible AAeyerjiSpawnRegion actors were discovered; untag regions or remove Rift.Excluded");
+		ResetRiftRegionRun();
+		return false;
+	}
+	if (ValidGroups.IsEmpty())
+	{
+		bool bEveryAnchorHasGroup = true;
+		for (const FRiftRegionPlan& Plan : RiftRegionPlans)
+		{
+			bEveryAnchorHasGroup &= Plan.EncounterGroup.IsValid();
+		}
+		if (!bEveryAnchorHasGroup)
+		{
+			OutReason = TEXT("EncounterDirectorDefinition has no fallback SpawnGroups and an encounter anchor has no authored RiftEncounterGroup");
+			ResetRiftRegionRun();
+			return false;
+		}
+	}
+
+	TArray<float> RegionWeights;
+	RegionWeights.Reserve(RiftRegionPlans.Num());
+	for (const FRiftRegionPlan& Plan : RiftRegionPlans)
+	{
+		RegionWeights.Add(Plan.Weight);
+	}
+	const int32 EffectiveEnemyBudget = FMath::Max(FMath::RoundToInt(EnemyBudget
+		* FMath::Max(DensityMultiplier, 0.1f)
+		* FMath::Max(EncounterSizeMultiplier, 0.1f)), 1);
+	const TArray<int32> RegionBudgets = AeyerjiRiftRules::AllocateLargestRemainder(RegionWeights, EffectiveEnemyBudget);
+	RiftReservedRegionRequests.SetNum(RiftRegionPlans.Num());
+
+	const UEnemySpawnGroupDefinition* LastPlannedGroup = nullptr;
+	int32 PlannedProgressPoints = 0;
+	for (int32 RegionIndex = 0; RegionIndex < RiftRegionPlans.Num(); ++RegionIndex)
+	{
+		FRiftRegionPlan& Plan = RiftRegionPlans[RegionIndex];
+		Plan.Budget = RegionBudgets.IsValidIndex(RegionIndex) ? RegionBudgets[RegionIndex] : 0;
+		if (Plan.Budget <= 0)
+		{
+			continue;
+		}
+		if (!ResolveRiftRegionAnchor(Plan.Bounds, Plan.Anchor))
+		{
+			OutReason = FString::Printf(TEXT("SpawnRegion %s has no navigable point inside its bounds"), *Plan.StableKey);
+			ResetRiftRegionRun();
+			return false;
+		}
+
+		TArray<FRiftSpawnRequest>& ReservedRequests = RiftReservedRegionRequests[RegionIndex];
+		ReservedRequests.Reserve(Plan.Budget);
+		for (int32 SpawnIndex = 0; SpawnIndex < Plan.Budget; ++SpawnIndex)
+		{
+			const UEnemySpawnGroupDefinition* Group = Plan.EncounterGroup.Get();
+			for (int32 Attempt = 0; !Group && Attempt < ValidGroups.Num() * 2; ++Attempt)
+			{
+				const UEnemySpawnGroupDefinition* Candidate = ValidGroups[RiftSpawnStream.RandRange(0, ValidGroups.Num() - 1)];
+				if (Candidate->bAllowBackToBackSelection || Candidate != LastPlannedGroup || ValidGroups.Num() == 1)
+				{
+					Group = Candidate;
+					break;
+				}
+			}
+			Group = Group ? Group : ValidGroups[0];
+			LastPlannedGroup = Group;
+
+			const AAeyerjiSpawnRegion* Region = Plan.Region.Get();
+			const bool bCanUseElitePool = Region && Region->bAllowElites && !Group->EliteEnemyTypes.IsEmpty();
+			const float EliteChance = Region
+				? FMath::Clamp((Group->RiftEliteChance + Region->EliteChanceBonus) * RiftEliteRateMultiplier, 0.f, 1.f)
+				: 0.f;
+			const bool bPlanElite = bCanUseElitePool && RiftSpawnStream.FRand() <= EliteChance;
+			const TArray<TSubclassOf<AEnemyParentNative>>& ClassPool = bPlanElite
+				? Group->EliteEnemyTypes
+				: Group->EnemyTypes;
+			TArray<TSubclassOf<AEnemyParentNative>> ValidClasses;
+			for (const TSubclassOf<AEnemyParentNative> EnemyClass : ClassPool)
+			{
+				if (*EnemyClass)
+				{
+					ValidClasses.Add(EnemyClass);
+				}
+			}
+			if (ValidClasses.IsEmpty())
+			{
+				OutReason = FString::Printf(TEXT("Rift spawn group %s resolved an empty %s class pool"),
+					*GetNameSafe(Group), bPlanElite ? TEXT("elite") : TEXT("ordinary"));
+				ResetRiftRegionRun();
+				return false;
+			}
+
+			FRiftSpawnRequest& Request = ReservedRequests.AddDefaulted_GetRef();
+			Request.RegionPlanIndex = RegionIndex;
+			Request.EnemyClass = ValidClasses[RiftSpawnStream.RandRange(0, ValidClasses.Num() - 1)];
+			Request.bIsElite = bPlanElite;
+			Request.ProgressPoints = FMath::Max(FMath::RoundToInt(
+				(bPlanElite ? Group->RiftEliteProgressPoints : Group->RiftProgressPoints) * RiftProgressMultiplier), 1);
+			PlannedProgressPoints += Request.ProgressPoints;
+			Plan.ReservedProgress += Request.ProgressPoints;
+		}
+
+		UE_LOG(LogEncounterDirector, Display,
+			TEXT("[RiftRun][EncounterPlan] RunSerial=%d Seed=%d EncounterGroup=%s Anchor=%s Weight=%.3f Budget=%d ReservedProgress=%d"),
+			RunSerial, RunSeed, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), Plan.Weight,
+			Plan.Budget, Plan.ReservedProgress);
+	}
+
+	const float ReserveRatio = static_cast<float>(PlannedProgressPoints) / static_cast<float>(ProgressTargetPoints);
+	if (ReserveRatio < 1.2f)
+	{
+		OutReason = FString::Printf(TEXT("Reserved progress %d is below 120%% of target %d"),
+			PlannedProgressPoints, ProgressTargetPoints);
+		ResetRiftRegionRun();
+		return false;
+	}
+	if (ReserveRatio > 1.3f)
+	{
+		UE_LOG(LogEncounterDirector, Warning,
+			TEXT("[RiftRun][RegionPlan] RunSerial=%d reserved progress %d is %.1f%% of target %d (above 130%%)"),
+			RunSerial, PlannedProgressPoints, ReserveRatio * 100.f, ProgressTargetPoints);
+	}
+
+	if (!RiftPopulationSpawner.IsValid())
+	{
+		const FTransform SpawnTransform = GetActorTransform();
+		AAeyerjiSpawnerGroup* Spawned = World->SpawnActorDeferred<AAeyerjiSpawnerGroup>(
+			AAeyerjiSpawnerGroup::StaticClass(),
+			SpawnTransform,
+			this,
+			nullptr,
+			ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+		if (Spawned)
+		{
+			Spawned->bDisableActivationVolume = true;
+			Spawned->bDisableActivationEvent = true;
+			Spawned->bSuppressDoorControl = true;
+			Spawned->bAllowManualActivationWithoutWaves = true;
+			Spawned->PoolSettings.bEnablePooling = true;
+			Spawned->PoolSettings.bPrewarmDuringWorldFlowLoading = false;
+			UGameplayStatics::FinishSpawningActor(Spawned, SpawnTransform);
+			RiftPopulationSpawner = Spawned;
+			bSpawnedRiftPopulationSpawner = true;
+		}
+	}
+	AAeyerjiSpawnerGroup* ResolvedSpawner = RiftPopulationSpawner.Get();
+	if (!ResolvedSpawner)
+	{
+		OutReason = TEXT("No common SpawnerGroup is available for Rift region execution");
+		ResetRiftRegionRun();
+		return false;
+	}
+	ResolvedSpawner->ResetEncounter();
+	ResolvedSpawner->ConfigureAsRiftPopulationExecutor(LevelDirector);
+
+	BeginWeightedProgressRun(RunSerial, ProgressTargetPoints);
+	bRiftRegionActivationEnabled = true;
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][EncounterPlan] Ready RunSerial=%d Seed=%d Anchors=%d BaseBudget=%d EffectiveBudget=%d ReservedProgress=%d Target=%d ActivationDistance=%.1f Density=%.2f Elite=%.2f EncounterSize=%.2f Progress=%.2f"),
+		RunSerial, RunSeed, RiftRegionPlans.Num(), EnemyBudget, EffectiveEnemyBudget, PlannedProgressPoints,
+		ProgressTargetPoints, RiftRegionActivationDistance, DensityMultiplier, RiftEliteRateMultiplier,
+		EncounterSizeMultiplier, RiftProgressMultiplier);
+	return true;
+}
+
+void AAeyerjiEncounterDirector::StopRiftRegionActivation()
+{
+	if (!HasAuthority() || !bRiftRegionActivationEnabled)
+	{
+		return;
+	}
+	bRiftRegionActivationEnabled = false;
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][RegionActivation] Disabled RunSerial=%d PendingAcceptedSpawns=%d"),
+		RiftRegionRunSerial, RiftSpawnQueue.Num());
+}
+
+void AAeyerjiEncounterDirector::ResetRiftRegionRun()
+{
+	bRiftRegionActivationEnabled = false;
+	RiftRegionPlans.Reset();
+	RiftReservedRegionRequests.Reset();
+	RiftSpawnQueue.Reset();
+	RiftParticipantRegionLatch.Reset();
+	RiftRegionRunSerial = 0;
+	RiftRegionActivationDistance = 2500.f;
+	RiftEliteRateMultiplier = 1.f;
+	RiftProgressMultiplier = 1.f;
+	NextRiftPressureEvaluationTime = 0.0;
+	RiftLevelDirector.Reset();
+
+	if (bSpawnedRiftPopulationSpawner)
+	{
+		if (AAeyerjiSpawnerGroup* Spawned = RiftPopulationSpawner.Get())
+		{
+			Spawned->Destroy();
+		}
+	}
+	RiftPopulationSpawner.Reset();
+	bSpawnedRiftPopulationSpawner = false;
+}
+
+void AAeyerjiEncounterDirector::ProcessRiftRegionActivation()
+{
+	if (!HasAuthority() || !bRiftRegionActivationEnabled || RiftRegionRunSerial <= 0)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	if (bWeightedProgressFrozen || WeightedProgressPoints >= WeightedProgressTarget)
+	{
+		StopRiftRegionActivation();
+		return;
+	}
+
+	const float ActivationDistanceSquared = FMath::Square(FMath::Max(RiftRegionActivationDistance, 0.f));
+	int32 BestRegionIndex = INDEX_NONE;
+	APawn* BestParticipant = nullptr;
+	float BestDistanceSquared = TNumericLimits<float>::Max();
+	for (int32 RegionIndex = 0; RegionIndex < RiftRegionPlans.Num(); ++RegionIndex)
+	{
+		const FRiftRegionPlan& Plan = RiftRegionPlans[RegionIndex];
+		if (Plan.bConsumed || Plan.Budget <= 0 || !Plan.Region.IsValid() || !Plan.Bounds.IsValid)
+		{
+			continue;
+		}
+
+		TArray<APawn*> LivingParticipants;
+		GetLivingRiftParticipants(LivingParticipants);
+		for (APawn* Participant : LivingParticipants)
+		{
+			const TWeakObjectPtr<APawn> ParticipantKey(Participant);
+			if (const TWeakObjectPtr<AAeyerjiSpawnRegion>* LatchedRegionPtr = RiftParticipantRegionLatch.Find(ParticipantKey))
+			{
+				const AAeyerjiSpawnRegion* LatchedRegion = LatchedRegionPtr->Get();
+				if (IsValid(LatchedRegion)
+					&& LatchedRegion->GetRegionBounds().ComputeSquaredDistanceToPoint(Participant->GetActorLocation())
+						<= ActivationDistanceSquared)
+				{
+					continue;
+				}
+				RiftParticipantRegionLatch.Remove(ParticipantKey);
+			}
+
+			const float DistanceSquared = Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation());
+			if (DistanceSquared > ActivationDistanceSquared || DistanceSquared >= BestDistanceSquared)
+			{
+				continue;
+			}
+			if (!IsRiftRegionReachableFromParticipant(Plan.Anchor, Participant))
+			{
+				continue;
+			}
+
+			BestRegionIndex = RegionIndex;
+			BestDistanceSquared = DistanceSquared;
+			BestParticipant = Participant;
+		}
+	}
+	if (RiftRegionPlans.IsValidIndex(BestRegionIndex) && IsValid(BestParticipant))
+	{
+		if (TryActivateRiftEncounterGroup(BestRegionIndex, BestParticipant, TEXT("Proximity")))
+		{
+			return;
+		}
+	}
+
+	const double WorldTime = World->GetTimeSeconds();
+	if (WorldTime < NextRiftPressureEvaluationTime)
+	{
+		return;
+	}
+	NextRiftPressureEvaluationTime = WorldTime + FMath::Max(RiftPressureEvaluationInterval, 0.1f);
+	const int32 ActivePressure = GetActiveRiftEnemyPressure();
+	if (ActivePressure >= RiftMinimumActiveEnemyPressure)
+	{
+		return;
+	}
+	APawn* PressureParticipant = nullptr;
+	const int32 PressurePlanIndex = FindRiftPressureActivationCandidate(PressureParticipant);
+	if (RiftRegionPlans.IsValidIndex(PressurePlanIndex) && IsValid(PressureParticipant))
+	{
+		TryActivateRiftEncounterGroup(PressurePlanIndex, PressureParticipant, TEXT("Timer"));
+	}
+}
+
+bool AAeyerjiEncounterDirector::TryActivateRiftEncounterGroup(
+	const int32 PlanIndex,
+	APawn* Participant,
+	const TCHAR* ActivationReason)
+{
+	if (!RiftRegionPlans.IsValidIndex(PlanIndex) || !IsValid(Participant)
+		|| !RiftReservedRegionRequests.IsValidIndex(PlanIndex))
+	{
+		return false;
+	}
+	FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
+	TArray<FRiftSpawnRequest>& ReservedRequests = RiftReservedRegionRequests[PlanIndex];
+	if (Plan.bConsumed || ReservedRequests.IsEmpty() || bWeightedProgressFrozen
+		|| WeightedProgressPoints >= WeightedProgressTarget)
+	{
+		UE_LOG(LogEncounterDirector, Verbose,
+			TEXT("[RiftRun][EncounterActivation] Rejected RunSerial=%d Anchor=%s Group=%s Reason=%s State=ConsumedOrComplete"),
+			RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason);
+		return false;
+	}
+
+	FVector SafeLocation;
+	FString RejectReason;
+	const float HalfHeight = GetEnemyHalfHeight(ReservedRequests[0].EnemyClass);
+	if (!ResolveRiftSpawnLocation(Plan, HalfHeight, Participant, SafeLocation, RejectReason))
+	{
+		UE_LOG(LogEncounterDirector, Display,
+			TEXT("[RiftRun][EncounterActivation] Rejected RunSerial=%d Anchor=%s Group=%s Reason=%s Rejected=%s"),
+			RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason,
+			*RejectReason);
+		return false;
+	}
+
+	// Mark consumed before queueing. Both proximity and pressure evaluation execute on
+	// the server, and this is the shared one-shot reservation guard for both paths.
+	Plan.bConsumed = true;
+	RiftSpawnQueue.Append(ReservedRequests);
+	ReservedRequests.Reset();
+	if (FCString::Strcmp(ActivationReason, TEXT("Proximity")) == 0)
+	{
+		TArray<APawn*> LivingParticipants;
+		GetLivingRiftParticipants(LivingParticipants);
+		const float LatchDistanceSquared = FMath::Square(FMath::Max(RiftRegionActivationDistance, 0.f));
+		for (APawn* NearbyParticipant : LivingParticipants)
+		{
+			if (Plan.Bounds.ComputeSquaredDistanceToPoint(NearbyParticipant->GetActorLocation()) <= LatchDistanceSquared)
+			{
+				RiftParticipantRegionLatch.Add(NearbyParticipant, Plan.Region);
+			}
+		}
+	}
+	if (AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get())
+	{
+		if (Spawner->IsCleared())
+		{
+			Spawner->ResetEncounter();
+			Spawner->ConfigureAsRiftPopulationExecutor(RiftLevelDirector.Get());
+		}
+	}
+
+	const float ActivationDistance = FMath::Sqrt(Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation()));
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][EncounterActivation] RunSerial=%d Anchor=%s Group=%s Reason=%s Participant=%s Distance=%.1f Budget=%d PendingSpawns=%d"),
+		RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason,
+		*GetNameSafe(Participant), ActivationDistance, Plan.Budget, RiftSpawnQueue.Num());
+	return true;
+}
+
+int32 AAeyerjiEncounterDirector::FindRiftPressureActivationCandidate(APawn*& OutParticipant) const
+{
+	OutParticipant = nullptr;
+	TArray<APawn*> LivingParticipants;
+	GetLivingRiftParticipants(LivingParticipants);
+	const float ActivationDistanceSquared = FMath::Square(FMath::Max(RiftRegionActivationDistance, 0.f));
+	float BestDistanceSquared = TNumericLimits<float>::Max();
+	int32 BestPlanIndex = INDEX_NONE;
+	for (int32 PlanIndex = 0; PlanIndex < RiftRegionPlans.Num(); ++PlanIndex)
+	{
+		const FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
+		if (Plan.bConsumed || Plan.Budget <= 0 || !Plan.Region.IsValid() || !Plan.Bounds.IsValid)
+		{
+			continue;
+		}
+		for (APawn* Participant : LivingParticipants)
+		{
+			const float DistanceSquared = Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation());
+			if (DistanceSquared <= ActivationDistanceSquared && DistanceSquared < BestDistanceSquared
+				&& IsRiftRegionReachableFromParticipant(Plan.Anchor, Participant))
+			{
+				BestPlanIndex = PlanIndex;
+				BestDistanceSquared = DistanceSquared;
+				OutParticipant = Participant;
+			}
+		}
+	}
+	return BestPlanIndex;
+}
+
+int32 AAeyerjiEncounterDirector::GetActiveRiftEnemyPressure() const
+{
+	int32 ActivePressure = 0;
+	for (const TWeakObjectPtr<AActor>& Enemy : LiveEnemies)
+	{
+		ActivePressure += Enemy.IsValid() ? 1 : 0;
+	}
+	return ActivePressure;
+}
+
+void AAeyerjiEncounterDirector::GetLivingRiftParticipants(TArray<APawn*>& OutParticipants) const
+{
+	OutParticipants.Reset();
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), false);
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AController* Controller = It->Get();
+		APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
+		if (!IsValid(Pawn))
+		{
+			continue;
+		}
+		if (DeadTag.IsValid())
+		{
+			if (const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn, true))
+			{
+				if (ASC->HasMatchingGameplayTag(DeadTag))
+				{
+					continue;
+				}
+			}
+		}
+		OutParticipants.Add(Pawn);
+	}
+}
+
+void AAeyerjiEncounterDirector::ProcessRiftSpawnQueue()
+{
+	if (!HasAuthority() || RiftRegionRunSerial <= 0 || RiftSpawnQueue.IsEmpty())
+	{
+		return;
+	}
+
+	const int32 SpawnBudget = FMath::Min(FMath::Max(MaxSpawnsPerTick, 1), RiftSpawnQueue.Num());
+	for (int32 AttemptIndex = 0; AttemptIndex < SpawnBudget && !RiftSpawnQueue.IsEmpty(); ++AttemptIndex)
+	{
+		FRiftSpawnRequest Request = RiftSpawnQueue[0];
+		RiftSpawnQueue.RemoveAt(0, 1, EAllowShrinking::No);
+		if (!SpawnRiftRequest(Request))
+		{
+			Request.FailedAttempts++;
+			if (Request.FailedAttempts == 1 || Request.FailedAttempts % 20 == 0)
+			{
+				const FRiftRegionPlan* Plan = RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex)
+					? &RiftRegionPlans[Request.RegionPlanIndex]
+					: nullptr;
+				UE_LOG(LogEncounterDirector, Warning,
+					TEXT("[RiftRun][EncounterSpawn] Deferred RunSerial=%d Anchor=%s Group=%s Class=%s Attempts=%d"),
+					RiftRegionRunSerial, Plan ? *Plan->StableKey : TEXT("InvalidAnchor"),
+					Plan ? *GetNameSafe(Plan->EncounterGroup.Get()) : TEXT("None"),
+					*GetNameSafe(Request.EnemyClass), Request.FailedAttempts);
+			}
+			RiftSpawnQueue.Add(MoveTemp(Request));
+		}
+	}
+}
+
+bool AAeyerjiEncounterDirector::ResolveRiftRegionAnchor(const FBox& Bounds, FVector& OutAnchor)
+{
+	if (!Bounds.IsValid)
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+	const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!NavSys)
+	{
+		OutAnchor = Bounds.GetCenter();
+		return true;
+	}
+
+	const FVector ProjectionExtent(
+		FMath::Max(Bounds.GetExtent().X, 100.f),
+		FMath::Max(Bounds.GetExtent().Y, 100.f),
+		FMath::Max(Bounds.GetExtent().Z + 1000.f, 1000.f));
+	for (int32 Attempt = 0; Attempt < 30; ++Attempt)
+	{
+		FVector Candidate = Attempt == 0 ? Bounds.GetCenter() : FVector(
+			RiftSpawnStream.FRandRange(Bounds.Min.X, Bounds.Max.X),
+			RiftSpawnStream.FRandRange(Bounds.Min.Y, Bounds.Max.Y),
+			Bounds.GetCenter().Z);
+		FNavLocation Projected;
+		if (NavSys->ProjectPointToNavigation(Candidate, Projected, ProjectionExtent)
+			&& Bounds.IsInsideXY(Projected.Location))
+		{
+			OutAnchor = Projected.Location;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool AAeyerjiEncounterDirector::IsRiftRegionReachableFromParticipant(const FVector& RegionAnchor, const APawn* Participant) const
+{
+	if (!IsValid(Participant))
+	{
+		return false;
+	}
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+	const UNavigationPath* Path = UNavigationSystemV1::FindPathToLocationSynchronously(
+		World, RegionAnchor, Participant->GetActorLocation());
+	return Path && Path->IsValid() && !Path->IsPartial();
+}
+
+APawn* AAeyerjiEncounterDirector::ResolveNearestLiveParticipant(const FVector& FromLocation) const
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return nullptr;
+	}
+	const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), false);
+	APawn* BestPawn = nullptr;
+	float BestDistanceSquared = TNumericLimits<float>::Max();
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AController* Controller = It->Get();
+		APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
+		if (!IsValid(Pawn))
+		{
+			continue;
+		}
+		if (DeadTag.IsValid())
+		{
+			if (const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn, true))
+			{
+				if (ASC->HasMatchingGameplayTag(DeadTag))
+				{
+					continue;
+				}
+			}
+		}
+		const float DistanceSquared = FVector::DistSquared(FromLocation, Pawn->GetActorLocation());
+		if (!BestPawn || DistanceSquared < BestDistanceSquared)
+		{
+			BestPawn = Pawn;
+			BestDistanceSquared = DistanceSquared;
+		}
+	}
+	return BestPawn;
+}
+
+bool AAeyerjiEncounterDirector::ResolveRiftSpawnLocation(
+	const FRiftRegionPlan& Plan,
+	const float HalfHeight,
+	const APawn* Participant,
+	FVector& OutLocation,
+	FString& OutRejectReason)
+{
+	OutRejectReason.Reset();
+	UWorld* World = GetWorld();
+	if (!World || !Plan.Bounds.IsValid)
+	{
+		OutRejectReason = TEXT("Missing world or invalid encounter-anchor bounds");
+		return false;
+	}
+	const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!NavSys)
+	{
+		OutRejectReason = TEXT("NavMesh is unavailable");
+		return false;
+	}
+	TArray<APawn*> LivingParticipants;
+	GetLivingRiftParticipants(LivingParticipants);
+	if (LivingParticipants.IsEmpty())
+	{
+		OutRejectReason = TEXT("No living participants");
+		return false;
+	}
+	const FVector ProjectionExtent(
+		FMath::Max(Plan.Bounds.GetExtent().X, 100.f),
+		FMath::Max(Plan.Bounds.GetExtent().Y, 100.f),
+		FMath::Max(Plan.Bounds.GetExtent().Z + 1000.f, 1000.f));
+	bool bFoundVisibleFallback = false;
+	FVector VisibleFallback = FVector::ZeroVector;
+	for (int32 Attempt = 0; Attempt < FMath::Max(SpawnLocationSearchAttempts, 1); ++Attempt)
+	{
+		FVector Candidate(
+			RiftSpawnStream.FRandRange(Plan.Bounds.Min.X, Plan.Bounds.Max.X),
+			RiftSpawnStream.FRandRange(Plan.Bounds.Min.Y, Plan.Bounds.Max.Y),
+			Plan.Bounds.Max.Z);
+		FNavLocation Projected;
+		if (!NavSys->ProjectPointToNavigation(Candidate, Projected, ProjectionExtent))
+		{
+			continue;
+		}
+		Candidate = Projected.Location;
+		if (!Plan.Bounds.IsInsideXY(Candidate)
+			|| (Participant && !IsRiftRegionReachableFromParticipant(Candidate, Participant)))
+		{
+			continue;
+		}
+
+		const FVector TraceStart = Candidate + FVector(0.f, 0.f, GroundTraceUpOffset);
+		const FVector TraceEnd = Candidate - FVector(0.f, 0.f, GroundTraceDownDistance);
+		FHitResult Hit;
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(EncounterDirector_RiftRegionGround), false, Participant);
+		if (World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params))
+		{
+			Candidate.Z = Hit.ImpactPoint.Z + SpawnGroundOffset;
+		}
+		Candidate += FVector(0.f, 0.f, HalfHeight);
+		bool bVisibleToParticipant = false;
+		FString SafetyRejectReason;
+		if (!IsRiftSpawnLocationSafe(Candidate, LivingParticipants, bVisibleToParticipant, SafetyRejectReason))
+		{
+			OutRejectReason = SafetyRejectReason;
+			continue;
+		}
+		if (bRiftPreferHiddenSpawnLocations && bVisibleToParticipant)
+		{
+			bFoundVisibleFallback = true;
+			VisibleFallback = Candidate;
+			continue;
+		}
+		OutLocation = Candidate;
+		return true;
+	}
+	if (bFoundVisibleFallback)
+	{
+		OutLocation = VisibleFallback;
+		return true;
+	}
+	if (OutRejectReason.IsEmpty())
+	{
+		OutRejectReason = TEXT("No navigable spawn location satisfies the player safety radius");
+	}
+	return false;
+}
+
+bool AAeyerjiEncounterDirector::IsRiftSpawnLocationSafe(
+	const FVector& Candidate,
+	const TArray<APawn*>& LivingParticipants,
+	bool& bOutVisibleToParticipant,
+	FString& OutRejectReason) const
+{
+	bOutVisibleToParticipant = false;
+	OutRejectReason.Reset();
+	const float MinimumDistanceSquared = FMath::Square(FMath::Max(RiftMinimumSpawnDistanceFromPlayers, 0.f));
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		OutRejectReason = TEXT("World disappeared during spawn safety validation");
+		return false;
+	}
+	for (APawn* Participant : LivingParticipants)
+	{
+		if (!IsValid(Participant))
+		{
+			continue;
+		}
+		if (FVector::DistSquared(Candidate, Participant->GetActorLocation()) < MinimumDistanceSquared)
+		{
+			OutRejectReason = FString::Printf(TEXT("Within %.0fcm safety radius of %s"),
+				RiftMinimumSpawnDistanceFromPlayers, *GetNameSafe(Participant));
+			return false;
+		}
+
+		FVector EyeLocation;
+		FRotator EyeRotation;
+		Participant->GetActorEyesViewPoint(EyeLocation, EyeRotation);
+		FCollisionQueryParams VisibilityParams(SCENE_QUERY_STAT(EncounterDirector_RiftVisibility), false, Participant);
+		const FVector VisibilityTarget = Candidate + FVector(0.f, 0.f, 75.f);
+		if (!World->LineTraceTestByChannel(EyeLocation, VisibilityTarget, ECC_Visibility, VisibilityParams))
+		{
+			bOutVisibleToParticipant = true;
+		}
+	}
+	return true;
+}
+
+bool AAeyerjiEncounterDirector::SpawnRiftRequest(FRiftSpawnRequest& Request)
+{
+	if (!Request.EnemyClass || !RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex))
+	{
+		return false;
+	}
+	AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get();
+	if (!Spawner)
+	{
+		return false;
+	}
+	if (Spawner->IsCleared())
+	{
+		Spawner->ResetEncounter();
+		Spawner->ConfigureAsRiftPopulationExecutor(RiftLevelDirector.Get());
+	}
+
+	const FRiftRegionPlan& Plan = RiftRegionPlans[Request.RegionPlanIndex];
+	APawn* Participant = ResolveNearestLiveParticipant(Plan.Anchor);
+	if (!Participant)
+	{
+		return false;
+	}
+	const float HalfHeight = GetEnemyHalfHeight(Request.EnemyClass);
+	FVector SpawnLocation;
+	FString RejectReason;
+	if (!ResolveRiftSpawnLocation(Plan, HalfHeight, Participant, SpawnLocation, RejectReason))
+	{
+		UE_LOG(LogEncounterDirector, Verbose,
+			TEXT("[RiftRun][EncounterSpawn] Deferred RunSerial=%d Anchor=%s Group=%s Reason=%s"),
+			RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), *RejectReason);
+		return false;
+	}
+	const FRotator SpawnRotation = (Participant->GetActorLocation() - SpawnLocation).Rotation();
+
+	FEnemySet EnemyTemplate;
+	EnemyTemplate.EnemyClass = Request.EnemyClass;
+	EnemyTemplate.Count = 1;
+	EnemyTemplate.ProgressPoints = FMath::Max(Request.ProgressPoints, 1);
+	EnemyTemplate.SpawnInterval = 0.f;
+	EnemyTemplate.EnemyArchetypeTag = ResolveArchetypeTagFromClass(Request.EnemyClass);
+	EnemyTemplate.bIsElite = Request.bIsElite;
+	EnemyTemplate.bSkipEliteAutoScaling = Request.bIsElite;
+
+	const FTransform SpawnTransform(SpawnRotation, SpawnLocation);
+	APawn* SpawnedPawn = UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
+		this,
+		EnemyTemplate,
+		SpawnTransform,
+		Spawner,
+		this,
+		Participant,
+		true,
+		true,
+		false,
+		true,
+		Participant,
+		Participant->GetController(),
+		true);
+	if (!IsValid(SpawnedPawn))
+	{
+		return false;
+	}
+
+	UE_LOG(LogEncounterDirector, Verbose,
+		TEXT("[RiftRun][EnemyLevel] RunSerial=%d Anchor=%s Group=%s Enemy=%s EnemyLevel=%d Points=%d Elite=%d Remaining=%d"),
+		RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), *GetNameSafe(SpawnedPawn),
+		RiftLevelDirector.IsValid() ? RiftLevelDirector->GetActiveRiftActivity().ActivityLevel : UAeyerjiDifficultySettings::GetRiftEnemyReferenceLevel(),
+		EnemyTemplate.ProgressPoints, EnemyTemplate.bIsElite ? 1 : 0, RiftSpawnQueue.Num());
+	return true;
+}
+
+void AAeyerjiEncounterDirector::FreezeWeightedProgress()
+{
+	if (!HasAuthority() || bWeightedProgressFrozen)
+	{
+		return;
+	}
+	bWeightedProgressFrozen = true;
+	StopRiftRegionActivation();
+	WeightedProgressPoints = FMath::Min(WeightedProgressPoints, WeightedProgressTarget);
+	KilledCount = WeightedProgressPoints;
+	HandleProgressChanged();
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+int32 AAeyerjiEncounterDirector::GetRegisteredProgressPointsForAutomation(const AActor* Enemy) const
+{
+	return Enemy
+		? RegisteredProgressEnemyPoints.FindRef(TWeakObjectPtr<AActor>(const_cast<AActor*>(Enemy)))
+		: 0;
+}
+
+void AAeyerjiEncounterDirector::NotifyProgressEnemyDiedForAutomation(AActor* Enemy)
+{
+	HandleProgressEnemyDied(Enemy);
+}
+
+void AAeyerjiEncounterDirector::NotifyProgressEnemyDestroyedForAutomation(AActor* Enemy)
+{
+	HandleProgressEnemyDestroyed(Enemy);
+}
+#endif
 
 bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProfile* Profile, AAeyerjiSpawnerGroup* SpawnManager, AAeyerjiLevelDirector* LevelDirector)
 {
@@ -395,6 +1331,8 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 				Spawned->bDisableActivationEvent = true;
 				Spawned->bSuppressDoorControl = true;
 				Spawned->bAllowManualActivationWithoutWaves = true;
+				Spawned->PoolSettings.bEnablePooling = true;
+				Spawned->PoolSettings.bPrewarmDuringWorldFlowLoading = true;
 				UGameplayStatics::FinishSpawningActor(Spawned, SpawnTransform);
 				FixedPopulationSpawner = Spawned;
 				bSpawnedPopulationSpawner = true;
@@ -419,6 +1357,66 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 
 	PendingSpawnRequests.Reset();
 	BuildFixedPopulationPlan();
+	if (FixedPopulationSpawner.IsValid()
+		&& FixedPopulationSpawner->PoolSettings.bEnablePooling
+		&& FixedPopulationSpawner->PoolSettings.bPrewarmDuringWorldFlowLoading)
+	{
+		TArray<FEnemySet> WarmSets;
+		auto AddGroupToWarmSets = [this, &WarmSets](const UEnemySpawnGroupDefinition* Group)
+		{
+			if (!IsValid(Group))
+			{
+				return;
+			}
+
+			for (TSubclassOf<AEnemyParentNative> EnemyClass : Group->EnemyTypes)
+			{
+				if (!*EnemyClass)
+				{
+					continue;
+				}
+
+				FEnemySet WarmSet;
+				WarmSet.EnemyClass = EnemyClass;
+				WarmSet.Count = 1;
+				WarmSet.EnemyArchetypeTag = ResolveArchetypeTagFromClass(EnemyClass);
+				WarmSets.Add(WarmSet);
+			}
+
+			for (TSubclassOf<AEnemyParentNative> EliteClass : Group->EliteEnemyTypes)
+			{
+				if (!*EliteClass)
+				{
+					continue;
+				}
+
+				FEnemySet WarmSet;
+				WarmSet.EnemyClass = EliteClass;
+				WarmSet.Count = 1;
+				WarmSet.bIsElite = true;
+				WarmSet.bSkipEliteAutoScaling = true;
+				WarmSet.EnemyArchetypeTag = ResolveArchetypeTagFromClass(EliteClass);
+				WarmSets.Add(WarmSet);
+			}
+		};
+
+		if (!Profile->SpawnGroups.IsEmpty())
+		{
+			for (const FWeightedSpawnGroup& WeightedGroup : Profile->SpawnGroups)
+			{
+				AddGroupToWarmSets(WeightedGroup.Group);
+			}
+		}
+		else
+		{
+			for (const UEnemySpawnGroupDefinition* Group : SpawnGroups)
+			{
+				AddGroupToWarmSets(Group);
+			}
+		}
+
+		FixedPopulationSpawner->PrewarmPoolForEnemySets(WarmSets, 1);
+	}
 	UpdateTotalToKill(FixedPopulationTarget);
 
 	if (FixedPopulationTarget <= 0 || FixedSpawnQueue.IsEmpty())
@@ -527,6 +1525,9 @@ FAeyerjiObjectiveState AAeyerjiEncounterDirector::BuildObjectiveStateSnapshot(co
 	ObjectiveState.KilledCount = ObjectiveState.TotalToKill > 0
 		? FMath::Clamp(KilledCount, 0, ObjectiveState.TotalToKill)
 		: FMath::Max(0, KilledCount);
+	ObjectiveState.EnemiesDefeated = EnemiesDefeated;
+	ObjectiveState.ProgressPoints = WeightedProgressRunSerial > 0 ? WeightedProgressPoints : ObjectiveState.KilledCount;
+	ObjectiveState.ProgressPointTarget = WeightedProgressRunSerial > 0 ? WeightedProgressTarget : ObjectiveState.TotalToKill;
 
 	switch (WinCondition)
 	{
@@ -636,6 +1637,10 @@ void AAeyerjiEncounterDirector::SetBossSpawned(bool bInBossSpawned)
 
 AAeyerjiLevelDirector* AAeyerjiEncounterDirector::ResolveObjectiveLevelDirector() const
 {
+	if (AAeyerjiLevelDirector* LevelDirector = RiftLevelDirector.Get())
+	{
+		return LevelDirector;
+	}
 	if (AAeyerjiLevelDirector* LevelDirector = FixedPopulationLevelDirector.Get())
 	{
 		return LevelDirector;
@@ -669,10 +1674,18 @@ void AAeyerjiEncounterDirector::Tick(float DeltaSeconds)
 	CleanupInactiveEnemies();
 	UpdateKillWindow();
 	ProcessFixedSpawnQueue();
+	ProcessRiftRegionActivation();
+	ProcessRiftSpawnQueue();
 	UpdateEnemyLOD(DeltaSeconds);
 
 	if (bFixedPopulationActive)
 	{
+		return;
+	}
+	if (WeightedProgressRunSerial > 0)
+	{
+		// Greater Rift region activation and spawning are handled above. The normal
+		// kill-velocity injector must not create additional unregistered packs.
 		return;
 	}
 
@@ -1144,6 +2157,7 @@ bool AAeyerjiEncounterDirector::RemoveProgressEnemy(AActor* Enemy)
 		}
 		Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
 	}
+	RegisteredProgressEnemyPoints.Remove(TWeakObjectPtr<AActor>(Enemy));
 
 	return bRemoved;
 }
@@ -1192,6 +2206,12 @@ void AAeyerjiEncounterDirector::ResetProgress(int32 NewTotal)
 
 	TotalToKill = FMath::Max(0, NewTotal);
 	KilledCount = 0;
+	EnemiesDefeated = 0;
+	WeightedProgressPoints = 0;
+	WeightedProgressTarget = 0;
+	WeightedProgressRunSerial = 0;
+	bWeightedProgressFrozen = false;
+	RegisteredProgressEnemyPoints.Reset();
 	bBossSpawned = false;
 	HandleProgressChanged();
 }
@@ -1252,9 +2272,31 @@ void AAeyerjiEncounterDirector::HandleProgressEnemyDied(AActor* DeadEnemy)
 		return;
 	}
 
+	const int32 AwardedPoints = RegisteredProgressEnemyPoints.FindRef(TWeakObjectPtr<AActor>(DeadEnemy));
 	if (RemoveProgressEnemy(DeadEnemy))
 	{
-		IncrementKillCount();
+		if (WeightedProgressRunSerial > 0)
+		{
+			if (!bWeightedProgressFrozen && WeightedProgressPoints < WeightedProgressTarget)
+			{
+				EnemiesDefeated++;
+				WeightedProgressPoints = AeyerjiRiftRules::ApplyAcceptedProgressAward(
+					WeightedProgressPoints, WeightedProgressTarget, AwardedPoints);
+				KilledCount = WeightedProgressPoints;
+				TotalToKill = WeightedProgressTarget;
+				bWeightedProgressFrozen = WeightedProgressPoints >= WeightedProgressTarget;
+				if (bWeightedProgressFrozen)
+				{
+					StopRiftRegionActivation();
+				}
+				RecordKillTimestamp();
+				HandleProgressChanged();
+			}
+		}
+		else
+		{
+			IncrementKillCount();
+		}
 	}
 }
 
@@ -1267,7 +2309,9 @@ void AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed(AActor* DestroyedAc
 
 	if (RemoveProgressEnemy(DestroyedActor))
 	{
-		IncrementKillCount();
+		UE_LOG(LogEncounterDirector, Warning,
+			TEXT("[RiftRun][Progress] Registered enemy destroyed without death; no progress awarded RunSerial=%d Enemy=%s"),
+			WeightedProgressRunSerial, *GetNameSafe(DestroyedActor));
 	}
 }
 
@@ -2794,7 +3838,13 @@ void AAeyerjiEncounterDirector::RegisterSpawnedEnemy(AEnemyParentNative* Enemy)
 		return;
 	}
 
-	RemoveProgressEnemy(Enemy);
+	// Weighted Rift enemies participate in both live encounter/LOD management and
+	// the immutable point ledger. Legacy modes retain the old mutually-exclusive
+	// behavior to avoid changing their kill-count semantics.
+	if (WeightedProgressRunSerial <= 0)
+	{
+		RemoveProgressEnemy(Enemy);
+	}
 
 	LiveEnemies.Add(Enemy);
 	ActiveEnemyCount = LiveEnemies.Num();
@@ -2835,7 +3885,10 @@ void AAeyerjiEncounterDirector::HandleTrackedEnemyDied(AActor* DeadEnemy)
 	if (bWasTracked)
 	{
 		RecordKillTimestamp();
-		IncrementKillCount();
+		if (WeightedProgressRunSerial <= 0)
+		{
+			IncrementKillCount();
+		}
 	}
 	ActiveEnemyCount = LiveEnemies.Num();
 
@@ -2872,7 +3925,9 @@ void AAeyerjiEncounterDirector::HandleTrackedEnemyDestroyed(AActor* DestroyedAct
 	RemoveEnemyLODState(DestroyedActor);
 	if (bWasTracked)
 	{
-		IncrementKillCount();
+		UE_LOG(LogEncounterDirector, Warning,
+			TEXT("Encounter enemy destroyed without death; no objective progress awarded Enemy=%s"),
+			*GetNameSafe(DestroyedActor));
 	}
 	ActiveEnemyCount = LiveEnemies.Num();
 

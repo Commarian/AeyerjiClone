@@ -7,6 +7,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Logging/AeyerjiLog.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Attributes/AeyerjiRewardAttributeSet.h"
+#include "Director/AeyerjiSpawnerGroup.h"
 #include "Enemy/AeyerjiEnemyArchetypeData.h"
 #include "Enemy/AeyerjiEnemyArchetypeComponent.h"
 #include "Enemy/EnemyAIController.h"
@@ -20,7 +21,10 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Components/PrimitiveComponent.h"
 #include "Engine/OverlapResult.h"
 #include "Engine/World.h"
+#include "GameFramework/GameStateBase.h"
+#include "GameFramework/PlayerState.h"
 #include "GameplayEffect.h"
+#include "Inventory/AeyerjiGoldPickup.h"
 #include "Inventory/AeyerjiLootPickup.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavigationPath.h"
@@ -35,13 +39,28 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 namespace
 {
-	const FGameplayTag& DeadStateTag()
+	const FGameplayTag& EnemyParentDeadStateTag()
 	{
 		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), /*ErrorIfNotFound=*/false);
 		return Tag;
 	}
 
 	constexpr double AllyAlertRepeatCooldownSeconds = 0.5;
+
+	APlayerState* ResolveGoldRecipientPlayerState(AActor* RewardInstigator)
+	{
+		if (APawn* Pawn = Cast<APawn>(RewardInstigator))
+		{
+			return Pawn->GetPlayerState();
+		}
+
+		if (AController* Controller = Cast<AController>(RewardInstigator))
+		{
+			return Controller->PlayerState;
+		}
+
+		return nullptr;
+	}
 }
 
 AEnemyParentNative::AEnemyParentNative()
@@ -56,21 +75,6 @@ AEnemyParentNative::AEnemyParentNative()
 	if (OutlineHighlight)
 	{
 		OutlineHighlight->bAffectAllPrimitivesIfNoExplicitTargets = false;
-	}
-
-	ClickTargetCapsule = CreateDefaultSubobject<UCapsuleComponent>(TEXT("ClickTargetCapsule"));
-	if (ClickTargetCapsule)
-	{
-		ClickTargetCapsule->bEditableWhenInherited = true;
-		ClickTargetCapsule->SetupAttachment(GetCapsuleComponent());
-		ClickTargetCapsule->SetUsingAbsoluteScale(true);
-		ClickTargetCapsule->SetRelativeScale3D(FVector::OneVector);
-		ClickTargetCapsule->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-		ClickTargetCapsule->SetCollisionObjectType(ECC_WorldDynamic);
-		ClickTargetCapsule->SetCollisionResponseToAllChannels(ECR_Ignore);
-		ClickTargetCapsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Block);
-		ClickTargetCapsule->SetGenerateOverlapEvents(false);
-		ClickTargetCapsule->SetCanEverAffectNavigation(false);
 	}
 
 	if (UCapsuleComponent* RootCapsule = GetCapsuleComponent())
@@ -95,6 +99,7 @@ AEnemyParentNative::AEnemyParentNative()
 		MeshComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 		MeshComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 		MeshComp->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block); // interact traces
+		MeshComp->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Block); // enemy click traces
 		MeshComp->SetGenerateOverlapEvents(false);
 		MeshComp->SetCanEverAffectNavigation(false);
 	}
@@ -113,12 +118,6 @@ void AEnemyParentNative::SetGenericTeamId(const FGenericTeamId& NewID)
 void AEnemyParentNative::PostLoad()
 {
 	Super::PostLoad();
-
-	if (HighlightChannel == 20 && HighlightStencilValue_DEPRECATED != 0)
-	{
-		HighlightChannel = FMath::Clamp(HighlightStencilValue_DEPRECATED, 0, 255);
-		HighlightStencilValue_DEPRECATED = 0;
-	}
 }
 
 #if WITH_EDITOR
@@ -146,7 +145,6 @@ void AEnemyParentNative::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 void AEnemyParentNative::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
-	RefreshClickTargetCapsule();
 	if (ArchetypeComponent)
 	{
 		if (!ArchetypeComponent->HasArchetypeData() && ArchetypeData)
@@ -162,7 +160,6 @@ void AEnemyParentNative::OnConstruction(const FTransform& Transform)
 void AEnemyParentNative::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
-	RefreshClickTargetCapsule();
 
 	if (ArchetypeComponent)
 	{
@@ -180,6 +177,11 @@ void AEnemyParentNative::BeginPlay()
 	InitAbilityActorInfo();
 	GiveStartupAbilitiesAndEffects();
 	ApplyDefaultTeamTags();
+	if (HasAuthority() && AttributeSetAeyerji)
+	{
+		AttributeSetAeyerji->OnDamageTaken.RemoveDynamic(this, &AEnemyParentNative::HandleEnemyDamageTaken);
+		AttributeSetAeyerji->OnDamageTaken.AddDynamic(this, &AEnemyParentNative::HandleEnemyDamageTaken);
+	}
 	if (ArchetypeComponent)
 	{
 		if (!bApplyArchetypeOnBeginPlay)
@@ -241,10 +243,62 @@ void AEnemyParentNative::OnDeath_Implementation()
 	if (HasAuthority())
 	{
 		TrySpawnEnemyDeathRewards(nullptr);
+		TrySpawnEnemyGoldDrop(nullptr);
 	}
 
 	// Broadcast immediately so encounter logic can react before delayed cleanup runs.
 	OnEnemyDied.Broadcast(this);
+}
+
+FAeyerjiDeathStateOptions AEnemyParentNative::BuildDeathStateOptionsForOutOfHealth() const
+{
+	FAeyerjiDeathStateOptions Options = Super::BuildDeathStateOptionsForOutOfHealth();
+	if (bPoolManagedBySpawner)
+	{
+		// Pooled enemies keep their components intact so activation can restore them later.
+		Options.bDetachAttachments = false;
+		Options.bRemoveFloatingWidgets = false;
+		Options.bRegisterCorpseForCleanup = false;
+	}
+	return Options;
+}
+
+void AEnemyParentNative::SetOwningSpawnerPool(AAeyerjiSpawnerGroup* InSpawner, bool bInPoolManaged)
+{
+	OwningSpawnerPool = InSpawner;
+	bPoolManagedBySpawner = bInPoolManaged;
+}
+
+bool AEnemyParentNative::TryReturnToOwningSpawnerPool()
+{
+	if (!HasAuthority() || !bPoolManagedBySpawner)
+	{
+		return false;
+	}
+
+	AAeyerjiSpawnerGroup* Spawner = OwningSpawnerPool.Get();
+	return Spawner ? Spawner->ReturnEnemyToPool(this) : false;
+}
+
+void AEnemyParentNative::PrepareForPooledActivation()
+{
+	bDeathRewardsRolled = false;
+	bDeathGoldRolled = false;
+	LastAlertedTarget.Reset();
+	LastAlertBroadcastTime = -1.0;
+	HoverHighlightRefCount = 0;
+	ResetDeathStateForReuse();
+	SetEnemyHighlighted(bHighlightOnSpawn);
+	BP_OnPooledEnemyActivated();
+}
+
+void AEnemyParentNative::PrepareForPooledDeactivation()
+{
+	LastAlertedTarget.Reset();
+	LastAlertBroadcastTime = -1.0;
+	HoverHighlightRefCount = 0;
+	SetEnemyHighlighted(false);
+	BP_OnPooledEnemyDeactivated();
 }
 
 bool AEnemyParentNative::TrySpawnEnemyDeathRewards(AActor* RewardInstigator)
@@ -276,15 +330,13 @@ bool AEnemyParentNative::TrySpawnEnemyDeathRewards(AActor* RewardInstigator)
 		RuntimeContext.PlayerActor = RewardInstigator;
 	}
 	RuntimeContext.EnemyLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(CachedScaledLevel > 0 ? CachedScaledLevel : RuntimeContext.EnemyLevel);
-	if (RuntimeContext.PlayerLevel <= 0)
-	{
-		RuntimeContext.PlayerLevel = RuntimeContext.EnemyLevel;
-	}
-	else
+	if (RuntimeContext.PlayerLevel > 0)
 	{
 		RuntimeContext.PlayerLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(RuntimeContext.PlayerLevel);
 	}
 	RuntimeContext.DifficultyScale = CachedDifficultyScale > 0.f ? CachedDifficultyScale : RuntimeContext.DifficultyScale;
+	RuntimeContext.RewardQualityMultiplier = FMath::Max(
+		RuntimeContext.RewardQualityMultiplier * CachedRewardQualityMultiplier, 0.f);
 	if (!RuntimeContext.SourceTag.IsValid())
 	{
 		RuntimeContext.SourceTag = CachedScalingSourceTag.IsValid()
@@ -319,6 +371,18 @@ bool AEnemyParentNative::TrySpawnEnemyDeathRewards(AActor* RewardInstigator)
 	}
 
 	const FLootDropResult Result = LootService->RollLoot(RuntimeContext);
+	if (!Result.ItemDefinition && Result.ItemDefinitionKey.IsNone())
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[LootReward] EnemyDeathReward none Enemy=%s SourceTag=%s EnemyLevel=%d PlayerLevel=%d Instigator=%s"),
+			*GetNameSafe(this),
+			*RuntimeContext.SourceTag.ToString(),
+			RuntimeContext.EnemyLevel,
+			RuntimeContext.PlayerLevel,
+			*GetNameSafe(RewardInstigator));
+		return false;
+	}
+
 	AAeyerjiLootPickup* SpawnedPickup = UAeyerjiInventoryBPFL::SpawnLootFromResult(
 		this,
 		Result,
@@ -339,6 +403,101 @@ bool AEnemyParentNative::TrySpawnEnemyDeathRewards(AActor* RewardInstigator)
 		*GetNameSafe(SpawnedPickup));
 
 	return SpawnedPickup != nullptr;
+}
+
+bool AEnemyParentNative::TrySpawnEnemyGoldDrop(AActor* RewardInstigator)
+{
+	if (!HasAuthority() || !DeathGoldDropConfig.bEnabled || bDeathGoldRolled)
+	{
+		return false;
+	}
+
+	bDeathGoldRolled = true;
+
+	if (DeathGoldDropConfig.DropChance <= 0.f || FMath::FRand() > FMath::Clamp(DeathGoldDropConfig.DropChance, 0.f, 1.f))
+	{
+		return false;
+	}
+
+	if (!RewardInstigator)
+	{
+		RewardInstigator = UGameplayStatics::GetPlayerPawn(this, 0);
+	}
+
+	const int32 EnemyLevel = FMath::Max(0, CachedScaledLevel);
+	float AmountFloat = static_cast<float>(FMath::Max<int64>(0, DeathGoldDropConfig.BaseAmount));
+	if (DeathGoldDropConfig.Variance > 0)
+	{
+		const int32 Variance = static_cast<int32>(FMath::Min<int64>(DeathGoldDropConfig.Variance, MAX_int32));
+		AmountFloat += static_cast<float>(FMath::RandRange(-Variance, Variance));
+	}
+	AmountFloat += static_cast<float>(EnemyLevel) * FMath::Max(0.f, DeathGoldDropConfig.PerLevelScalar);
+
+	float SourceMultiplier = 1.f;
+	if (CachedScalingSourceTag.MatchesTagExact(AeyerjiTags::Loot_Source_Boss))
+	{
+		SourceMultiplier = FMath::Max(0.f, DeathGoldDropConfig.BossMultiplier);
+	}
+	else if (CachedScalingSourceTag.MatchesTagExact(AeyerjiTags::Loot_Source_MiniBoss))
+	{
+		SourceMultiplier = FMath::Max(0.f, DeathGoldDropConfig.MiniBossMultiplier);
+	}
+	else if (CachedScalingSourceTag.MatchesTagExact(AeyerjiTags::Loot_Source_Elite))
+	{
+		SourceMultiplier = FMath::Max(0.f, DeathGoldDropConfig.EliteMultiplier);
+	}
+
+	const int64 GoldToDrop = FMath::Max<int64>(1, FMath::RoundToInt64(AmountFloat * SourceMultiplier));
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	const FTransform SpawnTransform(GetActorRotation(), GetActorLocation());
+	int32 SpawnedCount = 0;
+
+	if (DeathGoldDropConfig.DropOwnershipMode == EItemDropDistributionMode::DropOnlyForInstigator)
+	{
+		APlayerState* EligiblePS = ResolveGoldRecipientPlayerState(RewardInstigator);
+		if (!EligiblePS)
+		{
+			if (APawn* FallbackPawn = UGameplayStatics::GetPlayerPawn(this, 0))
+			{
+				EligiblePS = FallbackPawn->GetPlayerState();
+			}
+		}
+
+		if (!EligiblePS)
+		{
+			return false;
+		}
+
+		SpawnedCount += AAeyerjiGoldPickup::SpawnGold(*World, GoldToDrop, SpawnTransform, DeathGoldDropConfig.PickupClass, EligiblePS) ? 1 : 0;
+	}
+	else if (AGameStateBase* GameState = World->GetGameState())
+	{
+		for (APlayerState* RecipientPlayerState : GameState->PlayerArray)
+		{
+			if (!RecipientPlayerState || !RecipientPlayerState->GetPawn())
+			{
+				continue;
+			}
+
+			SpawnedCount += AAeyerjiGoldPickup::SpawnGold(*World, GoldToDrop, SpawnTransform, DeathGoldDropConfig.PickupClass, RecipientPlayerState) ? 1 : 0;
+		}
+	}
+
+	AJ_LOG(this,
+		TEXT("[Currency] EnemyGoldDrop Enemy=%s Gold=%lld Spawned=%d Mode=%d Instigator=%s SourceTag=%s"),
+		*GetNameSafe(this),
+		GoldToDrop,
+		SpawnedCount,
+		static_cast<int32>(DeathGoldDropConfig.DropOwnershipMode),
+		*GetNameSafe(RewardInstigator),
+		*CachedScalingSourceTag.ToString());
+
+	return SpawnedCount > 0;
 }
 
 void AEnemyParentNative::ApplyCrowdPerformanceSettings()
@@ -547,7 +706,7 @@ void AEnemyParentNative::NotifyNearbyAlliesOfTarget(AActor* Target)
 		return;
 	}
 
-	const FGameplayTag DeadTag = DeadStateTag();
+	const FGameplayTag DeadTag = EnemyParentDeadStateTag();
 	if (!DeadTag.IsValid() || !IsAlive(DeadTag) || !IsAliveAndHostile(Target, DeadTag))
 	{
 		return;
@@ -637,7 +796,7 @@ void AEnemyParentNative::ReceiveAllyAlert(AActor* Target, const AEnemyParentNati
 		return;
 	}
 
-	const FGameplayTag DeadTag = DeadStateTag();
+	const FGameplayTag DeadTag = EnemyParentDeadStateTag();
 	if (!DeadTag.IsValid() || !IsAlive(DeadTag))
 	{
 		return;
@@ -651,6 +810,37 @@ void AEnemyParentNative::ReceiveAllyAlert(AActor* Target, const AEnemyParentNati
 	if (AEnemyAIController* EnemyController = Cast<AEnemyAIController>(GetController()))
 	{
 		EnemyController->TryAcquireTarget(Target, /*bBroadcastAllyAlert=*/false);
+	}
+}
+
+void AEnemyParentNative::HandleEnemyDamageTaken(AActor* VictimActor, AActor* InstigatorActor, const float DamageTaken, FGameplayTag DamageType)
+{
+	static_cast<void>(DamageType);
+
+	if (!HasAuthority()
+		|| VictimActor != this
+		|| DamageTaken <= 0.f
+		|| !IsValid(InstigatorActor)
+		|| InstigatorActor == this
+		|| IsActorBeingDestroyed())
+	{
+		return;
+	}
+
+	AActor* ThreatActor = InstigatorActor;
+	if (AController* InstigatorController = Cast<AController>(ThreatActor))
+	{
+		ThreatActor = InstigatorController->GetPawn();
+	}
+
+	if (!IsValid(ThreatActor) || ThreatActor == this)
+	{
+		return;
+	}
+
+	if (AEnemyAIController* EnemyController = Cast<AEnemyAIController>(GetController()))
+	{
+		EnemyController->NotifyDamagedBy(ThreatActor);
 	}
 }
 
@@ -995,39 +1185,6 @@ void AEnemyParentNative::HandleMeshEndCursorOver(UPrimitiveComponent* TouchedCom
 	UpdateEnemyHighlightState();
 }
 
-void AEnemyParentNative::RefreshClickTargetCapsule()
-{
-	if (!ClickTargetCapsule)
-	{
-		return;
-	}
-
-	UCapsuleComponent* RootCapsule = GetCapsuleComponent();
-	if (!RootCapsule)
-	{
-		return;
-	}
-
-	RootCapsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Ignore);
-	ClickTargetCapsule->SetUsingAbsoluteScale(true);
-	ClickTargetCapsule->SetRelativeScale3D(FVector::OneVector);
-	ClickTargetCapsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Block);
-
-	if (bAutoSizeClickTargetCapsule)
-	{
-		const float RadiusScale = FMath::Max(1.f, ClickTargetRadiusScale);
-		const float HeightScale = FMath::Max(1.f, ClickTargetHalfHeightScale);
-
-		ClickTargetCapsule->SetRelativeLocation(FVector::ZeroVector);
-		ClickTargetCapsule->SetCapsuleSize(
-			RootCapsule->GetScaledCapsuleRadius() * RadiusScale,
-			RootCapsule->GetScaledCapsuleHalfHeight() * HeightScale);
-		return;
-	}
-
-	// Manual mode leaves the inherited component's authored transform and capsule size untouched.
-}
-
 void AEnemyParentNative::ConfigureEnemyOutlineComponent()
 {
 	if (!OutlineHighlight)
@@ -1036,9 +1193,14 @@ void AEnemyParentNative::ConfigureEnemyOutlineComponent()
 	}
 }
 
-void AEnemyParentNative::SetScalingSnapshot(int32 InLevel, float InDifficultyScale, const FGameplayTag& InSourceTag)
+void AEnemyParentNative::SetScalingSnapshot(
+	const int32 InLevel,
+	const float InDifficultyScale,
+	const FGameplayTag& InSourceTag,
+	const float InRewardQualityMultiplier)
 {
 	CachedScaledLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(InLevel);
 	CachedDifficultyScale = FMath::Clamp(InDifficultyScale, 0.f, 1.f);
+	CachedRewardQualityMultiplier = FMath::Max(InRewardQualityMultiplier, 0.f);
 	CachedScalingSourceTag = InSourceTag;
 }

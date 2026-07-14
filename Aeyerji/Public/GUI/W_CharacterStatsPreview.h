@@ -30,6 +30,10 @@ struct FCharacterStatPreviewRow
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview")
     FGameplayAttribute Attribute;
 
+    /** Optional second attribute that refreshes this row when it changes. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview")
+    FGameplayAttribute SecondaryAttribute;
+
     /** Number of fractional digits to show (0 = ints). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview", meta=(ClampMin="0", UIMin="0"))
     int32 FractionalDigits = 0;
@@ -45,6 +49,10 @@ struct FCharacterStatPreviewRow
     /** Optional text format (supports {Value} and {Label} placeholders). Leave empty to show just the number. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview")
     FText ValueFormatText;
+
+    /** Shows AttackDamage as a derived min-max range using AttackDamageVariance. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview")
+    bool bFormatAsDamageRange = false;
 };
 
 UCLASS()
@@ -107,6 +115,7 @@ private:
     void HandleAttributeChanged(const FOnAttributeChangeData& Data);
     void RefreshRowValue(int32 Index);
     FText FormatValue(float RawValue, const FCharacterStatPreviewRow& RowDef) const;
+    FText FormatDamageRange(float AverageDamage, const FCharacterStatPreviewRow& RowDef) const;
     void ApplyVisibilityForRow(int32 Index, float Value);
 
     struct FRowRuntime
@@ -115,6 +124,7 @@ private:
         TWeakObjectPtr<UTextBlock> ValueText;
         TWeakObjectPtr<UWidget> RowWidget;
         FDelegateHandle ChangeHandle;
+        FDelegateHandle SecondaryChangeHandle;
     };
 
     TWeakObjectPtr<UAbilitySystemComponent> BoundASC;

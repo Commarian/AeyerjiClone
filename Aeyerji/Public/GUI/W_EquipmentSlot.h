@@ -35,6 +35,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Equipment", meta = (ClampMin = "0", UIMin = "0"))
 	int32 SlotIndex = 0;
 
+	/** Lets duplicated designer widgets derive their slot index from names like ItemIconAssault4. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Equipment")
+	bool bInferSlotIndexFromWidgetName = true;
+
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Equipment")
 	void BindInventory(UAeyerjiInventoryComponent *InInventory);
 
@@ -75,6 +79,7 @@ public:
 
 	EEquipmentSlot GetEffectiveSlotType() const;
 	int32 GetEffectiveSlotIndex() const;
+	void SetRuntimeSlotIndexOverride(int32 InSlotIndex);
 
 protected:
 	virtual void NativeOnInitialized() override;
@@ -177,6 +182,7 @@ protected:
 private:
 	TWeakObjectPtr<UAeyerjiInventoryComponent> Inventory;
 	TWeakObjectPtr<UAeyerjiItemInstance> CurrentItem;
+	int32 RuntimeSlotIndexOverride = INDEX_NONE;
 
 	/** Snapshot of the bound item's change delegate so we can refresh visuals when stats/icons change. */
 	FDelegateHandle ItemChangedHandle;
@@ -192,6 +198,7 @@ private:
 	UMaterialInterface* GetBorderSlotMaterial() const;
 	UImage* GetInsideImageWidget() const;
 	void UpdateBorderVisual(const UAeyerjiItemInstance* Item);
+	bool TryInferSlotIndexFromWidgetName(int32& OutSlotIndex) const;
 
 	void ClearItemDelegate();
 

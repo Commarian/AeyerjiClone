@@ -247,6 +247,9 @@ namespace
 		case EAeyerjiStat::AttackDamage:
 			return UAeyerjiAttributeSet::GetAttackDamageAttribute();
 
+		case EAeyerjiStat::AttackDamageVariance:
+			return UAeyerjiAttributeSet::GetAttackDamageVarianceAttribute();
+
 		case EAeyerjiStat::AttackRange:
 			return UAeyerjiAttributeSet::GetAttackRangeAttribute();
 
@@ -308,6 +311,30 @@ namespace
 
 		case EAeyerjiStat::CritChance:
 			return UAeyerjiAttributeSet::GetCritChanceAttribute();
+
+		case EAeyerjiStat::CriticalDamageMultiplier:
+			return UAeyerjiAttributeSet::GetCriticalDamageMultiplierAttribute();
+
+		case EAeyerjiStat::PhysicalDamageBonus:
+			return UAeyerjiAttributeSet::GetPhysicalDamageBonusAttribute();
+
+		case EAeyerjiStat::ArmorPenetration:
+			return UAeyerjiAttributeSet::GetArmorPenetrationAttribute();
+
+		case EAeyerjiStat::LifeSteal:
+			return UAeyerjiAttributeSet::GetLifeStealAttribute();
+
+		case EAeyerjiStat::StaggerPower:
+			return UAeyerjiAttributeSet::GetStaggerPowerAttribute();
+
+		case EAeyerjiStat::StaggerResistance:
+			return UAeyerjiAttributeSet::GetStaggerResistanceAttribute();
+
+		case EAeyerjiStat::Poise:
+			return UAeyerjiAttributeSet::GetPoiseAttribute();
+
+		case EAeyerjiStat::PoiseMax:
+			return UAeyerjiAttributeSet::GetPoiseMaxAttribute();
 
 		case EAeyerjiStat::DodgeChance:
 			return UAeyerjiAttributeSet::GetDodgeChanceAttribute();
@@ -579,8 +606,24 @@ static void AppendRecentRunRecord(UAeyerjiSaveGame* Data, const FAeyerjiRunResul
 	NewRecord.DifficultySlider = Results.DifficultySlider;
 	NewRecord.SpeedBonusPercent = Results.SpeedBonusPercent;
 	NewRecord.CompletedZoneId = Results.CompletedZoneId;
+	NewRecord.SelectedRiftTier = Results.SelectedRiftTier;
+	NewRecord.ProgressPoints = Results.ProgressPoints;
+	NewRecord.ProgressPointTarget = Results.ProgressPointTarget;
+	NewRecord.bCompletedInTime = Results.bCompletedInTime;
+	NewRecord.bBossPhaseDeathOccurred = Results.bBossPhaseDeathOccurred;
 
-	Data->RecentRuns.Insert(NewRecord, 0);
+	// ResultsVersion is local to a GameState instance, so use the stable run serial carried by
+	// the results payload to prevent repeated checkpoint calls from appending the same run.
+	const bool bAlreadyRecorded = Results.RunSerial > 0 && Data->RecentRuns.ContainsByPredicate(
+		[&Results](const FAeyerjiCompletedRunRecord& Existing)
+		{
+			return Existing.RunSerial == Results.RunSerial;
+		});
+	if (!bAlreadyRecorded)
+	{
+		NewRecord.RunSerial = Results.RunSerial;
+		Data->RecentRuns.Insert(NewRecord, 0);
+	}
 
 	constexpr int32 MaxRecentRuns = 20;
 	while (Data->RecentRuns.Num() > MaxRecentRuns)
@@ -724,17 +767,39 @@ static bool GatherAeyerjiCharSaveData(
 
 	const TArray<FAeyerjiAbilitySlot> ExistingActionBar = Data->ActionBar;
 	const FName ExistingPassiveId = Data->SelectedPassiveId;
+	const TArray<FAeyerjiAbilityProgressEntry> ExistingAbilityProgressEntries = Data->AbilityProgressEntries;
+	const int32 ExistingUnspentAbilityPoints = Data->UnspentAbilityPoints;
+	const int32 ExistingTotalAbilityPointSpends = Data->TotalAbilityPointSpends;
 	Data->ActionBar = PS->ActionBar;
 	NormalizeActionBarForPersistence(Data->ActionBar);
 	Data->SelectedPassiveId = PS->GetSelectedPassiveId();
+	Data->AbilityProgressEntries = PS->GetAbilityProgressEntries();
+	Data->UnspentAbilityPoints = PS->GetUnspentAbilityPoints();
+	Data->TotalAbilityPointSpends = PS->GetTotalAbilityPointSpends();
+	Data->Gold = PS->GetGold();
+	Data->HighestUnlockedRiftTier = PS->GetHighestUnlockedRiftTier();
+	Data->LastSelectedRiftTier = PS->GetLastSelectedRiftTier();
 	const bool bPreservedExistingActionBar = PreserveExistingActionBarIfCaptureIsEmpty(Data, ExistingActionBar, ExistingPassiveId, Slot);
+	if (Data->AbilityProgressEntries.Num() == 0
+		&& Data->UnspentAbilityPoints == 0
+		&& Data->TotalAbilityPointSpends == 0
+		&& (ExistingAbilityProgressEntries.Num() > 0 || ExistingUnspentAbilityPoints > 0 || ExistingTotalAbilityPointSpends > 0))
+	{
+		Data->AbilityProgressEntries = ExistingAbilityProgressEntries;
+		Data->UnspentAbilityPoints = ExistingUnspentAbilityPoints;
+		Data->TotalAbilityPointSpends = ExistingTotalAbilityPointSpends;
+	}
 
 	UE_LOG(LogTemp, Display,
-		TEXT("[AbilitySave] Slot=%s CapturedSlots=%d ResolvedClasses=%d Passive=%s PreservedExisting=%d"),
+		TEXT("[AbilitySave] Slot=%s CapturedSlots=%d ResolvedClasses=%d Passive=%s ProgressEntries=%d Unspent=%d Spends=%d Gold=%lld PreservedExisting=%d"),
 		*Slot,
 		CountPersistedActionBarSlots(Data->ActionBar),
 		CountResolvedAbilityClasses(Data->ActionBar),
 		*Data->SelectedPassiveId.ToString(),
+		Data->AbilityProgressEntries.Num(),
+		Data->UnspentAbilityPoints,
+		Data->TotalAbilityPointSpends,
+		Data->Gold,
 		bPreservedExistingActionBar ? 1 : 0);
 	LogActionBarPersistenceSnapshot(TEXT("Captured"), Slot, Data->ActionBar);
 
@@ -862,6 +927,14 @@ UAeyerjiSaveGame *UCharacterStatsLibrary::LoadOrCreateAeyerjiSave(const FString 
 			{
 
 				bOutLoadedFromDisk = true;
+				const int32 RemovedInvalidAttributes = UAeyerjiInventoryComponent::SanitizeSaveDataAttributes(Data->Inventory);
+				if (RemovedInvalidAttributes > 0)
+				{
+					UE_LOG(LogTemp, Warning,
+						TEXT("LoadOrCreateAeyerjiSave: Slot=%s pruned %d invalid item stat attribute references."),
+						*Slot,
+						RemovedInvalidAttributes);
+				}
 			}
 
 			else
@@ -898,6 +971,7 @@ UAeyerjiSaveGame *UCharacterStatsLibrary::LoadOrCreateAeyerjiSave(const FString 
 		Data->ActionBar.Reset();
 		Data->Attributes = FAttrSnapshot();
 		Data->Inventory = FAeyerjiInventorySaveData();
+		Data->Gold = 0;
 
 		const FString AbsoluteFilename = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("SaveGames"), Slot + TEXT(".sav"));
 
@@ -1144,12 +1218,19 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 
 	if (ASC->GetOwnerRole() == ROLE_Authority)
 	{
+		PS->ApplyLoadedGold(Data->Gold);
+		PS->ApplyLoadedRiftProgression(Data->HighestUnlockedRiftTier, Data->LastSelectedRiftTier);
+		PS->ApplyLoadedAbilityProgression(Data->AbilityProgressEntries, Data->UnspentAbilityPoints, Data->TotalAbilityPointSpends);
 		PS->ApplyLoadedActionBar(Data->ActionBar);
 		UE_LOG(LogTemp, Display,
-			TEXT("[ProfileLoad] HydrationPhase=4_ActionBarPassive Slot=%s ActionBar=%d Passive=%s"),
+			TEXT("[ProfileLoad] HydrationPhase=4_ActionBarPassive Slot=%s ActionBar=%d Passive=%s ProgressEntries=%d Unspent=%d Spends=%d Gold=%lld"),
 			*SlotName,
 			Data->ActionBar.Num(),
-			*Data->SelectedPassiveId.ToString());
+			*Data->SelectedPassiveId.ToString(),
+			Data->AbilityProgressEntries.Num(),
+			Data->UnspentAbilityPoints,
+			Data->TotalAbilityPointSpends,
+			Data->Gold);
 
 		if (!Data->SelectedPassiveId.IsNone())
 		{
@@ -1223,6 +1304,15 @@ void UCharacterStatsLibrary::SaveAeyerjiChar(
 		return;
 	}
 
+	const int32 RemovedInvalidAttributes = UAeyerjiInventoryComponent::SanitizeSaveDataAttributes(Data->Inventory);
+	if (RemovedInvalidAttributes > 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("SaveAeyerjiChar: Slot=%s pruned %d invalid item stat attribute references before fallback save."),
+			*Slot,
+			RemovedInvalidAttributes);
+	}
+
 	if (!UGameplayStatics::SaveGameToSlot(Data, Slot, 0))
 	{
 		UE_LOG(LogTemp, Error, TEXT("Save failed for slot %s"), *Slot);
@@ -1259,6 +1349,15 @@ void UCharacterStatsLibrary::SaveAeyerjiCharFromPawn(
 			Data->Attributes.XP,
 			Data->Attributes.Level);
 		return;
+	}
+
+	const int32 RemovedInvalidAttributes = UAeyerjiInventoryComponent::SanitizeSaveDataAttributes(Data->Inventory);
+	if (RemovedInvalidAttributes > 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("SaveAeyerjiCharFromPawn: Slot=%s pruned %d invalid item stat attribute references before fallback save."),
+			*Slot,
+			RemovedInvalidAttributes);
 	}
 
 	if (!UGameplayStatics::SaveGameToSlot(Data, Slot, 0))
@@ -1655,7 +1754,7 @@ UItemDefinition* UCharacterStatsLibrary::ResolveItemDefinitionByKey(UObject* Wor
 {
 	(void)WorldContextObject;
 
-	if (ItemDefinitionKey.IsNone())
+	if (!ItemDefinitionKey.IsValid() || ItemDefinitionKey.IsNone())
 	{
 		return nullptr;
 	}
@@ -1911,7 +2010,7 @@ bool UCharacterStatsLibrary::IsWithinAttackRange(const AActor *SelfActor,
 
 	if (!SelfActor || !TargetActor)
 		return false;
-	StopAtPercentOfRange *= 0.01;
+	StopAtPercentOfRange *= 0.01f;
 
 	volatile float Range = GetAttackRangeFromActorASC(SelfActor, FallbackRange) * FMath::Max(StopAtPercentOfRange, 0.f);
 

@@ -23,7 +23,7 @@ UAeyerjiCharacterMovementComponent::UAeyerjiCharacterMovementComponent()
 	MaxNetUpdateFrequency = 100.0f;
 	ClientPredictionFudgeFactor = 0.0f;
 	NetworkSmoothingMode = ENetworkSmoothingMode::Linear;
-	NetworkMaxSmoothUpdateDistance = 120.f;  // how far we’ll smooth server corrections
+	NetworkMaxSmoothUpdateDistance = 120.f;  // how far weï¿½ll smooth server corrections
     NetworkNoSmoothUpdateDistance  = 250.f;  // snap if farther than this
 }
 

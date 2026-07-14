@@ -1,0 +1,1640 @@
+{
+  "DestinationPath": "/Game/Inventory/Items/JsonImported",
+  "Items": [
+    {
+      "AssetName": "DI_SerratedArcblade_Json",
+      "DisplayName": "Serrated Arcblade",
+      "Description": "A broad-edged weapon tuned for sweeping critical strikes, but its exposed frame offers little protection.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 4,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackAngle",
+          "Op": "Additive",
+          "Magnitude": 35.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CritChance",
+          "Op": "Additive",
+          "Magnitude": 5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": -2.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_VenomInjector_Json",
+      "DisplayName": "Venom Injector",
+      "Description": "Rapid micro-injections lace every strike with a stronger, longer-lasting poison at the cost of vitality.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 6,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 6.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.PoisonAmount",
+          "Op": "Additive",
+          "Magnitude": 4.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.PoisonDuration",
+          "Op": "Additive",
+          "Magnitude": 2.5
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -25.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_TraumaRam_Json",
+      "DisplayName": "Trauma Ram",
+      "Description": "A brutal impact head that amplifies trauma and raw damage, but the weight slows the wielder.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 8,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 22.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.TraumaAmount",
+          "Op": "Additive",
+          "Magnitude": 5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.TraumaDuration",
+          "Op": "Additive",
+          "Magnitude": 1.5
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": -35.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_LongshotCoil_Json",
+      "DisplayName": "Longshot Coil",
+      "Description": "A stabilized accelerator for deliberate long-range attacks with faster, more predictive projectiles.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 10,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackRange",
+          "Op": "Additive",
+          "Magnitude": 140.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ProjectileSpeedRanged",
+          "Op": "Additive",
+          "Magnitude": 400.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ProjectilePredictionAmount",
+          "Op": "Additive",
+          "Magnitude": 0.15
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": -12.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_DuelistServo_Json",
+      "DisplayName": "Duelist Servo",
+      "Description": "A lightweight combat servo that rewards precision and speed while sacrificing maximum health.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 12,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": 18.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Agility",
+          "Op": "Additive",
+          "Magnitude": 8.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CritChance",
+          "Op": "Additive",
+          "Magnitude": 6.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -45.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_RuinRepeater_Json",
+      "DisplayName": "Ruin Repeater",
+      "Description": "An unstable rapid-fire mechanism that inflicts corruption with repeated hits while weakening the user's defenses.",
+      "ItemCategory": "Assault",
+      "DefaultSlot": "Assault",
+      "RequiredLevel": 15,
+      "ItemTags": [
+        "Item.Assault"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 8.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": 25.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CorruptionAmount",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CorruptionDuration",
+          "Op": "Additive",
+          "Magnitude": 2.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": -3.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_BastionPlating_Json",
+      "DisplayName": "Bastion Plating",
+      "Description": "Dense layered plating grants substantial armor and health, but greatly reduces movement speed.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 4,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": 7.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": 70.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": -35.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_PhaseweaveCloak_Json",
+      "DisplayName": "Phaseweave Cloak",
+      "Description": "A reactive weave favors evasion and mobility over conventional armor.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 6,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.DodgeChance",
+          "Op": "Additive",
+          "Magnitude": 8.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": 35.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Agility",
+          "Op": "Additive",
+          "Magnitude": 8.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": -4.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_RegeneratorCasing_Json",
+      "DisplayName": "Regenerator Casing",
+      "Description": "A living defensive shell steadily repairs the bearer, though its pulses interfere with attack cadence.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 8,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": 80.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": -10.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_AnchorFrame_Json",
+      "DisplayName": "Anchor Frame",
+      "Description": "A massive support frame reinforces the body and stabilizes broad attacks, but is extremely cumbersome.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 10,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.Strength",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": 8.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackAngle",
+          "Op": "Additive",
+          "Magnitude": 30.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": -50.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_KineticBuffer_Json",
+      "DisplayName": "Kinetic Buffer",
+      "Description": "A compact impact buffer combines armor, evasion, and health by consuming part of the user's mana capacity.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 12,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": 5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.DodgeChance",
+          "Op": "Additive",
+          "Magnitude": 5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": 40.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaMax",
+          "Op": "Additive",
+          "Magnitude": -60.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_SurvivorsRelay_Json",
+      "DisplayName": "Survivor's Relay",
+      "Description": "Emergency systems prioritize survival and repositioning, routing power away from weapon output.",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 15,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": 100.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": 2.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": 20.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": -10.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_AstralBattery_Json",
+      "DisplayName": "Astral Battery",
+      "Description": "A high-capacity occult cell greatly expands mana reserves and regeneration at the expense of physical vitality.",
+      "ItemCategory": "Flow",
+      "DefaultSlot": "Flow",
+      "RequiredLevel": 4,
+      "ItemTags": [
+        "Item.Flow"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaMax",
+          "Op": "Additive",
+          "Magnitude": 90.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaRegen",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -40.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_ChronoCoil_Json",
+      "DisplayName": "Chrono Coil",
+      "Description": "A temporal regulator accelerates ability recovery and mana flow while reducing basic attack power.",
+      "ItemCategory": "Flow",
+      "DefaultSlot": "Flow",
+      "RequiredLevel": 6,
+      "ItemTags": [
+        "Item.Flow"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.CooldownReduction",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaRegen",
+          "Op": "Additive",
+          "Magnitude": 2.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": -8.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_SpellglassPrism_Json",
+      "DisplayName": "Spellglass Prism",
+      "Description": "A refractive focus multiplies magical output, but its fragile lattice replaces protective plating.",
+      "ItemCategory": "Flow",
+      "DefaultSlot": "Flow",
+      "RequiredLevel": 8,
+      "ItemTags": [
+        "Item.Flow"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.SpellPower",
+          "Op": "Additive",
+          "Magnitude": 25.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.MagicAmp",
+          "Op": "Additive",
+          "Magnitude": 8.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": -3.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_OracleScope_Json",
+      "DisplayName": "Oracle Scope",
+      "Description": "An advanced targeting optic improves range, sight, projectile velocity, and target prediction, but slows movement.",
+      "ItemCategory": "Flow",
+      "DefaultSlot": "Flow",
+      "RequiredLevel": 10,
+      "ItemTags": [
+        "Item.Flow"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackRange",
+          "Op": "Additive",
+          "Magnitude": 100.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.VisionRange",
+          "Op": "Additive",
+          "Magnitude": 300.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ProjectilePredictionAmount",
+          "Op": "Additive",
+          "Magnitude": 0.2
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ProjectileSpeedRanged",
+          "Op": "Additive",
+          "Magnitude": 250.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": -25.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_AlchemistsCondenser_Json",
+      "DisplayName": "Alchemist's Condenser",
+      "Description": "A volatile reservoir strengthens every ailment and extends its duration, but disrupts rapid attacks.",
+      "ItemCategory": "Flow",
+      "DefaultSlot": "Flow",
+      "RequiredLevel": 12,
+      "ItemTags": [
+        "Item.Flow"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.Intellect",
+          "Op": "Additive",
+          "Magnitude": 12.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.PoisonAmount",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.PoisonDuration",
+          "Op": "Additive",
+          "Magnitude": 1.5
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.TraumaAmount",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.TraumaDuration",
+          "Op": "Additive",
+          "Magnitude": 1.5
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CorruptionAmount",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CorruptionDuration",
+          "Op": "Additive",
+          "Magnitude": 1.5
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": -10.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_FluxTreads_Json",
+      "DisplayName": "Flux Treads",
+      "Description": "Phase-charged treads improve movement, evasion, and ability recovery while reducing total mana storage.",
+      "ItemCategory": "Flow",
+      "DefaultSlot": "Flow",
+      "RequiredLevel": 15,
+      "ItemTags": [
+        "Item.Flow"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": 60.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.DodgeChance",
+          "Op": "Additive",
+          "Magnitude": 5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CooldownReduction",
+          "Op": "Additive",
+          "Magnitude": 6.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaMax",
+          "Op": "Additive",
+          "Magnitude": -50.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_BlackSunCore_Json",
+      "DisplayName": "Black Sun Core",
+      "Description": "A miniature dead star empowers every form of offense while consuming the bearer from within.",
+      "ItemCategory": "Corruption",
+      "DefaultSlot": "Corruption",
+      "RequiredLevel": 20,
+      "ItemTags": [
+        "Item.Corruption"
+      ],
+      "CorruptionPowerText": "Greatly increases attack damage, spell power, and critical chance.",
+      "CorruptionDrawbackText": "Severely reduces maximum health and health regeneration.",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 30.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.SpellPower",
+          "Op": "Additive",
+          "Magnitude": 25.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CritChance",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -120.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": -3.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_DevourersHeart_Json",
+      "DisplayName": "Devourer's Heart",
+      "Description": "A ravenous organ grants monstrous vitality and recovery by starving the user's arcane reserves.",
+      "ItemCategory": "Corruption",
+      "DefaultSlot": "Corruption",
+      "RequiredLevel": 22,
+      "ItemTags": [
+        "Item.Corruption"
+      ],
+      "CorruptionPowerText": "Massively increases maximum health, health regeneration, and attack damage.",
+      "CorruptionDrawbackText": "Massively reduces maximum mana and mana regeneration.",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": 180.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": 6.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": 15.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaMax",
+          "Op": "Additive",
+          "Magnitude": -120.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaRegen",
+          "Op": "Additive",
+          "Magnitude": -4.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_FracturedHourglass_Json",
+      "DisplayName": "Fractured Hourglass",
+      "Description": "Broken time floods the bearer with impossible speed, leaving their body brittle and exposed.",
+      "ItemCategory": "Corruption",
+      "DefaultSlot": "Corruption",
+      "RequiredLevel": 24,
+      "ItemTags": [
+        "Item.Corruption"
+      ],
+      "CorruptionPowerText": "Greatly increases cooldown reduction, attack speed, and movement speed.",
+      "CorruptionDrawbackText": "Greatly reduces armor and maximum health.",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.CooldownReduction",
+          "Op": "Additive",
+          "Magnitude": 18.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackSpeed",
+          "Op": "Additive",
+          "Magnitude": 35.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": 70.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": -7.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -75.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_CrownOfManyEyes_Json",
+      "DisplayName": "Crown of Many Eyes",
+      "Description": "The crown sees every path a projectile may take, but the visions root the wearer in place.",
+      "ItemCategory": "Corruption",
+      "DefaultSlot": "Corruption",
+      "RequiredLevel": 26,
+      "ItemTags": [
+        "Item.Corruption"
+      ],
+      "CorruptionPowerText": "Massively improves range, vision, prediction, and critical chance.",
+      "CorruptionDrawbackText": "Greatly reduces movement speed and armor.",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackRange",
+          "Op": "Additive",
+          "Magnitude": 220.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.VisionRange",
+          "Op": "Additive",
+          "Magnitude": 700.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ProjectilePredictionAmount",
+          "Op": "Additive",
+          "Magnitude": 0.35
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CritChance",
+          "Op": "Additive",
+          "Magnitude": 10.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": -60.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.Armor",
+          "Op": "Additive",
+          "Magnitude": -5.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_PlagueEngine_Json",
+      "DisplayName": "Plague Engine",
+      "Description": "A biomechanical furnace turns the bearer into a source of poison, trauma, and corruption.",
+      "ItemCategory": "Corruption",
+      "DefaultSlot": "Corruption",
+      "RequiredLevel": 28,
+      "ItemTags": [
+        "Item.Corruption"
+      ],
+      "CorruptionPowerText": "Massively increases the damage and duration of every ailment.",
+      "CorruptionDrawbackText": "Reduces health, health regeneration, and movement speed.",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.PoisonAmount",
+          "Op": "Additive",
+          "Magnitude": 9.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.PoisonDuration",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.TraumaAmount",
+          "Op": "Additive",
+          "Magnitude": 9.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.TraumaDuration",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CorruptionAmount",
+          "Op": "Additive",
+          "Magnitude": 9.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.CorruptionDuration",
+          "Op": "Additive",
+          "Magnitude": 3.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": -5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.RunSpeed",
+          "Op": "Additive",
+          "Magnitude": -50.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -50.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    },
+    {
+      "AssetName": "DI_HollowStar_Json",
+      "DisplayName": "Hollow Star",
+      "Description": "An empty celestial relic grants overwhelming arcane power while draining physical life and weapon strength.",
+      "ItemCategory": "Corruption",
+      "DefaultSlot": "Corruption",
+      "RequiredLevel": 30,
+      "ItemTags": [
+        "Item.Corruption"
+      ],
+      "CorruptionPowerText": "Massively increases spell power, magic amplification, maximum mana, and mana regeneration.",
+      "CorruptionDrawbackText": "Greatly reduces attack damage, maximum health, and health regeneration.",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.SpellPower",
+          "Op": "Additive",
+          "Magnitude": 60.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.MagicAmp",
+          "Op": "Additive",
+          "Magnitude": 18.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaMax",
+          "Op": "Additive",
+          "Magnitude": 150.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.ManaRegen",
+          "Op": "Additive",
+          "Magnitude": 5.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.AttackDamage",
+          "Op": "Additive",
+          "Magnitude": -20.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPMax",
+          "Op": "Additive",
+          "Magnitude": -100.0
+        },
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": -2.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": null,
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": true,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    }
+  ]
+}

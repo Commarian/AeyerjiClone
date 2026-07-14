@@ -4,7 +4,18 @@
 #include "Abilities/GA_AeyerjiTargetedEffectBase.h"
 #include "GA_AGGravitonPull.generated.h"
 
-/** Table-driven Graviton Pull entry point. Runtime tuning comes from the global ability table. */
+/**
+ * Instant owner-radius targeted effect entry point for Graviton Pull.
+ *
+ * Runtime tuning comes from DT_AeyerjiAbilityTuning through Ability.AG.GravitonPull.
+ * The base class handles:
+ * - cost
+ * - cooldown
+ * - target collection
+ * - enemy filtering
+ * - damage application
+ * - additional effects
+ */
 UCLASS()
 class AEYERJI_API UGA_AGGravitonPull : public UGA_AeyerjiTargetedEffectBase
 {

@@ -73,12 +73,20 @@ struct AEYERJI_API FLootContext
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
 	float DifficultyScale = 1.f;
 
-	/** Inclusive item-level jitter applied around PlayerLevel; triangular bias toward PlayerLevel. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
-	int32 ItemLevelJitterMin = -2;
+	/**
+	 * Independent loot-quality bias. Values above one favor higher weighted
+	 * rarities but never change item level or bypass source/pool eligibility.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot", meta=(ClampMin="0.0"))
+	float RewardQualityMultiplier = 1.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot")
-	int32 ItemLevelJitterMax = 2;
+	/** Deprecated: ignored. Loot item level now resolves exactly from PlayerLevel/PlayerActor/EnemyLevel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot", meta = (DeprecatedProperty, DeprecationMessage = "Item level jitter is ignored. Loot items now use the resolved character level exactly."))
+	int32 ItemLevelJitterMin = 0;
+
+	/** Deprecated: ignored. Loot item level now resolves exactly from PlayerLevel/PlayerActor/EnemyLevel. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot", meta = (DeprecatedProperty, DeprecationMessage = "Item level jitter is ignored. Loot items now use the resolved character level exactly."))
+	int32 ItemLevelJitterMax = 0;
 
 	/** Override for named pity soft start. -1 uses LootService defaults. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Aeyerji|Loot|Pity")

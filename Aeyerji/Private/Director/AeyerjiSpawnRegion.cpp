@@ -3,6 +3,8 @@
 
 #include "Components/BoxComponent.h"
 
+const FName AAeyerjiSpawnRegion::RiftExcludedActorTag(TEXT("Rift.Excluded"));
+
 AAeyerjiSpawnRegion::AAeyerjiSpawnRegion()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -25,4 +27,11 @@ FBox AAeyerjiSpawnRegion::GetRegionBounds() const
 	}
 
 	return FBox(GetActorLocation(), GetActorLocation());
+}
+
+bool AAeyerjiSpawnRegion::IsRiftEncounterEligible() const
+{
+	return RegionWeight > 0.f
+		&& !Tags.Contains(RiftExcludedActorTag)
+		&& GetRegionBounds().IsValid;
 }

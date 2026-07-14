@@ -2,6 +2,7 @@
 
 #include "GUI/ItemTooltipData.h"
 
+#include "GUI/AeyerjiStringLibrary.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
 
@@ -9,18 +10,21 @@ namespace
 {
 	FText GetLaneDisplayText(EEquipmentSlot Slot)
 	{
+		// Lane names are in GlobalStringTable.csv (Assault, Guard, Flow, Corruption).
+		// Reimport string table asset after any CSV change.
+		using namespace AeyerjiStringLibrary;
 		switch (Slot)
 		{
 		case EEquipmentSlot::Assault:
-			return FText::FromString(TEXT("Assault"));
+			return GetGlobalStringTableText(TEXT("Assault"));
 		case EEquipmentSlot::Guard:
-			return FText::FromString(TEXT("Guard"));
+			return GetGlobalStringTableText(TEXT("Guard"));
 		case EEquipmentSlot::Flow:
-			return FText::FromString(TEXT("Flow"));
+			return GetGlobalStringTableText(TEXT("Flow"));
 		case EEquipmentSlot::Corruption:
-			return FText::FromString(TEXT("Corruption"));
+			return GetGlobalStringTableText(TEXT("Corruption"));
 		default:
-			return FText::FromString(TEXT("Assault"));
+			return GetGlobalStringTableText(TEXT("Assault"));
 		}
 	}
 }

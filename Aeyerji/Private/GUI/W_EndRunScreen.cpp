@@ -8,8 +8,7 @@
 #include "Components/Widget.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
-
-#define LOCTEXT_NAMESPACE "W_EndRunScreen"
+#include "GUI/AeyerjiStringLibrary.h"
 
 namespace
 {
@@ -82,12 +81,12 @@ namespace
 		const FString ZoneKey = ZoneId.ToString();
 		if (ZoneKey.Equals(TEXT("Zone.Neon"), ESearchCase::IgnoreCase) || ZoneKey.Equals(TEXT("Neon"), ESearchCase::IgnoreCase))
 		{
-			return LOCTEXT("ZoneDisplayNeon", "Neon District");
+			return AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunNeonDistrict"));
 		}
 
 		if (ZoneKey.Equals(TEXT("Zone.Menu"), ESearchCase::IgnoreCase) || ZoneKey.Equals(TEXT("Menu"), ESearchCase::IgnoreCase))
 		{
-			return LOCTEXT("ZoneDisplayMenu", "Main Menu");
+			return AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunMainMenu"));
 		}
 
 		return FText::FromString(MakeFriendlyZoneNameString(ZoneId));
@@ -95,27 +94,33 @@ namespace
 
 	FText FormatResolutionTitle(const EAeyerjiRunResolution Resolution)
 	{
+		using namespace AeyerjiStringLibrary;
 		switch (Resolution)
 		{
 		case EAeyerjiRunResolution::Victory:
-			return LOCTEXT("ResultTitleVictory", "Mission Complete");
+			return GetGlobalStringTableText(TEXT("EndRunMissionComplete"));
 		case EAeyerjiRunResolution::TimeExpired:
-			return LOCTEXT("ResultTitleFailure", "Mission Failed");
+			return GetGlobalStringTableText(TEXT("EndRunMissionFailed"));
+		case EAeyerjiRunResolution::DefenseObjectiveDestroyed:
+			return GetGlobalStringTableText(TEXT("EndRunMissionFailed"));
 		case EAeyerjiRunResolution::Abandoned:
-			return LOCTEXT("ResultTitleAbandoned", "Run Abandoned");
+			return GetGlobalStringTableText(TEXT("EndRunRunAbandoned"));
 		default:
-			return LOCTEXT("ResultTitleSummary", "Run Summary");
+			return GetGlobalStringTableText(TEXT("EndRunRunSummary"));
 		}
 	}
 
 	FText FormatFailureReason(const EAeyerjiRunResolution Resolution)
 	{
+		using namespace AeyerjiStringLibrary;
 		switch (Resolution)
 		{
 		case EAeyerjiRunResolution::TimeExpired:
-			return LOCTEXT("FailureReasonTimeExpired", "Time expired");
+			return GetGlobalStringTableText(TEXT("EndRunTimeExpired"));
+		case EAeyerjiRunResolution::DefenseObjectiveDestroyed:
+			return GetGlobalStringTableText(TEXT("EndRunDefenseObjectiveDestroyedReason"));
 		case EAeyerjiRunResolution::Abandoned:
-			return LOCTEXT("FailureReasonAbandoned", "Run abandoned");
+			return GetGlobalStringTableText(TEXT("EndRunRunAbandonedReason"));
 		default:
 			return FText::GetEmpty();
 		}
@@ -126,24 +131,29 @@ namespace
 		const FText ZoneDisplayName = FormatZoneDisplayName(Results.CompletedZoneId);
 		const bool bHasZoneDisplayName = !ZoneDisplayName.IsEmpty();
 
+		using namespace AeyerjiStringLibrary;
 		switch (Results.Resolution)
 		{
 		case EAeyerjiRunResolution::Victory:
 			return bHasZoneDisplayName
-				? FText::Format(LOCTEXT("ResultDetailVictoryZone", "Extracted from {0}"), ZoneDisplayName)
-				: LOCTEXT("ResultDetailVictory", "Extraction complete");
+				? FText::Format(GetGlobalStringTableText(TEXT("EndRunExtractedFromZone")), ZoneDisplayName)
+				: GetGlobalStringTableText(TEXT("EndRunExtractionComplete"));
 		case EAeyerjiRunResolution::TimeExpired:
 			return bHasZoneDisplayName
-				? FText::Format(LOCTEXT("ResultDetailFailureZone", "Failed in {0}"), ZoneDisplayName)
-				: LOCTEXT("ResultDetailFailure", "The time limit expired");
+				? FText::Format(GetGlobalStringTableText(TEXT("EndRunFailedInZone")), ZoneDisplayName)
+				: GetGlobalStringTableText(TEXT("EndRunTimeLimitExpired"));
+		case EAeyerjiRunResolution::DefenseObjectiveDestroyed:
+			return bHasZoneDisplayName
+				? FText::Format(GetGlobalStringTableText(TEXT("EndRunDefenseDestroyedInZone")), ZoneDisplayName)
+				: GetGlobalStringTableText(TEXT("EndRunDefenseDestroyed"));
 		case EAeyerjiRunResolution::Abandoned:
 			return bHasZoneDisplayName
-				? FText::Format(LOCTEXT("ResultDetailAbandonedZone", "Run abandoned in {0}"), ZoneDisplayName)
-				: LOCTEXT("ResultDetailAbandoned", "Run abandoned");
+				? FText::Format(GetGlobalStringTableText(TEXT("EndRunAbandonedInZone")), ZoneDisplayName)
+				: GetGlobalStringTableText(TEXT("EndRunAbandoned"));
 		default:
 			return bHasZoneDisplayName
-				? FText::Format(LOCTEXT("ResultDetailSummaryZone", "Summary for {0}"), ZoneDisplayName)
-				: LOCTEXT("ResultDetailSummary", "Run summary");
+				? FText::Format(GetGlobalStringTableText(TEXT("EndRunSummaryForZone")), ZoneDisplayName)
+				: GetGlobalStringTableText(TEXT("EndRunRunSummaryDetail"));
 		}
 	}
 
@@ -286,7 +296,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (UnitsKilledLabelText)
 	{
-		UnitsKilledLabelText->SetText(LOCTEXT("UnitsKilledLabel", "Enemies Defeated"));
+		UnitsKilledLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunEnemiesDefeated")));
 	}
 
 	if (UnitsKilledValueText)
@@ -296,7 +306,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (UnitsGoalLabelText)
 	{
-		UnitsGoalLabelText->SetText(LOCTEXT("UnitsGoalLabel", "Objective Target"));
+		UnitsGoalLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunObjectiveTarget")));
 	}
 
 	if (UnitsGoalValueText)
@@ -306,7 +316,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (TimeElapsedLabelText)
 	{
-		TimeElapsedLabelText->SetText(LOCTEXT("TimeElapsedLabel", "Clear Time"));
+		TimeElapsedLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunClearTime")));
 	}
 
 	if (TimeElapsedValueText)
@@ -316,7 +326,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (TimeRemainingLabelText)
 	{
-		TimeRemainingLabelText->SetText(LOCTEXT("TimeRemainingLabel", "Time Remaining"));
+		TimeRemainingLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunTimeRemaining")));
 	}
 
 	if (TimeRemainingValueText)
@@ -326,7 +336,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (SpeedBonusLabelText)
 	{
-		SpeedBonusLabelText->SetText(LOCTEXT("SpeedBonusLabel", "Speed Bonus"));
+		SpeedBonusLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunSpeedBonus")));
 	}
 
 	if (SpeedBonusValueText)
@@ -336,19 +346,19 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (BestTimeLabelText)
 	{
-		BestTimeLabelText->SetText(LOCTEXT("BestTimeLabel", "Best Time"));
+		BestTimeLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunBestTime")));
 	}
 
 	if (BestTimeValueText)
 	{
 		BestTimeValueText->SetText(CachedResults.BestTimeForDifficultySeconds > 0.f
 			? FormatSeconds(CachedResults.BestTimeForDifficultySeconds)
-			: LOCTEXT("BestTimeUnavailable", "--"));
+			: AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunBestTimeUnavailable")));
 	}
 
 	if (DifficultyLabelText)
 	{
-		DifficultyLabelText->SetText(LOCTEXT("DifficultyLabel", "Difficulty"));
+		DifficultyLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunDifficulty")));
 	}
 
 	if (DifficultyValueText)
@@ -358,7 +368,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (FailureReasonLabelText)
 	{
-		FailureReasonLabelText->SetText(LOCTEXT("FailureReasonLabel", "Failure Reason"));
+		FailureReasonLabelText->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunFailureReasonLabel")));
 	}
 
 	if (FailureReasonText)
@@ -417,5 +427,3 @@ void UW_EndRunScreen::RefreshDifficultyControls()
 		DifficultyValueText->SetText(FText::AsNumber(FMath::RoundToInt(GameInstance->GetDifficultySlider())));
 	}
 }
-
-#undef LOCTEXT_NAMESPACE

@@ -4,10 +4,12 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "AeyerjiCharacter.h"
 #include "AeyerjiGameplayTags.h"
 #include "CharacterStatsLibrary.h"
 #include "GameplayAbilitySpec.h"
 #include "Abilities/GameplayAbilityTypes.h"
+#include "GameFramework/MovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "StateTreeExecutionContext.h"
 #include "Logging/AeyerjiLog.h"
@@ -127,6 +129,27 @@ EStateTreeRunStatus USTT_ActivatePrimaryAttackTask::Tick(FStateTreeExecutionCont
     {
         BOSS_PRIMARY_AJ_LOG(Verbose, this, TEXT("[BossPrimaryAttack] ActivatePrimaryAttack: no pawn resolved from owner %s - failing."), *GetNameSafe(Context.GetOwner()));
         return EStateTreeRunStatus::Failed;
+    }
+
+    if (const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(Pawn))
+    {
+        if (ControlledCharacter->IsCrowdControlled())
+        {
+            if (AAIController* AI = Cast<AAIController>(Pawn->GetController()))
+            {
+                AI->StopMovement();
+                AI->ClearFocus(EAIFocusPriority::Gameplay);
+                AI->ClearFocus(EAIFocusPriority::Move);
+            }
+
+            if (UMovementComponent* MovementComponent = Pawn->GetMovementComponent())
+            {
+                MovementComponent->StopMovementImmediately();
+            }
+
+            BOSS_PRIMARY_AJ_LOG(Verbose, this, TEXT("[BossPrimaryAttack] ActivatePrimaryAttack: pawn %s is crowd-controlled - failing task without activation."), *GetNameSafe(Pawn));
+            return EStateTreeRunStatus::Failed;
+        }
     }
 
     UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn, /*LookForComponent=*/true);

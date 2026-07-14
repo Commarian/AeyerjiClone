@@ -6,6 +6,7 @@
 #include "GameFramework/Pawn.h"
 #include "NavigationSystem.h"
 #include "Enemy/EnemyAIController.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 
 USTT_MoveToLocationTask::USTT_MoveToLocationTask(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -24,30 +25,34 @@ EStateTreeRunStatus USTT_MoveToLocationTask::EnterState(FStateTreeExecutionConte
 	}
 
 	// Ensure we have a valid destination on the nav-mesh.
-	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Pawn->GetWorld());
-	if (!NavSys)
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+	NavParams.SearchRadius = 600.f;
+
+	FVector SafePawnLocation = Pawn->GetActorLocation();
+	if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
 	{
 		return EStateTreeRunStatus::Failed;
 	}
 
-	FNavLocation Projected;
-	const FVector SearchExtents(500.f, 500.f, 1000.f); // 5 m × 5 m × 10 m
-	if (!NavSys->ProjectPointToNavigation(Destination, Projected, SearchExtents))
+	FAeyerjiNavSafetyResult DestinationResult;
+	if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(Pawn, Destination, Pawn, NavParams, DestinationResult))
 	{
 		UE_LOG(LogTemp, Display,
-			TEXT("MoveTo: ProjectPoint FAILED – Dest=%s, Ext=%s"),
-			*Destination.ToString(), *SearchExtents.ToString());
+			TEXT("MoveTo: safe destination resolve failed. Dest=%s Reason=%s"),
+			*Destination.ToString(), *DestinationResult.FailureReason.ToString());
 		return EStateTreeRunStatus::Failed;
 	}
 
-	MoveRequestId = AI->MoveToLocation(Projected.Location,
+	Destination = DestinationResult.NavLocation;
+	MoveRequestId = AI->MoveToLocation(Destination,
 	                                   AcceptableRadius,
 	                                   /*bStopOnOverlap   =*/true,
 	                                   /*bUsePathfinding  =*/true,
 	                                   /*bProjectGoal     =*/false,
 	                                   /*bCanStrafe       =*/false,
 	                                   /*FilterClass      =*/nullptr,
-	                                   /*bAllowPartialPath=*/true);
+	                                   /*bAllowPartialPath=*/false);
 
 	if (!MoveRequestId.IsValid())
 	{

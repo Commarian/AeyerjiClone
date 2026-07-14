@@ -44,7 +44,9 @@ bool UAeyerjiEncounterDefinition::BuildRuntimeWaves(TArray<FWaveDefinition>& Out
 			RuntimeSet.SpawnInterval = FMath::Max(0.f, SetData.SpawnInterval);
 			RuntimeSet.bIsElite      = SetData.bIsElite;
 			RuntimeSet.bIsMiniBoss   = SetData.bIsMiniBoss;
+			RuntimeSet.bIsBoss       = SetData.bIsBoss;
 			RuntimeSet.MiniBossGrantedAbilities = SetData.MiniBossGrantedAbilities;
+			RuntimeSet.BossGrantedAbilities = SetData.BossGrantedAbilities;
 			RuntimeSet.ForcedEliteAffixes = SetData.ForcedEliteAffixes;
 			RuntimeSet.EliteAffixPoolOverride = SetData.EliteAffixPoolOverride;
 			RuntimeSet.MinEliteAffixes = FMath::Max(0, SetData.MinEliteAffixes);

@@ -40,9 +40,17 @@ struct AEYERJI_API FEnemySetDef
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides))
 	bool bIsMiniBoss = false;
 
+	/** Escalates the elite tuning/FX to boss levels. Survival missions can author boss waves directly. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides))
+	bool bIsBoss = false;
+
 	/** Optional signature abilities granted only to this mini boss set. Falls back to spawner defaults. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsMiniBoss", EditConditionHides, AdvancedDisplay))
 	TArray<TSubclassOf<UGameplayAbility>> MiniBossGrantedAbilities;
+
+	/** Optional signature abilities granted only to this boss set. Falls back to the spawner defaults. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsBoss", EditConditionHides, AdvancedDisplay))
+	TArray<TSubclassOf<UGameplayAbility>> BossGrantedAbilities;
 
 	/** Force these affixes for this set. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))

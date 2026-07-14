@@ -34,6 +34,7 @@ class AEYERJI_API APlayerParentNative : public AAeyerjiCharacter, public IGeneri
 public:
 	APlayerParentNative();
 
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(TeamId); }
 	virtual void SetGenericTeamId(const FGenericTeamId& NewID) override { TeamId = NewID; }
 	virtual void PostInitializeComponents() override;
 

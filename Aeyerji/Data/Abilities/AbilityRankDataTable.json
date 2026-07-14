@@ -1,0 +1,215 @@
+[
+	{
+		"Name": "Ability.Stomp.2",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Stomp"
+		},
+		"Rank": 2,
+		"RequiredPlayerLevel": 2,
+		"PointCost": 1,
+		"RequiredOtherPointSpendsSinceLastUpgrade": 1,
+		"bOverrideCost": true,
+		"Cost":
+		{
+			"ManaCost": 27,
+			"Cooldown": 4.75
+		},
+		"bOverridePreviewRange": false,
+		"PreviewRange": 0,
+		"bOverrideMaxRange": false,
+		"MaxRange": 0,
+		"bOverrideRadius": false,
+		"Radius": 0,
+		"bOverrideArcAngleDegrees": false,
+		"ArcAngleDegrees": 90,
+		"bOverrideMaxTargets": false,
+		"MaxTargets": 0,
+		"bOverrideDamage": true,
+		"Damage":
+		{
+			"FlatValue": 16,
+			"SourceStat": "AttackDamage",
+			"SourceStatScalar": 0.3,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": true,
+			"bCanCrit": true,
+			"bCanBeDodged": true,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": true,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"bOverrideAdditionalEffects": true,
+		"AdditionalEffects": [
+			{
+				"GameplayEffectClass": "/Script/Aeyerji.GE_Stun",
+				"SetByCallerTag":
+				{
+					"TagName": "SetByCaller.Stun.Duration"
+				},
+				"Magnitude": 1.35,
+				"EffectLevel": 1
+			}
+		],
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	},
+	{
+		"Name": "Ability.Stomp.3",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Stomp"
+		},
+		"Rank": 3,
+		"RequiredPlayerLevel": 4,
+		"PointCost": 1,
+		"RequiredOtherPointSpendsSinceLastUpgrade": 1,
+		"bOverrideCost": true,
+		"Cost":
+		{
+			"ManaCost": 30,
+			"Cooldown": 4.5
+		},
+		"bOverridePreviewRange": true,
+		"PreviewRange": 475,
+		"bOverrideMaxRange": false,
+		"MaxRange": 0,
+		"bOverrideRadius": true,
+		"Radius": 475,
+		"bOverrideArcAngleDegrees": false,
+		"ArcAngleDegrees": 90,
+		"bOverrideMaxTargets": false,
+		"MaxTargets": 0,
+		"bOverrideDamage": true,
+		"Damage":
+		{
+			"FlatValue": 21,
+			"SourceStat": "AttackDamage",
+			"SourceStatScalar": 0.35,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": true,
+			"bCanCrit": true,
+			"bCanBeDodged": true,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": true,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"bOverrideAdditionalEffects": true,
+		"AdditionalEffects": [
+			{
+				"GameplayEffectClass": "/Script/Aeyerji.GE_Stun",
+				"SetByCallerTag":
+				{
+					"TagName": "SetByCaller.Stun.Duration"
+				},
+				"Magnitude": 1.5,
+				"EffectLevel": 1
+			}
+		],
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	},
+	{
+		"Name": "Ability.Stomp.4",
+		"AbilityTag":
+		{
+			"TagName": "Ability.Stomp"
+		},
+		"Rank": 4,
+		"RequiredPlayerLevel": 6,
+		"PointCost": 1,
+		"RequiredOtherPointSpendsSinceLastUpgrade": 2,
+		"bOverrideCost": true,
+		"Cost":
+		{
+			"ManaCost": 34,
+			"Cooldown": 4
+		},
+		"bOverridePreviewRange": true,
+		"PreviewRange": 525,
+		"bOverrideMaxRange": false,
+		"MaxRange": 0,
+		"bOverrideRadius": true,
+		"Radius": 525,
+		"bOverrideArcAngleDegrees": false,
+		"ArcAngleDegrees": 90,
+		"bOverrideMaxTargets": false,
+		"MaxTargets": 0,
+		"bOverrideDamage": true,
+		"Damage":
+		{
+			"FlatValue": 28,
+			"SourceStat": "AttackDamage",
+			"SourceStatScalar": 0.45,
+			"GameplayEffectClass": "None",
+			"SetByCallerTag":
+			{
+				"TagName": "SetByCaller.Damage.Instant"
+			},
+			"DamageTypeTag":
+			{
+				"TagName": "Damage.Type.Physical"
+			},
+			"bUseDamageVariance": true,
+			"bCanCrit": true,
+			"bCanBeDodged": true,
+			"bCanLifeSteal": false,
+			"bCanTriggerOnHit": false,
+			"bCanStagger": true,
+			"VarianceOverride": -1,
+			"CriticalMultiplierOverride": 0,
+			"ArmorShred": 0,
+			"ArmorPenetration": 0,
+			"StaggerMultiplier": 1
+		},
+		"bOverrideAdditionalEffects": true,
+		"AdditionalEffects": [
+			{
+				"GameplayEffectClass": "/Script/Aeyerji.GE_Stun",
+				"SetByCallerTag":
+				{
+					"TagName": "SetByCaller.Stun.Duration"
+				},
+				"Magnitude": 1.75,
+				"EffectLevel": 1
+			}
+		],
+		"FloatTunables": [],
+		"BoolTunables": [],
+		"IntTunables": [],
+		"TagTunables": [],
+		"AssetTunables": []
+	}
+]

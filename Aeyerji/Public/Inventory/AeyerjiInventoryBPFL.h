@@ -39,6 +39,33 @@ enum class EItemDropDistributionMode : uint8
 	DropUniqueItemForEveryPlayer    UMETA(DisplayName = "Drop Unique Item For Every Player")
 };
 
+/** Summary returned when one or more loot results are converted into pickup actors. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiLootSpawnSummary
+{
+	GENERATED_BODY()
+
+	/** Number of loot roll results requested for spawning. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Loot")
+	int32 RequestedResultCount = 0;
+
+	/** Actual pickup actors spawned. Every-player drop modes can produce more pickups than results. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Loot")
+	int32 SpawnedPickupCount = 0;
+
+	/** Failed pickup spawn attempts, including invalid results and per-recipient spawn failures. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Loot")
+	int32 FailedSpawnCount = 0;
+
+	/** Last pickup spawned by the batch, if any. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Loot")
+	TObjectPtr<AAeyerjiLootPickup> LastSpawnedPickup = nullptr;
+
+	/** Every pickup successfully created by the batch, used by authority code to apply recipient ownership. */
+	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Loot")
+	TArray<TObjectPtr<AAeyerjiLootPickup>> SpawnedPickups;
+};
+
 /**
  * Blueprint helpers for the custom inventory system.
  */
@@ -103,6 +130,19 @@ public:
 		int32 SeedOverride = 0,
 		EItemDropDistributionMode DropMode = EItemDropDistributionMode::DropOnlyForInstigator,
 		AActor* Instigator = nullptr);
+
+	/** Spawn pickups for already rolled loot results and report exact pickup counts (SERVER only). */
+	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Loot", meta = (WorldContext = "WorldContextObject", AdvancedDisplay = "SeedOverride,DropMode,Instigator,LootReleaseScatterRadius,LootReleaseScatterYawOffset"))
+	static FAeyerjiLootSpawnSummary SpawnLootResults(
+		UObject* WorldContextObject,
+		const TArray<FLootDropResult>& Results,
+		FVector Location,
+		FRotator Rotation,
+		int32 SeedOverride = 0,
+		EItemDropDistributionMode DropMode = EItemDropDistributionMode::DropOnlyForInstigator,
+		AActor* Instigator = nullptr,
+		float LootReleaseScatterRadius = 0.f,
+		float LootReleaseScatterYawOffset = 0.f);
 
 	/** Roll and spawn multiple drops using a multi-drop config (SERVER only). */
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Loot", meta = (WorldContext = "WorldContextObject"))

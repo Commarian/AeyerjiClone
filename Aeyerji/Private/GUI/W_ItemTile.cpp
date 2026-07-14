@@ -14,6 +14,7 @@
 #include "GUI/W_InventoryBag_Native.h"
 #include "Items/ItemDefinition.h"
 #include "Logging/AeyerjiLog.h"
+#include "Engine/Texture2D.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
 namespace
@@ -373,7 +374,7 @@ void UW_ItemTile::RefreshFromItem()
 		IconImage->SetBrushFromTexture(EmptySlotIcon, false);
 		IconImage->SetColorAndOpacity(EmptySlotIconTint);
 		AJ_LOG(this, TEXT("[ItemBorder] GridTile placeholder generic border Item=None EmptyIcon=%s Material=%s"),
-			*GetNameSafe(EmptySlotIcon),
+			*GetNameSafe(EmptySlotIcon.Get()),
 			*GetNameSafe(GenericBorderMaterial));
 		RefreshBorderVisual(GenericBorderMaterial, FLinearColor::Transparent);
 		return;

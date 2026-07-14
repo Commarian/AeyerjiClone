@@ -6,12 +6,20 @@ namespace AeyerjiTags
 	// Declare tags (exported so other modules can see them)
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Dead);
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Dead_Cleansed);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Death);
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Primary);
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Primary_Ranged_Basic);
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Primary_Melee_Basic);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Ability_Potion_Heal);
 
 	// Damage types
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageType_Physical); // Damage.Type.Physical
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageRule_UseVariance); // Damage.Rule.UseVariance
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageRule_CanCrit);     // Damage.Rule.CanCrit
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageRule_CanBeDodged);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageRule_CanLifeSteal);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageRule_CanTriggerOnHit);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(DamageRule_CanStagger);
 
 	// Ailment source types used to drive ailment application logic.
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(AilmentType_Poisonous);    // AilmentType.Poisonous
@@ -26,6 +34,7 @@ namespace AeyerjiTags
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Ability_PrimaryMelee_Recovery);   // State.Ability.PrimaryMelee.Recovery
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Ability_PrimaryMelee_Cancelled);  // State.Ability.PrimaryMelee.Cancelled
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Ability_PrimaryMelee_BlockMovement); // State.Ability.PrimaryMelee.BlockMovement
+    AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Ability_Casting);                 // State.Ability.Casting
 
     // SetByCaller tags for primary->derived stat GE
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_PrimaryDerived_HPMax);        // SetByCaller.PrimaryDerived.HPMax
@@ -44,9 +53,16 @@ namespace AeyerjiTags
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_PrimaryAttack_Completed);  // Event.PrimaryAttack.Completed
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_External_Target);           // Event.External.Target
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Cooldown_PrimaryAttack);           // Cooldown.PrimaryAttack
+    AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Cooldown_Potion);                  // Cooldown.Potion
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Cost_Mana);                   // SetByCaller.Cost.Mana
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_CooldownSeconds);             // SetByCaller.Cooldown.Seconds
+    AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Heal_Instant);                // SetByCaller.Heal.Instant
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Damage_Instant);              // SetByCaller.Damage.Instant
+    AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Damage_Variance);             // SetByCaller.Damage.Variance
+    AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Damage_CriticalMultiplier);    // SetByCaller.Damage.CriticalMultiplier
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Damage_StaggerMultiplier);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_ArmorShred);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_ArmorPenetration);
     AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_CooldownDuration);             // Deprecated: SetByCaller.Cooldown.Duration
 
 	// Persistent shared world-state compatibility tags.
@@ -75,6 +91,9 @@ namespace AeyerjiTags
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Source_Boss);                  // Loot.Source.Boss
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Source_Chest);                 // Loot.Source.Chest
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Source_Event);                 // Loot.Source.Event
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Source_RiftBase);              // Loot.Source.Rift.Base
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Source_RiftTimed);             // Loot.Source.Rift.Timed
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Source_RiftFlawless);          // Loot.Source.Rift.Flawless
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Pity_GenericLegendary);        // Loot.Pity.GenericLegendary
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Pity_BossUnique);              // Loot.Pity.BossUnique
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Loot_Pity_SetPiece);                // Loot.Pity.SetPiece
@@ -84,7 +103,17 @@ namespace AeyerjiTags
 
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Stun_Duration);             // SetByCaller.Stun.Duration
 	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_CrowdControl_Stunned);    // State.CrowdControl.Stunned
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(SBC_Stagger_Duration);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_CrowdControl_Staggered);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_AI_CrowdControl_Stunned);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_AI_CrowdControl_Staggered);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_AI_CrowdControl_Cleared);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_Combat_DamageDealt);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_Combat_DamageReceived);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(Event_Combat_OnHit);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(GameplayCue_Combat_Hit_Physical);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(GameplayCue_Combat_Hit_Critical);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(GameplayCue_Combat_Hit_Dodged);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(GameplayCue_Combat_Hit_Staggered);
+	AEYERJI_API UE_DECLARE_GAMEPLAY_TAG_EXTERN(GameplayCue_Combat_Hit_Killing);
 }
-
-
-

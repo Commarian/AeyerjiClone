@@ -6,6 +6,8 @@
 #include "Engine/DeveloperSettings.h"
 #include "AeyerjiDifficultyTuning.generated.h"
 
+class UDataTable;
+
 /**
  * Shared difficulty tuning asset that defines the global level and world-tier curves.
  */
@@ -74,8 +76,22 @@ public:
 	UPROPERTY(EditAnywhere, Config, Category="Aeyerji|Difficulty")
 	TSoftObjectPtr<UAeyerjiDifficultyTuning> DefaultTuning;
 
+	/** Merge-friendly table containing Tier_1, Tier_2, and later Greater Rift rows. */
+	UPROPERTY(EditAnywhere, Config, Category="Aeyerji|Difficulty")
+	TSoftObjectPtr<UDataTable> DefaultRiftTierTable;
+
+	/** Legacy-only fallback used when a Rift activity snapshot is unavailable or invalid. Normal Rift launches never read this value. */
+	UPROPERTY(EditAnywhere, Config, Category="Aeyerji|Difficulty", meta=(ClampMin="1"))
+	int32 RiftEnemyReferenceLevel = 1;
+
 	/** Resolves the authored tuning asset or a seeded fallback CDO when no asset is assigned. */
 	static const UAeyerjiDifficultyTuning* Get();
+
+	/** Resolves the project-wide Greater Rift tier table. */
+	static const UDataTable* GetRiftTierTable();
+
+	/** Returns the legacy Rift fallback level clamped to the gameplay cap. */
+	static int32 GetRiftEnemyReferenceLevel();
 
 	/** Returns the globally authored gameplay level cap. */
 	static int32 GetMaxGameplayLevel();

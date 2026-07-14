@@ -57,6 +57,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter")
 	bool bAllowBackToBackSelection = true;
 
+	/** Chance that this group emits one of its EliteEnemyTypes when planned for a Greater Rift. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter|Rift", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RiftEliteChance = 0.f;
+
+	/** Weighted Greater Rift progress awarded by an ordinary enemy from this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter|Rift", meta=(ClampMin="1"))
+	int32 RiftProgressPoints = 1;
+
+	/** Weighted Greater Rift progress awarded by an elite-pool enemy from this group. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Encounter|Rift", meta=(ClampMin="1"))
+	int32 RiftEliteProgressPoints = 5;
+
 	/** Returns a resolved spawn count in the configured min/max range. */
 	int32 ResolveSpawnCount() const { return (MinCount == MaxCount) ? MinCount : FMath::RandRange(MinCount, MaxCount); }
 
@@ -153,6 +165,22 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm"))
 	float SpawnGroundOffset = 5.f;
+
+	/** Minimum distance every ordinary Rift spawn must keep from each living player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift", meta=(ClampMin="0.0", Units="cm"))
+	float RiftMinimumSpawnDistanceFromPlayers = 1200.f;
+
+	/** Periodic authority-only interval used to activate a safe unopened anchor when encounter pressure is too low. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift", meta=(ClampMin="0.1", Units="s"))
+	float RiftPressureEvaluationInterval = 2.f;
+
+	/** Minimum live ordinary enemies desired before the pressure evaluator seeks another unopened anchor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift", meta=(ClampMin="0"))
+	int32 RiftMinimumActiveEnemyPressure = 8;
+
+	/** Prefers hidden valid locations first, but can use a visible location when no hidden option exists. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift")
+	bool bRiftPreferHiddenSpawnLocations = true;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance")
 	bool bEnableEnemyLODThrottling = true;
@@ -278,7 +306,42 @@ public:
 
 	/** Registers an enemy for progress tracking without affecting encounter pacing. */
 	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Progress")
-	void RegisterProgressEnemy(AEnemyParentNative* Enemy);
+	void RegisterProgressEnemy(AEnemyParentNative* Enemy, int32 ProgressPoints = 1, int32 RunSerial = 0);
+
+	/** Resets the server-only registration ledger and begins weighted progress for a run serial. */
+	void BeginWeightedProgressRun(int32 RunSerial, int32 ProgressTargetPoints);
+
+	/**
+	 * Freezes a deterministic one-shot plan over automatically discovered AAeyerjiSpawnRegion actors.
+	 * Untagged regions participate by default; regions carrying the Actor Tag Rift.Excluded are ignored.
+	 */
+	bool BeginRiftRegionRun(int32 RunSerial, int32 RunSeed, int32 ProgressTargetPoints,
+		int32 EnemyBudget, float ActivationDistance, float DensityMultiplier, float EliteRateMultiplier,
+		float EncounterSizeMultiplier, float ProgressMultiplier, AAeyerjiSpawnerGroup* SpawnManager,
+		AAeyerjiLevelDirector* LevelDirector, FString& OutReason);
+
+	/** Stops consuming unused regions while allowing already accepted region queues to finish spawning. */
+	void StopRiftRegionActivation();
+
+	/** True while the authority can still consume unused regions for the active Rift serial. */
+	bool IsRiftRegionActivationEnabled() const { return bRiftRegionActivationEnabled; }
+
+	/** Freezes weighted progress and rejects all later registration/progress events. */
+	void FreezeWeightedProgress();
+
+	/** True while a Rift weighted-progress ledger accepts enemy registrations. */
+	bool IsWeightedProgressActive() const { return WeightedProgressRunSerial > 0 && !bWeightedProgressFrozen; }
+
+	int32 GetEnemiesDefeated() const { return EnemiesDefeated; }
+	int32 GetWeightedProgressPoints() const { return WeightedProgressPoints; }
+	int32 GetWeightedProgressTarget() const { return WeightedProgressTarget; }
+
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Test-only ledger inspection and direct native callback entry points. */
+	int32 GetRegisteredProgressPointsForAutomation(const AActor* Enemy) const;
+	void NotifyProgressEnemyDiedForAutomation(AActor* Enemy);
+	void NotifyProgressEnemyDestroyedForAutomation(AActor* Enemy);
+#endif
 
 	/** Applies designer-owned pacing/spawn setup from DirectorDefinition. */
 	UFUNCTION(BlueprintCallable, Category="EncounterDirector|Definition")
@@ -447,6 +510,22 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm", AdvancedDisplay))
 	float SpawnGroundOffset = 5.f;
 
+	/** Minimum distance every ordinary Rift spawn must keep from each living player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift", meta=(ClampMin="0.0", Units="cm"))
+	float RiftMinimumSpawnDistanceFromPlayers = 1200.f;
+
+	/** Server-only cadence for low-pressure anchor activation. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift", meta=(ClampMin="0.1", Units="s"))
+	float RiftPressureEvaluationInterval = 2.f;
+
+	/** Minimum desired number of live Rift enemies before pressure may activate another unopened anchor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift", meta=(ClampMin="0"))
+	int32 RiftMinimumActiveEnemyPressure = 8;
+
+	/** Prefer an occluded location first to reduce visible ordinary-enemy pop-in. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift")
+	bool bRiftPreferHiddenSpawnLocations = true;
+
 	/** When true, enemy tick rates are throttled based on distance to the player. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance")
 	bool bEnableEnemyLODThrottling = true;
@@ -519,6 +598,18 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ProgressData, Category="EncounterDirector|Progress")
 	int32 KilledCount = 0;
 
+	/** Actual registered enemy deaths; separate from weighted objective points. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ProgressData, Category="EncounterDirector|Progress")
+	int32 EnemiesDefeated = 0;
+
+	/** Weighted points earned from accepted registered deaths. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ProgressData, Category="EncounterDirector|Progress")
+	int32 WeightedProgressPoints = 0;
+
+	/** Frozen weighted target for the active Rift run. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ProgressData, Category="EncounterDirector|Progress")
+	int32 WeightedProgressTarget = 0;
+
 	/** True once the boss pawn has actually been spawned. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_BossSpawned, Category="EncounterDirector|Progress")
 	bool bBossSpawned = false;
@@ -528,6 +619,8 @@ private:
 	struct FFixedSpawnRegionEntry;
 	struct FFixedSpawnCluster;
 	struct FFixedSpawnRequest;
+	struct FRiftRegionPlan;
+	struct FRiftSpawnRequest;
 	struct FEnemyLODState;
 	struct FRecentPlayerSample;
 
@@ -558,6 +651,21 @@ private:
 	void HandleFixedPopulationEnemyRemoved(AActor* Enemy);
 	void HandleFixedPopulationClusterDecrement(int32 ClusterId);
 	void NotifyFixedPopulationInitialSpawnComplete();
+	void ResetRiftRegionRun();
+	void ProcessRiftRegionActivation();
+	void ProcessRiftSpawnQueue();
+	bool TryActivateRiftEncounterGroup(int32 PlanIndex, APawn* Participant, const TCHAR* ActivationReason);
+	int32 FindRiftPressureActivationCandidate(APawn*& OutParticipant) const;
+	int32 GetActiveRiftEnemyPressure() const;
+	void GetLivingRiftParticipants(TArray<APawn*>& OutParticipants) const;
+	bool ResolveRiftRegionAnchor(const FBox& Bounds, FVector& OutAnchor);
+	bool IsRiftRegionReachableFromParticipant(const FVector& RegionAnchor, const APawn* Participant) const;
+	APawn* ResolveNearestLiveParticipant(const FVector& FromLocation) const;
+	bool ResolveRiftSpawnLocation(const FRiftRegionPlan& Plan, float HalfHeight, const APawn* Participant,
+		FVector& OutLocation, FString& OutRejectReason);
+	bool IsRiftSpawnLocationSafe(const FVector& Candidate, const TArray<APawn*>& LivingParticipants,
+		bool& bOutVisibleToParticipant, FString& OutRejectReason) const;
+	bool SpawnRiftRequest(FRiftSpawnRequest& Request);
 	FGameplayTag ResolveArchetypeTagFromClass(TSubclassOf<AEnemyParentNative> EnemyClass) const;
 	void ResetProgress(int32 NewTotal);
 	void UpdateTotalToKill(int32 NewTotal);
@@ -634,6 +742,28 @@ private:
 		int32 ClusterId = INDEX_NONE;
 	};
 
+	struct FRiftRegionPlan
+	{
+		TWeakObjectPtr<AAeyerjiSpawnRegion> Region;
+		TWeakObjectPtr<const UEnemySpawnGroupDefinition> EncounterGroup;
+		FBox Bounds = FBox(EForceInit::ForceInit);
+		FVector Anchor = FVector::ZeroVector;
+		FString StableKey;
+		float Weight = 1.f;
+		int32 Budget = 0;
+		int32 ReservedProgress = 0;
+		bool bConsumed = false;
+	};
+
+	struct FRiftSpawnRequest
+	{
+		TSubclassOf<AEnemyParentNative> EnemyClass;
+		int32 RegionPlanIndex = INDEX_NONE;
+		int32 ProgressPoints = 1;
+		bool bIsElite = false;
+		int32 FailedAttempts = 0;
+	};
+
 	struct FRecentPlayerSample
 	{
 		FVector Location = FVector::ZeroVector;
@@ -645,10 +775,18 @@ private:
 	TWeakObjectPtr<const UEnemySpawnGroupDefinition> LastSpawnedGroup;
 	TArray<TWeakObjectPtr<AActor>> LiveEnemies;
 	TArray<TWeakObjectPtr<AActor>> ProgressOnlyEnemies;
+	TMap<TWeakObjectPtr<AActor>, int32> RegisteredProgressEnemyPoints;
+	int32 WeightedProgressRunSerial = 0;
+	bool bWeightedProgressFrozen = false;
 	TArray<double> KillTimestampHistory;
 	TArray<FRecentPlayerSample> RecentPlayerSamples;
 	TArray<TWeakObjectPtr<const UEnemySpawnGroupDefinition>> PendingSpawnRequests;
 	TArray<FFixedSpawnRequest> FixedSpawnQueue;
+	TArray<FRiftRegionPlan> RiftRegionPlans;
+	TArray<TArray<FRiftSpawnRequest>> RiftReservedRegionRequests;
+	TArray<FRiftSpawnRequest> RiftSpawnQueue;
+	/** Prevents one stationary participant from consuming every nearby/overlapping region on consecutive ticks. */
+	TMap<TWeakObjectPtr<APawn>, TWeakObjectPtr<AAeyerjiSpawnRegion>> RiftParticipantRegionLatch;
 	TArray<FVector> FixedClusterCenters;
 	TMap<int32, FFixedSpawnCluster> FixedClusters;
 	TMap<TWeakObjectPtr<AActor>, int32> FixedEnemyClusterMap;
@@ -657,7 +795,10 @@ private:
 	TWeakObjectPtr<UAeyerjiWorldSpawnProfile> FixedSpawnProfile;
 	TWeakObjectPtr<AAeyerjiSpawnerGroup> FixedPopulationSpawner;
 	TWeakObjectPtr<AAeyerjiLevelDirector> FixedPopulationLevelDirector;
+	TWeakObjectPtr<AAeyerjiSpawnerGroup> RiftPopulationSpawner;
+	TWeakObjectPtr<AAeyerjiLevelDirector> RiftLevelDirector;
 	FRandomStream FixedSpawnStream;
+	FRandomStream RiftSpawnStream;
 	float EnemyLODTimeAccumulator = 0.f;
 	int32 FixedPopulationTarget = 0;
 	int32 FixedPopulationSpawned = 0;
@@ -668,6 +809,13 @@ private:
 	bool bFixedPopulationInitialSpawnComplete = false;
 	bool bFixedPopulationComplete = false;
 	bool bSpawnedPopulationSpawner = false;
+	bool bSpawnedRiftPopulationSpawner = false;
+	bool bRiftRegionActivationEnabled = false;
+	float RiftRegionActivationDistance = 2500.f;
+	float RiftEliteRateMultiplier = 1.f;
+	float RiftProgressMultiplier = 1.f;
+	double NextRiftPressureEvaluationTime = 0.0;
+	int32 RiftRegionRunSerial = 0;
 	FVector LastEncounterLocation = FVector::ZeroVector;
 	double LastEncounterTimestamp = 0.0;
 	double LastKillTimestamp = 0.0;

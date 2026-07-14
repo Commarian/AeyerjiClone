@@ -58,7 +58,16 @@ enum class EAeyerjiStat : uint8
     VisionRange                         UMETA(DisplayName = "Vision Range"),
     WalkSpeed                           UMETA(DisplayName = "Walk Speed"),
     XP                                  UMETA(DisplayName = "XP"),
-    XPMax                               UMETA(DisplayName = "XP Max")
+    XPMax                               UMETA(DisplayName = "XP Max"),
+    AttackDamageVariance                UMETA(DisplayName = "Attack Damage Variance"),
+    CriticalDamageMultiplier            UMETA(DisplayName = "Critical Damage Multiplier"),
+    PhysicalDamageBonus                 UMETA(DisplayName = "Physical Damage Bonus"),
+    ArmorPenetration                    UMETA(DisplayName = "Armor Penetration"),
+    LifeSteal                           UMETA(DisplayName = "Life Steal"),
+    StaggerPower                        UMETA(DisplayName = "Stagger Power"),
+    StaggerResistance                   UMETA(DisplayName = "Stagger Resistance"),
+    Poise                               UMETA(DisplayName = "Poise"),
+    PoiseMax                            UMETA(DisplayName = "Poise Max")
 };
 
 UCLASS()

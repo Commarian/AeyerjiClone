@@ -1,0 +1,55 @@
+{
+  "DestinationPath": "/Game/Inventory/Items/JsonImported",
+  "Items": [
+    {
+      "AssetName": "DI_CrystallizedSeedling_Json",
+      "DisplayName": "Crystallized Seedling",
+      "Description": "You might feel better after holding on to it for a while",
+      "ItemCategory": "Guard",
+      "DefaultSlot": "Guard",
+      "RequiredLevel": 1,
+      "ItemTags": [
+        "Item.Guard"
+      ],
+      "CorruptionPowerText": "",
+      "CorruptionDrawbackText": "",
+      "RarityAffixRanges": [],
+      "AffixPool": [],
+      "BaseModifiers": [
+        {
+          "Attribute": "AeyerjiAttributeSet.HPRegen",
+          "Op": "Additive",
+          "Magnitude": 2.0
+        }
+      ],
+      "GrantedEffects": [],
+      "GrantedAbilities": [],
+      "InventorySize": [
+        1,
+        1
+      ],
+      "Icon": "/Game/Inventory/Items/BasicDefense/HPRegen/crystalseedling.crystalseedling",
+      "WorldMesh": "/Game/Inventory/Items/SM_LootItemDropSphere.SM_LootItemDropSphere",
+      "WorldSkeletalMesh": null,
+      "WorldMeshOffset": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshRotation": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "WorldMeshScale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "PickupVisuals": {},
+      "bEnableEquipSynergy": false,
+      "EquipSynergyColorParameter": "ColorParameter",
+      "EquipSynergyColors": []
+    }
+  ]
+}

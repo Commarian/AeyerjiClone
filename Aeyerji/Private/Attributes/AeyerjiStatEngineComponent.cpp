@@ -50,6 +50,25 @@ void UAeyerjiStatEngineComponent::EndPlay(const EEndPlayReason::Type EndPlayReas
     Super::EndPlay(EndPlayReason);
 }
 
+void UAeyerjiStatEngineComponent::EnsureRegenerationActive()
+{
+    if (!GetOwner() || !GetOwner()->HasAuthority())
+    {
+        return;
+    }
+
+    if (UAbilitySystemComponent* ASC = GetASC())
+    {
+        static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), false);
+        if (DeadTag.IsValid() && ASC->HasMatchingGameplayTag(DeadTag))
+        {
+            return;
+        }
+    }
+
+    StartRegenTimer();
+}
+
 void UAeyerjiStatEngineComponent::StartRegenTimer()
 {
     bRegenRetryQueued = false;

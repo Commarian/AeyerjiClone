@@ -28,6 +28,14 @@ bool FAeyerjiSaveProfileSerializationTest::RunTest(const FString& Parameters)
 	SaveData->Attributes.XP = 123.0f;
 	SaveData->Attributes.Level = 9;
 	SaveData->SelectedPassiveId = FName(TEXT("Passive.Automation"));
+	SaveData->UnspentAbilityPoints = 3;
+	SaveData->TotalAbilityPointSpends = 4;
+
+	FAeyerjiAbilityProgressEntry ProgressEntry;
+	ProgressEntry.AbilityTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.AG.GravitonPull"), false);
+	ProgressEntry.CurrentRank = 2;
+	ProgressEntry.LastUpgradePointSpendCount = 4;
+	SaveData->AbilityProgressEntries.Add(ProgressEntry);
 
 	FAeyerjiAbilitySlot AbilitySlot;
 	AbilitySlot.Description = FName(TEXT("AutomationAbility"));
@@ -67,6 +75,10 @@ bool FAeyerjiSaveProfileSerializationTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("XP roundtrips."), LoadedData->Attributes.XP, 123.0f);
 	TestEqual(TEXT("Level roundtrips."), LoadedData->Attributes.Level, 9);
 	TestEqual(TEXT("Selected passive roundtrips."), LoadedData->SelectedPassiveId, FName(TEXT("Passive.Automation")));
+	TestEqual(TEXT("Ability progression entry count roundtrips."), LoadedData->AbilityProgressEntries.Num(), 1);
+	TestEqual(TEXT("Ability progression rank roundtrips."), LoadedData->AbilityProgressEntries[0].CurrentRank, 2);
+	TestEqual(TEXT("Unspent ability points roundtrip."), LoadedData->UnspentAbilityPoints, 3);
+	TestEqual(TEXT("Total ability point spends roundtrip."), LoadedData->TotalAbilityPointSpends, 4);
 	TestEqual(TEXT("Action bar roundtrips."), LoadedData->ActionBar.Num(), 1);
 	TestEqual(TEXT("Action slot data roundtrips."), LoadedData->ActionBar[0].Description, FName(TEXT("AutomationAbility")));
 	TestFalse(TEXT("Action slot stable class path roundtrips."), LoadedData->ActionBar[0].SavedAbilityClass.IsNull());

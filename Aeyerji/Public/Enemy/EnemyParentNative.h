@@ -22,8 +22,9 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "EnemyParentNative.generated.h"
 
 class UPrimitiveComponent;
-class UCapsuleComponent;
 
+class AAeyerjiSpawnerGroup;
+class AAeyerjiGoldPickup;
 class UGameplayAbility;
 class UAeyerjiEnemyArchetypeComponent;
 class UAeyerjiEnemyArchetypeData;
@@ -33,6 +34,54 @@ class UAeyerjiRewardConfigComponent;
 struct FPropertyChangedEvent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FEnemyDiedSignature, AActor*, Enemy);
+
+/** Normal enemy death gold drop settings, independent from item loot rolls. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiGoldDropConfig
+{
+	GENERATED_BODY()
+
+	/** Enables gold pickup spawning from this enemy's normal death path. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold")
+	bool bEnabled = false;
+
+	/** Chance to spawn gold after this enemy dies. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float DropChance = 1.f;
+
+	/** Base gold amount before variance, level scaling, and archetype multipliers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0"))
+	int64 BaseAmount = 5;
+
+	/** Inclusive random variance added around BaseAmount. A value of 3 rolls BaseAmount plus [-3, +3]. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0"))
+	int64 Variance = 3;
+
+	/** Additional gold per scaled enemy level. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0.0"))
+	float PerLevelScalar = 1.f;
+
+	/** Multiplier used when this enemy's cached source tag indicates an elite source. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0.0"))
+	float EliteMultiplier = 1.f;
+
+	/** Multiplier reserved for mini-boss enemy subclasses or source tags. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0.0"))
+	float MiniBossMultiplier = 1.f;
+
+	/** Multiplier used when this enemy's cached source tag indicates a boss source. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold", meta=(ClampMin="0.0"))
+	float BossMultiplier = 1.f;
+
+	/** Optional gold pickup Blueprint class for mesh, beam, label, and pickup FX authoring. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold")
+	TSubclassOf<AAeyerjiGoldPickup> PickupClass;
+
+	/** Controls whether gold is for the credited player or mirrored per player. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold")
+	EItemDropDistributionMode DropOwnershipMode = EItemDropDistributionMode::DropOnlyForInstigator;
+};
+
 /**
  * Native base class for AI-controlled "creep" / enemy pawns.
  * Blueprint children should inherit from this (NOT from ACharacter directly).
@@ -81,6 +130,7 @@ protected:
 
 	/* --------- Death hook (Blueprint-extendable) --------- */
 	virtual void OnDeath_Implementation() override;
+	virtual FAeyerjiDeathStateOptions BuildDeathStateOptionsForOutOfHealth() const override;
 
 	/* ====== DESIGN-TIME LISTS ====== */
 
@@ -168,23 +218,50 @@ public:
 	UFUNCTION(BlueprintPure, Category="Enemy|Scaling")
 	float GetScaledDifficulty() const { return CachedDifficultyScale; }
 
+	/** Frozen reward-quality bias supplied by the run that spawned this enemy. */
+	UFUNCTION(BlueprintPure, Category="Enemy|Scaling")
+	float GetRewardQualityMultiplier() const { return CachedRewardQualityMultiplier; }
+
 	UFUNCTION(BlueprintPure, Category="Enemy|Scaling")
 	FGameplayTag GetScalingSourceTag() const { return CachedScalingSourceTag; }
 
-	void SetScalingSnapshot(int32 InLevel, float InDifficultyScale, const FGameplayTag& InSourceTag);
+	void SetScalingSnapshot(int32 InLevel, float InDifficultyScale, const FGameplayTag& InSourceTag, float InRewardQualityMultiplier = 1.f);
 
 	/** Server-only authoritative normal enemy death reward hook. Returns false when disabled or no loot was spawned. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Enemy|Loot")
 	bool TrySpawnEnemyDeathRewards(AActor* RewardInstigator = nullptr);
+
+	/** Server-only authoritative normal enemy death gold hook. Returns false when disabled or no gold was spawned. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Enemy|Gold")
+	bool TrySpawnEnemyGoldDrop(AActor* RewardInstigator = nullptr);
+
+	/** Assigns the server spawner that owns this enemy while it participates in object pooling. */
+	void SetOwningSpawnerPool(AAeyerjiSpawnerGroup* InSpawner, bool bInPoolManaged);
+
+	/** Returns this enemy to its owning spawner pool after death presentation finishes. */
+	bool TryReturnToOwningSpawnerPool();
+
+	bool IsPoolManagedBySpawner() const { return bPoolManagedBySpawner; }
+
+	/** Resets enemy-only runtime state immediately before a pooled checkout is made live. */
+	void PrepareForPooledActivation();
+
+	/** Clears enemy-only runtime state immediately before a pooled enemy is hidden and parked. */
+	void PrepareForPooledDeactivation();
+
+	/** Blueprint hook for restoring enemy visuals/components after native pooled activation reset. */
+	UFUNCTION(BlueprintImplementableEvent, Category="Enemy|Pooling")
+	void BP_OnPooledEnemyActivated();
+
+	/** Blueprint hook for shutting down enemy visuals/components before the actor is hidden in the pool. */
+	UFUNCTION(BlueprintImplementableEvent, Category="Enemy|Pooling")
+	void BP_OnPooledEnemyDeactivated();
 	
 	bool IsHoverTargetComponent(const UPrimitiveComponent* Component) const;
 
 protected:
 	/** Applies optional crowd-focused animation/rendering throttles for performance testing. */
 	void ApplyCrowdPerformanceSettings();
-
-	/** Sizes the click target capsule from the main capsule (if enabled). */
-	void RefreshClickTargetCapsule();
 
 	void RefreshEnemyHighlightTargets();
 	void UpdateEnemyHighlightState();
@@ -200,31 +277,6 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Highlight")
 	TObjectPtr<UOutlineHighlightComponent> OutlineHighlight;
-
-	/** Extra capsule used for cursor click traces to make enemies easier to select. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Targeting")
-	TObjectPtr<UCapsuleComponent> ClickTargetCapsule;
-
-	UPROPERTY(EditDefaultsOnly, Category="Enemy|Targeting")
-	bool bAutoSizeClickTargetCapsule = false;
-
-	UPROPERTY(EditDefaultsOnly, Category="Enemy|Targeting", meta=(ClampMin="1.0"))
-	float ClickTargetRadiusScale = 1.35f;
-
-	UPROPERTY(EditDefaultsOnly, Category="Enemy|Targeting", meta=(ClampMin="1.0"))
-	float ClickTargetHalfHeightScale = 1.20f;
-
-	/** Manual click-target capsule radius in cm when auto-size is disabled; 0 falls back to the root capsule radius. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Targeting", meta=(ClampMin="0.0", Units="cm", EditCondition="!bAutoSizeClickTargetCapsule", EditConditionHides))
-	float ManualClickTargetRadius = 0.f;
-
-	/** Manual click-target capsule half-height in cm when auto-size is disabled; 0 falls back to the root capsule half-height. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Targeting", meta=(ClampMin="0.0", Units="cm", EditCondition="!bAutoSizeClickTargetCapsule", EditConditionHides))
-	float ManualClickTargetHalfHeight = 0.f;
-
-	/** Manual relative offset applied to the click-target capsule when auto-size is disabled. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Targeting", meta=(EditCondition="!bAutoSizeClickTargetCapsule", EditConditionHides))
-	FVector ManualClickTargetRelativeLocation = FVector::ZeroVector;
 
 	/** Nearby allies inside this radius are alerted when this enemy directly acquires a hostile target. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|AI|Alert", meta=(ClampMin="0.0", Units="cm"))
@@ -263,18 +315,31 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Loot", meta=(EditCondition="bSpawnNormalDeathLoot"))
 	EItemDropDistributionMode DeathLootDropMode = EItemDropDistributionMode::DropOnlyForInstigator;
 
+	/** Optional profile-currency drop rolled independently from normal item loot. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Gold")
+	FAeyerjiGoldDropConfig DeathGoldDropConfig;
+
 	/** Runtime guard against duplicate loot rolls if death is reported by multiple systems. */
 	UPROPERTY(Transient)
 	bool bDeathRewardsRolled = false;
+
+	/** Runtime guard against duplicate gold rolls if death is reported by multiple systems. */
+	UPROPERTY(Transient)
+	bool bDeathGoldRolled = false;
+
+	/** Server spawner responsible for delayed pool return after death finalization. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AAeyerjiSpawnerGroup> OwningSpawnerPool;
+
+	/** True when normal non-player death cleanup should return this pawn to a spawner pool. */
+	UPROPERTY(Transient)
+	bool bPoolManagedBySpawner = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy|Highlight")
 	TArray<TObjectPtr<UPrimitiveComponent>> AdditionalHighlightPrimitives;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy|Highlight", meta=(ClampMin="0", ClampMax="255", DisplayName="Highlight Channel"))
 	int32 HighlightChannel = 20;
-
-	UPROPERTY()
-	int32 HighlightStencilValue_DEPRECATED = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy|Highlight")
 	bool bHighlightOnSpawn = false;
@@ -323,6 +388,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Scaling")
 	float CachedDifficultyScale = 0.f;
 
+	/** Immutable loot-quality bias captured on spawn; item level remains player-derived. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Scaling")
+	float CachedRewardQualityMultiplier = 1.f;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Scaling")
 	FGameplayTag CachedScalingSourceTag;
 
@@ -339,6 +408,9 @@ protected:
 
 	UFUNCTION()
 	void HandleMeshEndCursorOver(UPrimitiveComponent* TouchedComponent);
+
+	UFUNCTION()
+	void HandleEnemyDamageTaken(AActor* VictimActor, AActor* InstigatorActor, float DamageTaken, FGameplayTag DamageType);
 
 private:
 	bool HasNavigableAlertPathTo(const AEnemyParentNative* OtherEnemy) const;

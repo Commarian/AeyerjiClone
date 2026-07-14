@@ -6,6 +6,7 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Enemy/EnemyAIController.h"
 #include "GameFramework/Pawn.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "NavigationSystem.h"
 #include "StateTreeExecutionContext.h"
 
@@ -36,23 +37,26 @@ EStateTreeRunStatus USTT_MoveToLastKnownTargetTask::EnterState(
 		return EStateTreeRunStatus::Failed;
 	}
 
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+	NavParams.SearchRadius = 600.f;
+
+	FVector SafePawnLocation = Pawn->GetActorLocation();
+	if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
+	{
+		EnemyAI->ClearLastKnownTarget();
+		return EStateTreeRunStatus::Failed;
+	}
+
 	CachedDestination = EnemyAI->GetLastKnownTargetLocation();
-	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(Pawn->GetWorld());
-	if (!NavSys)
+	FAeyerjiNavSafetyResult DestinationResult;
+	if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(Pawn, CachedDestination, Pawn, NavParams, DestinationResult))
 	{
 		EnemyAI->ClearLastKnownTarget();
 		return EStateTreeRunStatus::Failed;
 	}
 
-	FNavLocation Projected;
-	const FVector SearchExtents(500.f, 500.f, 1000.f);
-	if (!NavSys->ProjectPointToNavigation(CachedDestination, Projected, SearchExtents))
-	{
-		EnemyAI->ClearLastKnownTarget();
-		return EStateTreeRunStatus::Failed;
-	}
-
-	CachedDestination = Projected.Location;
+	CachedDestination = DestinationResult.NavLocation;
 	if (FVector::Dist2D(Pawn->GetActorLocation(), CachedDestination) <= AcceptableRadius)
 	{
 		EnemyAI->ClearLastKnownTarget();
@@ -76,7 +80,7 @@ EStateTreeRunStatus USTT_MoveToLastKnownTargetTask::EnterState(
 		/*bProjectGoalLocation=*/false,
 		/*bCanStrafe=*/false,
 		/*FilterClass=*/nullptr,
-		/*bAllowPartialPath=*/true);
+		/*bAllowPartialPath=*/false);
 
 	if (!MoveRequestId.IsValid())
 	{
@@ -130,6 +134,15 @@ EStateTreeRunStatus USTT_MoveToLastKnownTargetTask::Tick(FStateTreeExecutionCont
 		|| MoveStatus == EPathFollowingStatus::Paused
 		|| MoveStatus == EPathFollowingStatus::Waiting)
 	{
+		FAeyerjiNavSafetyResolveParams NavParams;
+		NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+		FVector SafePawnLocation = Pawn->GetActorLocation();
+		if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
+		{
+			EnemyAI->ClearLastKnownTarget();
+			return EStateTreeRunStatus::Failed;
+		}
+
 		MoveRequestId = EnemyAI->MoveToLocation(
 			CachedDestination,
 			AcceptableRadius,
@@ -138,7 +151,7 @@ EStateTreeRunStatus USTT_MoveToLastKnownTargetTask::Tick(FStateTreeExecutionCont
 			/*bProjectGoalLocation=*/false,
 			/*bCanStrafe=*/false,
 			/*FilterClass=*/nullptr,
-			/*bAllowPartialPath=*/true);
+			/*bAllowPartialPath=*/false);
 
 		if (!MoveRequestId.IsValid())
 		{

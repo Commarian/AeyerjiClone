@@ -54,8 +54,7 @@ do {                                                                            
 
 #define AJ_LOG(ObjPtr, Fmt, ...) AJ_LOG_VERBOSITY(Log, ObjPtr, Fmt, ##__VA_ARGS__)
 
-// Temporarily surfaced while diagnosing movement input/replication. Revert to VeryVerbose after the issue is isolated.
-#define AJ_LOG_VERY_VERBOSE(ObjPtr, Fmt, ...) AJ_LOG_VERBOSITY(Log, ObjPtr, Fmt, ##__VA_ARGS__)
+#define AJ_LOG_VERY_VERBOSE(ObjPtr, Fmt, ...) AJ_LOG_VERBOSITY(VeryVerbose, ObjPtr, Fmt, ##__VA_ARGS__)
 
 /** Convenience when you have no object context (compiles to STANDALONE). */
 #define AJ_LOG_STATIC(Fmt, ...) AJ_LOG(nullptr, Fmt, ##__VA_ARGS__)

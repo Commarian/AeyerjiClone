@@ -230,7 +230,7 @@ void ApplyMeshOverridesInternal(const TArchetypeData& Data, AEnemyParentNative* 
 	{
 		if (USkeletalMesh* MeshAsset = MeshOverrides.SkeletalMesh.LoadSynchronous())
 		{
-			MeshComp->SetSkeletalMesh(MeshAsset);
+			MeshComp->SetSkinnedAssetAndUpdate(MeshAsset);
 		}
 	}
 

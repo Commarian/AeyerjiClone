@@ -1,0 +1,26 @@
+[
+    {
+        "Name": "AeyerjiAttributeSet.HPMax",
+        "BaseValue": 1000,
+        "MinValue": 1,
+        "MaxValue": 10000000,
+        "DerivedAttributeInfo": "",
+        "bCanStack": false
+    },
+    {
+        "Name": "AeyerjiAttributeSet.HP",
+        "BaseValue": 1000,
+        "MinValue": 0,
+        "MaxValue": 10000000,
+        "DerivedAttributeInfo": "",
+        "bCanStack": false
+    },
+    {
+        "Name": "AeyerjiAttributeSet.Armor",
+        "BaseValue": 0,
+        "MinValue": 0,
+        "MaxValue": 100000,
+        "DerivedAttributeInfo": "",
+        "bCanStack": false
+    }
+]

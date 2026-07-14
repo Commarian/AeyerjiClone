@@ -1,0 +1,102 @@
+Armor Mitigation Notes (Physical Only)
+======================================
+
+What is implemented
+-------------------
+- Physical damage mitigation is handled in C++ by:
+  Source/Aeyerji/Private/GAS/ExecCalc_DamagePhysical.cpp
+- The ExecCalc reads base damage from SetByCaller tag "SetByCaller.Damage.Instant",
+  applies armor-based damage reduction if the effect is tagged as
+  Damage.Type.Physical, and writes the final HP delta.
+- Armor tuning can be supplied via UAeyerjiAttributeTuning (ArmorMitigation);
+  if no tuning asset is set, the hard-coded defaults below are used.
+
+Tags to use
+-----------
+- Damage type tag: Damage.Type.Physical
+  - For data assets, add this as a GameplayEffect asset tag.
+  - For code-driven specs, GA_PrimaryMeleeBasic and GA_PrimaryRangedBasic
+    add this tag dynamically on the outgoing damage spec via
+    UGA_AeyerjiBase::ApplyDamageTypeTagToSpec.
+  - Set DefaultDamageTypeTag on a GameplayAbility to apply a tag to its
+    outgoing damage specs (GravitonPull supports this).
+  - UGE_DamagePhysical is treated as physical by class even if the tag is
+    missing, so armor mitigation still applies for that GE.
+  - The tag is also listed in Config/DefaultGameplayTags.ini for editor visibility.
+- Base damage tag (SetByCaller): SetByCaller.Damage.Instant
+- Armor shred tag (SetByCaller): SetByCaller.ArmorShred
+  - Flat armor reduction before DR (clamped >= 0).
+- Armor penetration tag (SetByCaller): SetByCaller.ArmorPenetration
+  - Percent reduction to DR after it is computed (0..1).
+  - Example: 0.25 reduces DR by 25%.
+  - These tags are listed in Config/DefaultGameplayTags.ini for editor visibility.
+
+Damage sign convention
+----------------------
+- SetByCaller.Damage.Instant should be positive.
+- If a negative value is provided, the ExecCalc logs a warning and uses abs().
+
+Default armor formula (fallback values)
+--------------------------------------
+Defaults are used if UAeyerjiAttributeTuning is not set or not loaded.
+Constants (in ExecCalc_DamagePhysical.cpp):
+- ArmorK = 1000
+- ArmorSoftCap = 1000
+- ArmorTailSlope = 0.00001
+- ArmorTailCap = 0.52
+
+Damage Reduction (DR) from Armor A:
+- If A <= 1000:
+    DR = A / (A + 1000)
+- If A > 1000:
+    DR = 0.5 + (A - 1000) * 0.00001
+    DR is then clamped to a max of 0.52
+
+Final damage:
+  FinalDamage = BaseDamage * (1 - DR)
+
+Examples:
+- A = 0    -> DR = 0.00  -> 100% damage
+- A = 500  -> DR = 0.333 -> 66.7% damage
+- A = 1000 -> DR = 0.50  -> 50% damage
+- A = 1500 -> DR = 0.505 -> 49.5% damage
+- A = 3000 -> DR = 0.52  -> 48% damage (cap)
+
+Where to tune
+-------------
+Primary location (data-driven):
+- UAeyerjiAttributeTuning.ArmorMitigation (set via Project Settings -> Aeyerji -> Stats)
+
+Fallback location (hard-coded defaults):
+- Source/Aeyerji/Private/GAS/ExecCalc_DamagePhysical.cpp
+
+Quick wiring for tests
+----------------------
+- A code-only GE wrapper exists:
+  Source/Aeyerji/Public/GAS/GE_DamagePhysical.h
+  Source/Aeyerji/Private/GAS/GE_DamagePhysical.cpp
+- Primary melee/ranged abilities fall back to this GE if their
+  DamageEffectClass is unset, and they also add the physical tag.
+- For other damage sources, set the damage GE to UGE_DamagePhysical
+  or to another GE that uses UExecCalc_DamagePhysical and includes the
+  Damage.Type.Physical tag.
+
+Additional sources wired
+------------------------
+- GravitonPull (UGA_AGGravitonPull)
+  - Defaults DefaultDamageTypeTag to Damage.Type.Physical.
+  - Falls back to UGE_DamagePhysical if DamageEffectClass is unset.
+- EliteBurningTrailPatch
+  - ApplyPatchDamage now applies a GAS effect using DotEffectClass only.
+  - Burning Trail intentionally does NOT apply Damage.Type.Physical.
+  - Uses DamageSetByCallerTag (defaults to SetByCaller.Damage.PerSecond).
+- SweepingLightBarrier
+  - Uses DamageEffectClass (defaults to UGE_DamagePhysical) when the target has an ASC.
+  - Adds DamageTypeTag (defaults to Damage.Type.Physical) to the outgoing spec.
+  - Uses DamageSetByCallerTag (defaults to SetByCaller.Damage.Instant) to pass the base damage.
+  - Falls back to UGameplayStatics::ApplyDamage if no ASC or spec creation fails.
+
+Non-physical damage
+-------------------
+If Damage.Type.Physical is not present on the effect, armor is ignored.
+Use a different damage tag/GE for elemental or true damage types.

@@ -498,6 +498,27 @@ FGameplayAttribute ResolveJsonAttribute(const FString& AttributeText)
 	return FGameplayAttribute();
 }
 
+bool IsPercentPointImportAttribute(const FGameplayAttribute& Attribute)
+{
+	return Attribute == UAeyerjiAttributeSet::GetCritChanceAttribute()
+		|| Attribute == UAeyerjiAttributeSet::GetAttackDamageVarianceAttribute()
+		|| Attribute == UAeyerjiAttributeSet::GetDodgeChanceAttribute()
+		|| Attribute == UAeyerjiAttributeSet::GetCooldownReductionAttribute();
+}
+
+bool IsPlayerDeferredImportAttribute(const FGameplayAttribute& Attribute)
+{
+	return Attribute == UAeyerjiAttributeSet::GetVisionRangeAttribute()
+		|| Attribute == UAeyerjiAttributeSet::GetProjectilePredictionAmountAttribute();
+}
+
+float NormalizeImportedModifierMagnitude(const FItemStatModifier& Modifier)
+{
+	return IsPercentPointImportAttribute(Modifier.Attribute)
+		? Modifier.Magnitude / 100.f
+		: Modifier.Magnitude;
+}
+
 void ApplyBaseModifiers(const FJsonObject& Object, UItemDefinition& Definition, FItemImportReport& Report, const FString& ItemName)
 {
 	const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
@@ -535,6 +556,34 @@ void ApplyBaseModifiers(const FJsonObject& Object, UItemDefinition& Definition, 
 		if (EntryObject->TryGetNumberField(TEXT("Magnitude"), Magnitude))
 		{
 			Modifier.Magnitude = static_cast<float>(Magnitude);
+		}
+
+		if (Modifier.Op != EItemModOp::Additive)
+		{
+			Report.Warn(FString::Printf(
+				TEXT("%s: BaseModifiers '%s' uses non-additive Op=%d; player equipment runtime currently ignores non-additive stat modifiers."),
+				*ItemName,
+				*AttributeText,
+				static_cast<int32>(Modifier.Op)));
+		}
+
+		if (IsPlayerDeferredImportAttribute(Modifier.Attribute))
+		{
+			Report.Warn(FString::Printf(
+				TEXT("%s: BaseModifiers '%s' is enemy-only/player-deferred and will be ignored by player equipment."),
+				*ItemName,
+				*AttributeText));
+		}
+
+		if (IsPercentPointImportAttribute(Modifier.Attribute))
+		{
+			const float RawMagnitude = Modifier.Magnitude;
+			Report.Warn(FString::Printf(
+				TEXT("%s: BaseModifiers '%s' is authored as percent points; runtime normalizes %.3f -> %.3f."),
+				*ItemName,
+				*AttributeText,
+				RawMagnitude,
+				NormalizeImportedModifierMagnitude(Modifier)));
 		}
 
 		Definition.BaseModifiers.Add(Modifier);

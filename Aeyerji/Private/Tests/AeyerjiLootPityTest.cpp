@@ -141,8 +141,6 @@ bool FAeyerjiLootCorruptionLevelGateTest::RunTest(const FString& Parameters)
 	FLootContext Context;
 	Context.EnemyLevel = 49;
 	Context.PlayerLevel = 49;
-	Context.ItemLevelJitterMin = 0;
-	Context.ItemLevelJitterMax = 0;
 	Context.ForcedItemDefinition = CorruptionDefinition;
 
 	const FLootDropResult Level49Result = LootService->RollLoot(Context);
@@ -162,11 +160,11 @@ bool FAeyerjiLootCorruptionLevelGateTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FAeyerjiLootItemLevelJitterClampsAtMaxTest,
-	"Aeyerji.Loot.ItemLevelJitterClampsAtMax",
+	FAeyerjiLootItemLevelMatchesPlayerLevelTest,
+	"Aeyerji.Loot.ItemLevelMatchesPlayerLevel",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FAeyerjiLootItemLevelJitterClampsAtMaxTest::RunTest(const FString& Parameters)
+bool FAeyerjiLootItemLevelMatchesPlayerLevelTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
 
@@ -181,14 +179,12 @@ bool FAeyerjiLootItemLevelJitterClampsAtMaxTest::RunTest(const FString& Paramete
 	}
 
 	FLootContext Context;
-	Context.EnemyLevel = UAeyerjiDifficultySettings::GetMaxGameplayLevel();
-	Context.PlayerLevel = UAeyerjiDifficultySettings::GetMaxGameplayLevel();
-	Context.ItemLevelJitterMin = 0;
-	Context.ItemLevelJitterMax = 2;
+	Context.EnemyLevel = 12;
+	Context.PlayerLevel = 50;
 	Context.ForcedItemDefinition = NormalDefinition;
 
 	const FLootDropResult Result = LootService->RollLoot(Context);
-	TestEqual(TEXT("Loot item level is clamped to max gameplay level after positive jitter."), Result.ItemLevel, UAeyerjiDifficultySettings::GetMaxGameplayLevel());
+	TestEqual(TEXT("Loot item level matches the resolved player level exactly."), Result.ItemLevel, 50);
 	TestEqual(TEXT("Forced normal definition remains selected."), Result.ItemDefinition.Get(), NormalDefinition);
 	return true;
 }

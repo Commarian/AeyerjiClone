@@ -41,6 +41,13 @@ UGA_PrimaryRangedBasic::UGA_PrimaryRangedBasic()
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	bServerRespectsRemoteAbilityCancellation = true;
 	DefaultDamageTypeTag = AeyerjiTags::DamageType_Physical;
+	DefaultDamageRules.bUseVariance = true;
+	DefaultDamageRules.bCanCrit = true;
+	DefaultDamageRules.bCanBeDodged = true;
+	DefaultDamageRules.bCanLifeSteal = true;
+	DefaultDamageRules.bCanTriggerOnHit = true;
+	DefaultDamageRules.bCanStagger = true;
+	DefaultDamageRules.StaggerMultiplier = 0.5f;
 
 	FGameplayTagContainer Tags = GetAssetTags();
 	Tags.AddTag(AeyerjiTags::Ability_Primary);
@@ -51,6 +58,8 @@ UGA_PrimaryRangedBasic::UGA_PrimaryRangedBasic()
 	ActivationBlockedTags.Reset();
 	ActivationBlockedTags.AddTag(AeyerjiTags::State_Dead);
 	ActivationBlockedTags.AddTag(AeyerjiTags::State_CrowdControl_Stunned);
+	ActivationBlockedTags.AddTag(AeyerjiTags::State_CrowdControl_Staggered);
+	ActivationBlockedTags.AddTag(AeyerjiTags::State_Ability_Casting);
 	ActivationBlockedTags.AddTag(AeyerjiTags::Cooldown_PrimaryAttack);
 
 	if (!DamageSetByCallerTag.IsValid())
@@ -82,6 +91,14 @@ void UGA_PrimaryRangedBasic::ActivateAbility(const FGameplayAbilitySpecHandle Ha
 	if (!ActorInfo || !ActorInfo->AvatarActor.IsValid())
 	{
 		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("ActivateAbility: Missing actor info or avatar. Ending ability."));
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+
+	const UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
+	if (ASC && ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_Casting))
+	{
+		UE_LOG(LogPrimaryRangedGA, Verbose, TEXT("ActivateAbility: blocked while ability cast lock is active."));
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
 		return;
 	}
@@ -184,13 +201,14 @@ void UGA_PrimaryRangedBasic::ApplyCooldown(const FGameplayAbilitySpecHandle Hand
 		return;
 	}
 
-	const FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CooldownGameplayEffectClass, GetAbilityLevel(Handle, ActorInfo));
+	FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CooldownGameplayEffectClass, GetAbilityLevel(Handle, ActorInfo));
 	if (!SpecHandle.IsValid())
 	{
 		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("ApplyCooldown: Failed to build cooldown spec."));
 		return;
 	}
 
+	ApplyResolvedCooldownTagsToSpec(SpecHandle);
 	ApplyGameplayEffectSpecToOwner(Handle, ActorInfo, ActivationInfo, SpecHandle);
 }
 
@@ -572,6 +590,7 @@ bool UGA_PrimaryRangedBasic::BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecH
 	}
 
 	ApplyDamageTypeTagToSpec(OutSpecHandle, DefaultDamageTypeTag);
+	ApplyDefaultDamageRulesToSpec(OutSpecHandle);
 
 	if (DamageSetByCallerTag.IsValid())
 	{

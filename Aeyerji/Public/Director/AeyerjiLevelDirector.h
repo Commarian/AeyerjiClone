@@ -5,27 +5,37 @@
 #include "AeyerjiObjectiveTypes.h"
 #include "Director/AeyerjiEncounterDefinition.h"
 #include "Engine/DataAsset.h"
+#include "Engine/DataTable.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "GameplayTagContainer.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Systems/AeyerjiWorldStateTypes.h"
 #include "Systems/LootService.h"
+#include "Systems/AeyerjiRiftTypes.h"
 #include "AeyerjiLevelDirector.generated.h"
 
 class AAeyerjiSpawnerGroup;
 class AAeyerjiEncounterDirector;
 class AAeyerjiEndRunPortal;
 class AAeyerjiLinkedTeleporter;
+class AAeyerjiRewardPresentationActor;
+class AAeyerjiPlayerController;
+class AAeyerjiPlayerState;
 class UAeyerjiEncounterDirectorDefinition;
+class UAeyerjiAttributeSet;
 class UAeyerjiLevelingComponent;
+class UAbilitySystemComponent;
 class UAeyerjiWorldSpawnProfile;
+struct FOnAttributeChangeData;
+struct FStreamableHandle;
 
 UENUM(BlueprintType)
 enum class EAeyerjiLevelSpawnMode : uint8
 {
 	Sequence UMETA(DisplayName="Sequence"),
 	FixedWorldPopulation UMETA(DisplayName="Fixed World Population"),
+	ProximityEncounterRegions UMETA(DisplayName="Proximity Encounter Regions"),
 	SurvivalRounds UMETA(DisplayName="Survival Rounds")
 };
 
@@ -121,11 +131,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Loot|Advanced", meta=(ToolTip="Optional rarity weights used only when the central loot table does not provide weights."))
 	TMap<EItemRarity, float> BossRarityWeights;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Loot|Advanced", meta=(ToolTip="Minimum item-level jitter around the runtime player level."))
-	int32 BossItemLevelJitterMin = -2;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Loot|Advanced", meta=(DeprecatedProperty, DeprecationMessage="Ignored. Boss loot now uses the resolved character level exactly.", ToolTip="Deprecated: ignored. Boss loot now uses the resolved character level exactly."))
+	int32 BossItemLevelJitterMin = 0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Loot|Advanced", meta=(ToolTip="Maximum item-level jitter around the runtime player level."))
-	int32 BossItemLevelJitterMax = 2;
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Loot|Advanced", meta=(DeprecatedProperty, DeprecationMessage="Ignored. Boss loot now uses the resolved character level exactly.", ToolTip="Deprecated: ignored. Boss loot now uses the resolved character level exactly."))
+	int32 BossItemLevelJitterMax = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Loot|Advanced", meta=(ToolTip="Override for named pity soft start. -1 uses LootService defaults."))
 	int32 BossPitySoftStartOverride = -1;
@@ -182,11 +192,70 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Teleporter", meta=(EditCondition="bUseBossTeleporterEndpointBTransform"))
 	FTransform BossTeleporterEndpointBTransform = FTransform(FRotator::ZeroRotator, FVector(600.f, 0.f, 0.f), FVector::OneVector);
 
+	/** PlayerStart tag used for every player death while the undefeated Rift boss phase is active. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Respawn")
+	FName BossArenaRespawnPlayerStartTag = NAME_None;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Persistence", meta=(TitleProperty="StateTag"))
 	TArray<FAeyerjiPersistentFactWrite> BossDefeatedFacts;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Boss|Persistence", meta=(TitleProperty="StateTag"))
 	TArray<FAeyerjiPersistentFactWrite> UnlockFacts;
+};
+
+/** Loot reward emitted after a survival round clears. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiSurvivalRoundRewardDefinition
+{
+	GENERATED_BODY()
+
+	/** Enables this reward entry. Disabled entries are ignored, allowing per-round overrides to suppress the mission default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward")
+	bool bEnabled = false;
+
+	/** Loot source used to select pools in the global AeyerjiLootTable. This wins over LootContext.SourceTag when set. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward")
+	FGameplayTag SourceTag;
+
+	/** Optional context overrides. Player, levels, world tier, and difficulty are filled from the current run when missing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward")
+	FLootContext LootContext;
+
+	/** Controls how many drops are rolled and any bucket rules such as guaranteed rarities. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward")
+	FLootMultiDropConfig MultiDropConfig;
+
+	/** First round allowed to emit this reward. Use 5 with RewardEveryNRounds=5 for 5/10/15 milestones. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward|Condition", meta=(ClampMin="1"))
+	int32 FirstEligibleRound = 1;
+
+	/** Cadence for this reward after FirstEligibleRound. 1 means every round, 5 means every fifth eligible round. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward|Condition", meta=(ClampMin="1"))
+	int32 RewardEveryNRounds = 1;
+
+	/** Whether the pickup is for the killer/instigator only or distributed to every player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward")
+	EItemDropDistributionMode DropMode = EItemDropDistributionMode::DropOnlyForInstigator;
+
+	/** Distance in front of the player where the reward pickup burst appears. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward", meta=(ClampMin="0.0", Units="cm"))
+	float SpawnDistanceFromPlayer = 180.f;
+
+	/** Height offset applied to the player location before spawning rewards. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward", meta=(Units="cm"))
+	float SpawnHeightOffset = 40.f;
+
+	/** Optional replicated actor/chest that owns rolled loot until Blueprint or interaction releases it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward|Presentation")
+	TSubclassOf<AAeyerjiRewardPresentationActor> PresentationActorClass;
+
+	/** Local offset from the presentation actor used when it releases stored loot. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward|Presentation")
+	FVector LootReleaseOffset = FVector::ZeroVector;
+
+	/** Lifespan applied to the presentation actor after release. Zero leaves cleanup to Blueprint/gameplay. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reward|Presentation", meta=(ClampMin="0.0", Units="s"))
+	float PresentationLifeSpanAfterRelease = 10.f;
 };
 
 /** Designer-authored survival round. LevelDirector resolves these into runtime spawner waves. */
@@ -198,6 +267,10 @@ struct AEYERJI_API FAeyerjiSurvivalRoundDefinition
 	/** Optional label for editor/debugging and Blueprint UI. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival")
 	FText DisplayLabel;
+
+	/** HUD-facing category for this authored round pattern. Boss cadence rounds override this to Boss. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival")
+	EAeyerjiSurvivalRoundType RoundType = EAeyerjiSurvivalRoundType::Normal;
 
 	/** Waves emitted by this round. Uses the same authoring rows as reusable encounter definitions. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(TitleProperty="WaveLabel"))
@@ -218,6 +291,130 @@ struct AEYERJI_API FAeyerjiSurvivalRoundDefinition
 	/** Extra per-round multiplier applied before cycle scaling. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(ClampMin="0.0"))
 	float EnemyCountMultiplier = 1.f;
+
+	/** When true, this round uses RoundClearReward instead of the mission default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Reward")
+	bool bOverrideRoundClearReward = false;
+
+	/** Optional loot reward emitted after this round clears. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Reward", meta=(EditCondition="bOverrideRoundClearReward", EditConditionHides))
+	FAeyerjiSurvivalRoundRewardDefinition RoundClearReward;
+};
+
+/** Flat import row for survival rounds. One table row represents one enemy set inside one wave of one round. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiSurvivalRoundTableRow : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round", meta=(ClampMin="1"))
+	int32 RoundNumber = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round")
+	FText RoundDisplayLabel;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round")
+	EAeyerjiSurvivalRoundType RoundType = EAeyerjiSurvivalRoundType::Normal;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round", meta=(ClampMin="0.0"))
+	float EnemyCountMultiplier = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round")
+	FName RoundStartMessageKey = FName(TEXT("RoundStart"));
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round")
+	FName RoundClearMessageKey = FName(TEXT("RoundClear"));
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Round")
+	FName BossIncomingMessageKey = FName(TEXT("BossIncoming"));
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Reward")
+	bool bOverrideRoundClearReward = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Reward", meta=(EditCondition="bOverrideRoundClearReward", EditConditionHides))
+	FAeyerjiSurvivalRoundRewardDefinition RoundClearReward;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Wave", meta=(ClampMin="1"))
+	int32 WaveNumber = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Wave")
+	FText WaveLabel;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Wave", meta=(ClampMin="0.0"))
+	float PostSpawnDelay = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Enemy", meta=(AllowedClasses="/Script/Engine.Pawn"))
+	TSoftClassPtr<APawn> EnemyClass;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Enemy", meta=(ClampMin="0"))
+	int32 Count = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Enemy", meta=(ClampMin="0.0"))
+	float SpawnInterval = 0.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Enemy")
+	bool bIsElite = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Enemy")
+	bool bIsMiniBoss = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Enemy")
+	bool bIsBoss = false;
+};
+
+/** Optional defendable objective for survival rounds. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiSurvivalDefenseObjectiveDefinition
+{
+	GENERATED_BODY()
+
+	/** Enables the second survival objective: enemies attack this actor until players pull threat. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense")
+	bool bEnabled = false;
+
+	/** Actor tag used to find the placed objective actor in the streamed level. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense", meta=(EditCondition="bEnabled"))
+	FName ObjectiveActorTag = NAME_None;
+
+	/** Ends the run as a failure when the objective reaches zero HP. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense", meta=(EditCondition="bEnabled"))
+	bool bFailRunWhenDestroyed = true;
+
+	/** UI message key published when the objective is first resolved for the active run. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense", meta=(EditCondition="bEnabled"))
+	FName ObjectiveActiveMessageKey = FName(TEXT("DefenseObjectiveActive"));
+
+	/** UI message key published when the objective is destroyed. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense", meta=(EditCondition="bEnabled"))
+	FName ObjectiveDestroyedMessageKey = FName(TEXT("DefenseObjectiveDestroyed"));
+
+	/** Enables one-shot UI warning messages when objective HP crosses the configured health thresholds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense|Messages", meta=(EditCondition="bEnabled"))
+	bool bEnableHealthWarningMessages = true;
+
+	/** Normalized HP thresholds for warning messages, authored from high to low such as 0.75, 0.50, and 0.25. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense|Messages", meta=(EditCondition="bEnabled && bEnableHealthWarningMessages", ClampMin="0.0", ClampMax="1.0"))
+	TArray<float> HealthWarningThresholds = { 0.75f, 0.5f, 0.25f };
+
+	/** Message keys paired by index with HealthWarningThresholds; missing keys fall back to DefenseObjectiveHealthXX, while None suppresses that threshold. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense|Messages", meta=(EditCondition="bEnabled && bEnableHealthWarningMessages"))
+	TArray<FName> HealthWarningMessageKeys = {
+		FName(TEXT("DefenseObjectiveHealth75")),
+		FName(TEXT("DefenseObjectiveHealth50")),
+		FName(TEXT("DefenseObjectiveHealth25"))
+	};
+
+	/** Controls player-vs-objective retargeting for spawned enemies and StateTree conditions. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense", meta=(EditCondition="bEnabled"))
+	FAeyerjiDefenseTargetingSettings TargetingSettings;
+
+	/** Repair menu options validated on the server when a player interacts with the defense objective. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense|Repair", meta=(EditCondition="bEnabled", TitleProperty="OptionId"))
+	TArray<FAeyerjiDefenseRepairOption> RepairOptions = {
+		FAeyerjiDefenseRepairOption(FName(TEXT("Small")), FName(TEXT("DefenseRepairSmall")), 25, 0.f, 0.15f),
+		FAeyerjiDefenseRepairOption(FName(TEXT("Medium")), FName(TEXT("DefenseRepairMedium")), 60, 0.f, 0.40f),
+		FAeyerjiDefenseRepairOption(FName(TEXT("Full")), FName(TEXT("DefenseRepairFull")), 120, 0.f, 1.00f)
+	};
 };
 
 /**
@@ -229,17 +426,25 @@ class AEYERJI_API UAeyerjiSurvivalMissionDefinition : public UPrimaryDataAsset
 	GENERATED_BODY()
 
 public:
-	/** Authored round pattern. Usually five rounds, with the boss spawned after the fifth. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(TitleProperty="DisplayLabel"))
+	/** Primary authored round source. Create this from FAeyerjiSurvivalRoundTableRow and import CSV/JSON rows. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Import", meta=(RequiredAssetDataTags="RowStructure=/Script/Aeyerji.AeyerjiSurvivalRoundTableRow"))
+	TObjectPtr<UDataTable> RoundTable = nullptr;
+
+	/** When a valid RoundTable is assigned, runtime uses imported rows instead of BaseRounds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Import")
+	bool bPreferRoundTable = true;
+
+	/** Legacy fallback loaded from older assets when no valid imported RoundTable rows exist. Not designer-facing. */
+	UPROPERTY()
 	TArray<FAeyerjiSurvivalRoundDefinition> BaseRounds;
 
 	/** Actor tag for the placed spawner group used to execute survival rounds. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival")
 	FName RoundSpawnerActorTag = NAME_None;
 
-	/** Boss cadence for endless loops. Default means every fifth round is a boss round. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(ClampMin="1"))
-	int32 BossEveryNRounds = 5;
+	/** Optional separate boss-round cadence. Zero means bosses are authored directly in survival waves. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(ClampMin="0"))
+	int32 BossEveryNRounds = 0;
 
 	/** Starts the next cycle after a boss kill instead of completing the run. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival")
@@ -253,13 +458,100 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(ClampMin="0.0"))
 	float EnemyCountScalePerCycle = 1.25f;
 
+	/** Blends previous authored round enemy sets into the current round so enemy rosters fade in/out instead of switching abruptly. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Blending")
+	bool bBlendPreviousRoundEnemySets = true;
+
+	/** Blends previous waves inside the same authored round. Use this when one BaseRound contains Wave 1, Wave 2, Wave 3, etc. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Blending")
+	bool bBlendPreviousWaveEnemySets = true;
+
+	/** Previous-round carry weight. 0.8 makes authored round 2 roughly 80% round 1 and 20% round 2. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Blending", meta=(ClampMin="0.0", ClampMax="1.0", EditCondition="bBlendPreviousRoundEnemySets"))
+	float PreviousRoundCarryWeight = 0.8f;
+
+	/** Maximum number of earlier authored rounds allowed to bleed into the current round. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Blending", meta=(ClampMin="1", EditCondition="bBlendPreviousRoundEnemySets"))
+	int32 RoundBlendLookback = 4;
+
+	/** Prevents boss-authored enemy sets from carrying into later non-boss rounds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Blending", meta=(EditCondition="bBlendPreviousRoundEnemySets"))
+	bool bExcludeBossSetsFromRoundBlend = true;
+
+	/** Ensures a newly introduced current-round enemy set gets at least one spawn when blending would otherwise round it to zero. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Blending", meta=(EditCondition="bBlendPreviousRoundEnemySets"))
+	bool bGuaranteeCurrentRoundBlendEntries = true;
+
 	/** Added to the player level used by enemy scaling for every completed cycle. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival", meta=(ClampMin="0"))
 	int32 EnemyLevelBonusPerCycle = 1;
 
+	/** Added to the player level used by enemy scaling for every survival round after round 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Scaling", meta=(ClampMin="0"))
+	int32 EnemyLevelBonusPerRound = 0;
+
+	/** Final HP/HPMax multiplier applied once per round step. 1.10 means round 2 has 10% more health than round 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Scaling", meta=(ClampMin="0.0"))
+	float EnemyHealthMultiplierPerRound = 1.f;
+
+	/** Final AttackDamage/SpellPower multiplier applied once per round step. 1.10 means round 2 has 10% more damage than round 1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Scaling", meta=(ClampMin="0.0"))
+	float EnemyDamageMultiplierPerRound = 1.f;
+
+	/** Reissues aggro commands to all live survival enemies so they keep chasing the active player. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Aggro")
+	bool bReissueAggroWhileActive = true;
+
+	/** Seconds between repeated survival aggro commands. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Aggro", meta=(ClampMin="0.1", EditCondition="bReissueAggroWhileActive", Units="s"))
+	float ReissueAggroIntervalSeconds = 10.f;
+
+	/** Optional defendable static-mesh/GAS actor that survival enemies should attack unless players pull threat. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Defense")
+	FAeyerjiSurvivalDefenseObjectiveDefinition DefenseObjective;
+
+	/** Overrides GA_Death's player respawn delay during this survival mission. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Respawn")
+	bool bOverridePlayerRespawnDelay = false;
+
+	/** Seconds to wait before restarting a player-controlled pawn during survival death. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Respawn", meta=(ClampMin="0.0", EditCondition="bOverridePlayerRespawnDelay", Units="s"))
+	float PlayerRespawnDelaySeconds = 5.f;
+
 	/** Optional boss override. If unset, ZoneRunDefinition.BossDefinition is used. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival")
 	TObjectPtr<UAeyerjiBossDefinition> BossDefinitionOverride = nullptr;
+
+	/** Default loot reward emitted after every cleared survival round unless a round overrides it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Reward")
+	FAeyerjiSurvivalRoundRewardDefinition DefaultRoundClearReward;
+
+	/** Enables per-player between-round upgrade choices after a survival round clears. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Upgrades")
+	bool bEnableRoundUpgradeChoices = true;
+
+	/** Number of weighted options offered after each cleared round. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Upgrades", meta=(ClampMin="1", EditCondition="bEnableRoundUpgradeChoices"))
+	int32 UpgradeChoicesPerOffer = 3;
+
+	/** Seconds players have to choose before missing selections use the first offered option. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Upgrades", meta=(ClampMin="0.0", EditCondition="bEnableRoundUpgradeChoices", Units="s"))
+	float UpgradeChoiceTimeoutSeconds = 20.f;
+
+	/** 
+	 * Weighted pool used to generate between-round survival upgrade offers.
+	 * IMPORTANT: DisplayKey and DescriptionKey must reference rows in 
+	 * Source/Aeyerji/Data/Strings/GlobalStringTable.csv so they can be localized.
+	 * Current starting set (TreeMaxHP, TreeRegen, TreeReflectDamage, PlayerXP) matches the plan.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Survival|Upgrades", meta=(EditCondition="bEnableRoundUpgradeChoices", TitleProperty="OptionId"))
+	TArray<FAeyerjiSurvivalUpgradeOption> RoundUpgradeOptions = {
+		// Keys resolve via GlobalStringTable.csv (see Data/Strings/)
+		FAeyerjiSurvivalUpgradeOption(FName(TEXT("TreeMaxHP")), EAeyerjiSurvivalUpgradeType::TreeMaxHP, FName(TEXT("SurvivalUpgradeTreeMaxHP")), FName(TEXT("SurvivalUpgradeTreeMaxHPDesc")), 100.f, 1.f),
+		FAeyerjiSurvivalUpgradeOption(FName(TEXT("TreeReflectDamage")), EAeyerjiSurvivalUpgradeType::TreeReflectDamage, FName(TEXT("SurvivalUpgradeTreeReflectDamage")), FName(TEXT("SurvivalUpgradeTreeReflectDamageDesc")), 0.10f, 1.f),
+		FAeyerjiSurvivalUpgradeOption(FName(TEXT("TreeRegen")), EAeyerjiSurvivalUpgradeType::TreeRegen, FName(TEXT("SurvivalUpgradeTreeRegen")), FName(TEXT("SurvivalUpgradeTreeRegenDesc")), 5.f, 1.f),
+		FAeyerjiSurvivalUpgradeOption(FName(TEXT("PlayerXP")), EAeyerjiSurvivalUpgradeType::PlayerXP, FName(TEXT("SurvivalUpgradePlayerXP")), FName(TEXT("SurvivalUpgradePlayerXPDesc")), 50.f, 1.f)
+	};
 };
 
 /**
@@ -294,6 +586,22 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run", meta=(ClampMin="0.0", Units="s"))
 	float RunTimeLimitSeconds = 0.f;
+
+	/** Selects whether this zone launches an uncapped Standard Rift or a tier-capped Excursion. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run|Rift")
+	EAeyerjiRiftActivityType RiftActivityType = EAeyerjiRiftActivityType::StandardRift;
+
+	/** Finite ordinary-enemy budget for Standard Rifts. Excursions use their selected DataTable row instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run|Rift", meta=(ClampMin="1"))
+	int32 StandardRiftEnemyBudget = 120;
+
+	/** Weighted objective target for Standard Rifts. Excursions use their selected DataTable row instead. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run|Rift", meta=(ClampMin="1"))
+	int32 StandardRiftProgressTargetPoints = 100;
+
+	/** Maximum anchor distance for Standard Rift proximity and pressure activation. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run|Rift", meta=(ClampMin="0.0", Units="cm"))
+	float StandardRiftActivationDistance = 2500.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Difficulty")
 	bool bResyncEnemyLevelsOnRunStart = true;
@@ -405,6 +713,24 @@ public:
 	void HandleSpawnerCleared(AAeyerjiSpawnerGroup* Spawner);
 
 	/**
+	 * Called whenever a bound spawner removes tracked enemies.
+	 * Survival rounds use this to publish live kill progress to replicated HUD state.
+	 */
+	UFUNCTION()
+	void HandleSpawnerTrackedEnemiesRemoved(AAeyerjiSpawnerGroup* Spawner, int32 RemovedCount);
+
+	/** Handles boss death from either the legacy boss spawner or a boss authored inside a survival wave. */
+	UFUNCTION()
+	void HandleSpawnerBossDefeated(AAeyerjiSpawnerGroup* Spawner, AActor* BossEnemy);
+
+	/**
+	 * Called when a runtime spawner advances into a new wave.
+	 * Survival rounds use this for player-facing wave progress.
+	 */
+	UFUNCTION()
+	void HandleSpawnerWaveStarted(AAeyerjiSpawnerGroup* Spawner, int32 WaveIndex);
+
+	/**
 	 * Overwrites the respawn checkpoint with the provided transform.
 	 * Designers can call this from level scripting to create mid-run respawn anchors.
 	 */
@@ -489,9 +815,82 @@ public:
 	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
 	int32 GetEnemyScalingPlayerLevel() const;
 
+	/** Final health multiplier currently applied to survival round enemies. Normal modes return 1. */
+	UFUNCTION(BlueprintPure, Category="Director|Survival")
+	float GetSurvivalEnemyHealthMultiplier() const { return SurvivalEnemyHealthMultiplier; }
+
+	/** Final damage multiplier currently applied to survival round enemies. Normal modes return 1. */
+	UFUNCTION(BlueprintPure, Category="Director|Survival")
+	float GetSurvivalEnemyDamageMultiplier() const { return SurvivalEnemyDamageMultiplier; }
+
+	/** True while this director owns an active survival-round run. */
+	UFUNCTION(BlueprintPure, Category="Director|Survival")
+	bool IsActiveSurvivalRun() const;
+
+	/** Returns GA_Death's default delay or the survival mission override for player-controlled pawns. */
+	UFUNCTION(BlueprintPure, Category="Director|Survival")
+	float ResolvePlayerRespawnDelaySeconds(float DefaultDelay) const;
+
+	/** Current defendable survival objective, if configured and resolved. */
+	UFUNCTION(BlueprintPure, Category="Director|Survival")
+	AActor* GetSurvivalDefenseObjectiveActor() const { return SurvivalDefenseObjectiveActor.Get(); }
+
+	/** Returns true when survival defense objective behavior is configured for this run. */
+	UFUNCTION(BlueprintPure, Category="Director|Survival")
+	bool IsSurvivalDefenseObjectiveEnabled() const;
+
+	/** Opens the client repair menu for the active defense objective after native interaction validation. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Director|Survival|Defense")
+	void OpenSurvivalDefenseObjectiveRepairMenu(AAeyerjiPlayerController* Controller, AActor* ObjectiveActor) const;
+
+	/** Validates and applies one gold-paid repair option to the active survival defense objective. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Director|Survival|Defense")
+	bool TryRepairSurvivalDefenseObjective(AAeyerjiPlayerController* Controller, AActor* ObjectiveActor, FName OptionId);
+
+	/** Records a player's between-round survival upgrade choice and applies its scaled effect. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Director|Survival|Upgrades")
+	bool SubmitSurvivalUpgradeChoice(AAeyerjiPlayerState* PlayerState, FName OptionId, int32 OfferRevision);
+
 	/** Returns the authoritative world tier currently applied to this run. */
 	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
 	int32 GetEffectiveWorldTier() const { return WorldTier; }
+
+	/** Finds Tier_N in the project-wide Greater Rift DataTable. */
+	const FAeyerjiRiftTierRow* FindRiftTierRow(int32 RiftTier) const;
+
+	/** Freezes server-resolved activity and optional Excursion tier values before StartRun. Authority only. */
+	bool ApplyRiftActivityForNextRun(const FAeyerjiRiftActivitySnapshot& Activity, const FAeyerjiRiftTierRow* TierRow);
+
+	/** Returns the authored activity policy for the active zone. */
+	EAeyerjiRiftActivityType GetRiftActivityType() const { return RiftActivityType; }
+
+	/** Returns the immutable activity-level snapshot used by every Rift enemy in the active run. */
+	UFUNCTION(BlueprintPure, Category="Director|Rift")
+	FAeyerjiRiftActivitySnapshot GetActiveRiftActivity() const { return ActiveRiftActivity; }
+
+	/** Returns the immutable tier-derived monster-power snapshot for the active Rift. */
+	UFUNCTION(BlueprintPure, Category="Director|Rift")
+	FAeyerjiRiftMonsterPowerSnapshot GetActiveRiftMonsterPower() const { return ActiveRiftMonsterPower; }
+
+	/** Returns the selective Rift multiplier for an enemy attribute; utility attributes remain neutral. */
+	float GetRiftAttributeMultiplier(const FGameplayAttribute& Attribute) const;
+
+	/** Returns the frozen Rift loot-quality multiplier, or one outside a Rift. */
+	UFUNCTION(BlueprintPure, Category="Director|Rift")
+	float GetActiveRiftRewardQualityMultiplier() const;
+
+	/** Tagged PlayerStart used for boss-phase player respawns. */
+	UFUNCTION(BlueprintPure, Category="Director|Rift")
+	FName GetBossArenaRespawnPlayerStartTag() const { return BossArenaRespawnPlayerStartTag; }
+
+	/** Validates the director/encounter/boss references required before authority starts a run. */
+	bool ValidateRunStartReadiness(FString& OutReason);
+
+	/** Builds a deterministic one-shot SpawnRegion plan without spawning enemies. */
+	bool PrepareRiftRegionEncounterPlan(int32 RunSerial, int32 RunSeed, int32 ProgressTarget, FString& OutReason);
+
+	/** Stops selecting unused Rift regions; activated queues and living enemies remain valid. */
+	void DisableUnopenedRiftEncounterRegions();
 
 	/** Evaluates the globally tuned enemy level for the supplied player level. */
 	UFUNCTION(BlueprintPure, Category="Director|Difficulty")
@@ -646,6 +1045,47 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
 	FTransform BossTeleporterEndpointBTransform = FTransform(FRotator::ZeroRotator, FVector(600.f, 0.f, 0.f), FVector::OneVector);
 
+	/** PlayerStart tag resolved from the active boss definition for boss-phase respawns. */
+	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
+	FName BossArenaRespawnPlayerStartTag = NAME_None;
+
+	/** Positive while a Greater Rift DataTable row is frozen for the active/next run. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	int32 ActiveRiftTierNumber = 0;
+
+	/** Server-frozen activity policy and level copied from GameState before enemy planning begins. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	FAeyerjiRiftActivitySnapshot ActiveRiftActivity;
+
+	/** True after GameState has accepted and frozen an activity snapshot for the pending/active Rift run. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	bool bHasActiveRiftActivity = false;
+
+	/** Total region-enemy budget copied from the active tier row. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	int32 ActiveRiftEnemyBudget = 0;
+
+	/** Distance from region bounds at which a live run participant can consume that region. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	float ActiveRiftRegionActivationDistance = 2500.f;
+
+	/** Tier-frozen population modifiers consumed by the encounter-anchor planner. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	float ActiveRiftDensityMultiplier = 1.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	float ActiveRiftEliteRateMultiplier = 1.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	float ActiveRiftEncounterSizeMultiplier = 1.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	float ActiveRiftProgressMultiplier = 1.f;
+
+	/** Central monster-power values copied by value so later curve edits cannot rescale this run. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|Resolved")
+	FAeyerjiRiftMonsterPowerSnapshot ActiveRiftMonsterPower;
+
 	/**
 	 * Number of shards the player must collect before the boss gate unlocks.
 	 * Shards are typically awarded by encounters via HandleSpawnerCleared or scripted rewards.
@@ -663,6 +1103,20 @@ public:
 	/** Selects between the classic sequential spawner flow and fixed world population mode. */
 	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
 	EAeyerjiLevelSpawnMode SpawnMode = EAeyerjiLevelSpawnMode::Sequence;
+
+	/** Activity policy copied from ZoneRunDefinition and frozen into GameState when a run begins. */
+	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
+	EAeyerjiRiftActivityType RiftActivityType = EAeyerjiRiftActivityType::StandardRift;
+
+	/** Standard Rift planning values copied from ZoneRunDefinition. */
+	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
+	int32 StandardRiftEnemyBudget = 120;
+
+	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
+	int32 StandardRiftProgressTargetPoints = 100;
+
+	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
+	float StandardRiftActivationDistance = 2500.f;
 
 	/** Controls which objective source should end the run in this level. */
 	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
@@ -764,8 +1218,67 @@ protected:
 	void StartSurvivalRound(int32 RoundNumber);
 	void StartNextSurvivalRound();
 	void StartSurvivalBossRound(int32 RoundNumber);
+	void ScheduleNextSurvivalRound();
+	void BeginSurvivalRoundUpgradeOfferOrScheduleNextRound();
+	void StartSurvivalUpgradeOffer();
+	void FinishSurvivalUpgradeOffer(bool bApplyMissingSelections);
+	void HandleSurvivalUpgradeOfferTimeout();
+	bool BuildSurvivalUpgradeOfferOptions(TArray<FAeyerjiSurvivalUpgradeOption>& OutOptions) const;
+	void CollectActiveSurvivalUpgradePlayers(TArray<AAeyerjiPlayerState*>& OutPlayers) const;
+	bool IsPlayerEligibleForCurrentSurvivalUpgrade(AAeyerjiPlayerState* PlayerState) const;
+	bool HasPlayerSelectedCurrentSurvivalUpgrade(AAeyerjiPlayerState* PlayerState) const;
+	const FAeyerjiSurvivalUpgradeOption* FindCurrentSurvivalUpgradeOption(FName OptionId) const;
+	void ApplySurvivalUpgradeOptionToPlayer(AAeyerjiPlayerState* PlayerState, const FAeyerjiSurvivalUpgradeOption& Option);
+	void ApplySurvivalTreeMaxHealthUpgrade(float DeltaHP);
+	void TickSurvivalDefenseObjectiveRegen();
+	UFUNCTION()
+	void HandleSurvivalDefenseObjectiveDamageTaken(AActor* VictimActor, AActor* InstigatorActor, float DamageTaken, FGameplayTag DamageType);
+	void ApplySurvivalDefenseObjectiveReflect(AActor* Attacker, float DamageTaken, float ReflectFraction) const;
+	void ClearSurvivalUpgradeOfferState();
 	void PublishSurvivalRoundState(EAeyerjiSurvivalRoundPhase Phase, FName MessageKey = NAME_None);
-	bool BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoundDefinition& RoundDefinition, int32 CycleNumber, TArray<FWaveDefinition>& OutWaves, int32& OutEnemyCount) const;
+	void PublishCurrentSurvivalRoundProgress();
+	/** Finds, binds, and publishes the optional placed defense objective for survival runs. */
+	void ResolveSurvivalDefenseObjective();
+	/** Removes objective delegates and clears spawned-enemy objective handoff. */
+	void ClearSurvivalDefenseObjective();
+	/** Pushes the current defense objective and targeting settings to a spawner before activation. */
+	void ApplySurvivalDefenseObjectiveToSpawner(AAeyerjiSpawnerGroup* Spawner, bool bBossRound) const;
+	/** Reads current objective HP from its ASC for replicated HUD state. */
+	float GetSurvivalDefenseObjectiveHealth() const;
+	float GetSurvivalDefenseObjectiveMaxHealth() const;
+	bool IsSurvivalDefenseObjectiveAlive() const;
+	/** Clears one-shot defense objective warning bookkeeping when a new objective is resolved or removed. */
+	void ResetSurvivalDefenseObjectiveHealthWarnings();
+	/** Returns the warning message key to publish for the latest objective HP change, if any. */
+	FName ConsumeSurvivalDefenseObjectiveHealthWarningMessage(const FOnAttributeChangeData& Data);
+	/** Resolves the configured or fallback message key for a health-warning threshold. */
+	FName ResolveSurvivalDefenseObjectiveHealthWarningMessageKey(int32 ThresholdIndex, float Threshold01) const;
+	UFUNCTION()
+	void HandleSurvivalDefenseObjectiveOutOfHealth(AActor* ObjectiveActor, AActor* InstigatorActor, float DamageTaken);
+	void HandleSurvivalDefenseObjectiveHealthChanged(const FOnAttributeChangeData& Data);
+	/** Spawns configured loot rewards for the just-cleared survival round. */
+	void SpawnSurvivalRoundClearReward();
+	/** Resolves the round override or mission default used for the current survival reward. */
+	const FAeyerjiSurvivalRoundRewardDefinition* ResolveSurvivalRoundClearReward() const;
+	/** Returns true when the current survival round satisfies the reward's cadence settings. */
+	bool IsSurvivalRoundRewardEligible(const FAeyerjiSurvivalRoundRewardDefinition& Reward) const;
+	/** Builds a server-authoritative loot context from reward overrides and current run state. */
+	FLootContext BuildSurvivalRewardLootContext(const FAeyerjiSurvivalRoundRewardDefinition& Reward, AActor* PlayerActor) const;
+	/** Chooses a nearby pickup location for round-clear rewards. */
+	FVector GetSurvivalRewardSpawnLocation(const FAeyerjiSurvivalRoundRewardDefinition& Reward, const APawn* PlayerPawn) const;
+	void BuildAuthoredSurvivalRounds(TArray<FAeyerjiSurvivalRoundDefinition>& OutRounds) const;
+	/** Rebuilds the imported/base survival round cache from the current mission definition. */
+	void RebuildAuthoredSurvivalRoundsCache() const;
+	/** Clears cached survival round data and any in-flight preload when the zone definition changes. */
+	void InvalidateSurvivalRuntimeCaches();
+	/** Starts async loading for every soft enemy class referenced by survival rounds. */
+	void BeginSurvivalAssetPreload();
+	/** Retains hard class references after survival enemy class preloading completes. */
+	void HandleSurvivalAssetPreloadComplete();
+	/** Returns true once survival soft class references are loaded or no survival mission exists. */
+	bool AreSurvivalAssetsReady() const;
+	bool BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoundDefinition& RoundDefinition, const TArray<FAeyerjiSurvivalRoundDefinition>& AuthoredRounds, int32 AuthoredRoundIndex, int32 CycleNumber, TArray<FWaveDefinition>& OutWaves, int32& OutEnemyCount) const;
+	int32 CountRuntimeWaveEnemies(const FWaveDefinition& WaveDefinition) const;
 	int32 GetSurvivalCycleForRound(int32 RoundNumber) const;
 	bool IsSurvivalBossRound(int32 RoundNumber) const;
 
@@ -807,6 +1320,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
 	int32 CurrentSurvivalRound = 0;
 
+	UPROPERTY(Transient)
+	int32 LastSurvivalRoundClearRewardSpawnedRound = INDEX_NONE;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
 	int32 CurrentSurvivalCycle = 0;
 
@@ -814,7 +1330,37 @@ protected:
 	int32 CurrentSurvivalRoundEnemyTotal = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	int32 CurrentSurvivalRoundEnemiesKilled = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	int32 CurrentSurvivalWaveIndex = INDEX_NONE;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	int32 CurrentSurvivalWaveCount = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	int32 CurrentSurvivalWaveEnemyTotal = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	FText CurrentSurvivalWaveDisplayLabel;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	bool bCurrentSurvivalWaveContainsBoss = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	int32 CurrentSurvivalWaveEnemiesKilled = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	EAeyerjiSurvivalRoundPhase CurrentSurvivalRoundPhase = EAeyerjiSurvivalRoundPhase::Inactive;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
 	int32 SurvivalEnemyLevelBonus = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	float SurvivalEnemyHealthMultiplier = 1.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	float SurvivalEnemyDamageMultiplier = 1.f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
 	bool bSurvivalBossRoundActive = false;
@@ -822,9 +1368,43 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
 	bool bSurvivalBossDefeatHandled = false;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	TObjectPtr<AActor> SurvivalDefenseObjectiveActor = nullptr;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Director|State")
+	bool bSurvivalDefenseObjectiveDestroyed = false;
+
+	TWeakObjectPtr<UAbilitySystemComponent> CachedSurvivalDefenseObjectiveASC;
+	FDelegateHandle SurvivalDefenseObjectiveHealthChangedHandle;
+	FDelegateHandle SurvivalDefenseObjectiveMaxHealthChangedHandle;
+	TWeakObjectPtr<UAeyerjiAttributeSet> CachedSurvivalDefenseObjectiveAttributeSet;
+
+	/** Fired health-warning threshold indices for the currently resolved survival defense objective. */
+	TSet<int32> FiredSurvivalDefenseObjectiveHealthWarningIndices;
+
 	TWeakObjectPtr<AAeyerjiEncounterDirector> CachedEncounterDirector;
 	TWeakObjectPtr<UAeyerjiLevelingComponent> CachedPlayerLeveling;
 
 	FTimerHandle RunTimerHandle;
+	bool bRunTimerExpiredBroadcast = false;
 	FTimerHandle SurvivalRoundDelayHandle;
+	FTimerHandle SurvivalUpgradeOfferTimeoutHandle;
+	FTimerHandle SurvivalDefenseObjectiveRegenHandle;
+
+	FAeyerjiSurvivalUpgradeOfferState ActiveSurvivalUpgradeOffer;
+	int32 SurvivalUpgradeOfferRevision = 0;
+	TArray<TWeakObjectPtr<AAeyerjiPlayerState>> SurvivalUpgradeEligiblePlayers;
+	TArray<TWeakObjectPtr<AAeyerjiPlayerState>> SurvivalUpgradeSelectedPlayers;
+	float SurvivalDefenseObjectiveReflectFraction = 0.f;
+	float SurvivalDefenseObjectiveRegenPerSecond = 0.f;
+
+	TSharedPtr<FStreamableHandle> SurvivalPreloadHandle;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UClass>> PreloadedSurvivalEnemyClasses;
+
+	mutable TArray<FAeyerjiSurvivalRoundDefinition> CachedAuthoredSurvivalRounds;
+	mutable bool bAuthoredSurvivalRoundsCacheValid = false;
+	bool bSurvivalAssetsReady = false;
+	bool bSurvivalAssetPreloadInProgress = false;
 };

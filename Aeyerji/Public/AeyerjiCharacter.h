@@ -15,7 +15,12 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AeyerjiCharacter.generated.h"
 
 class UAeyerjiPickupFXComponent;
+class UAeyerjiNavSafetyComponent;
+class UAeyerjiCombatCueProfileComponent;
 class UGameplayAbility;
+class UAnimMontage;
+class UNiagaraComponent;
+class UNiagaraSystem;
 
 
 USTRUCT(BlueprintType)
@@ -112,16 +117,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Death", meta = (AutoCreateRefTerm = "Options"))
 	void ApplyDeathState(FAeyerjiDeathStateOptions Options = FAeyerjiDeathStateOptions());
 
-	UE_DEPRECATED(5.4, "Use ApplyDeathState with FAeyerjiDeathStateOptions")
-	void ApplyDeathStateLegacy(bool bDetachAttachments = true, FVector Impulse = FVector::ZeroVector, FVector ImpulseWorldLocation = FVector::ZeroVector, FName ImpulseBoneName = NAME_None)
-	{
-		FAeyerjiDeathStateOptions LegacyOptions;
-		LegacyOptions.bDetachAttachments = bDetachAttachments;
-		LegacyOptions.Impulse = Impulse;
-		LegacyOptions.ImpulseWorldLocation = ImpulseWorldLocation;
-		LegacyOptions.ImpulseBoneName = ImpulseBoneName;
-		ApplyDeathState(LegacyOptions);
-	}
+	/** Restores native death state, collision, movement, and death guards before a pooled pawn is reused. */
+	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Death")
+	void ResetDeathStateForReuse();
 
 	UFUNCTION(BlueprintCallable)
 	void DetachDestroyAttachedActors();
@@ -140,9 +138,41 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|FX")
 	UAeyerjiPickupFXComponent* GetPickupFXComponent() const { return PickupFXComponent; }
 
+	/** Returns the shared nav safety component that tracks and recovers live pawns from off-nav locations. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Navigation")
+	UAeyerjiNavSafetyComponent* GetNavSafetyComponent() const { return NavSafetyComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Combat Cue")
+	UAeyerjiCombatCueProfileComponent* GetCombatCueProfileComponent() const { return CombatCueProfileComponent; }
+
+	/** Plays one-shot ability cosmetics on every client; authority should call this after validation/commit. */
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayAbilityCosmetics(
+		UAnimMontage* Montage,
+		float MontagePlayRate,
+		UNiagaraSystem* NiagaraSystem,
+		FVector NiagaraWorldLocation,
+		FRotator NiagaraWorldRotation,
+		FVector NiagaraScale,
+		bool bAttachNiagaraToMesh,
+		FName NiagaraAttachSocket,
+		FVector NiagaraLocalOffset);
+
+	/** Loads and plays a cast montage locally on each client from a soft path supplied by the authoritative ability. */
+	UFUNCTION(NetMulticast, Reliable)
+	void Multicast_PlayAbilityMontageByPath(FSoftObjectPath MontagePath, float MontagePlayRate);
+
 	/** Returns true while this pawn has the replicated stunned gameplay tag. */
 	UFUNCTION(BlueprintPure, Category = "Aeyerji|Crowd Control")
 	bool IsStunned() const;
+
+	/** Returns true while this pawn has the replicated staggered gameplay tag. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Crowd Control")
+	bool IsStaggered() const;
+
+	/** Returns true while any hard or soft crowd-control gameplay tag is active. */
+	UFUNCTION(BlueprintPure, Category = "Aeyerji|Crowd Control")
+	bool IsCrowdControlled() const;
 
 	/** Cosmetic/UI hook fired when the stun tag count moves between active and inactive. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|Crowd Control")
@@ -164,6 +194,26 @@ protected:
 	/** Plays loot pickup FX directly on the character. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|FX")
 	TObjectPtr<UAeyerjiPickupFXComponent> PickupFXComponent;
+
+	/** Keeps players and enemies recoverable if gameplay moves them off the nav mesh. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|Navigation")
+	TObjectPtr<UAeyerjiNavSafetyComponent> NavSafetyComponent;
+
+	/** Designer-configurable per-target presentation profile for generic combat GameplayCues. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Aeyerji|Combat Cue")
+	TObjectPtr<UAeyerjiCombatCueProfileComponent> CombatCueProfileComponent;
+
+	/** Looping overhead Niagara used while the character is stunned. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aeyerji|Crowd Control|Stun")
+	TSoftObjectPtr<UNiagaraSystem> StunOverheadEffect;
+
+	/** Preferred mesh socket for the stun overhead effect; falls back to the actor root if missing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aeyerji|Crowd Control|Stun")
+	FName StunOverheadSocketName = TEXT("head");
+
+	/** Local offset applied after attaching the stun overhead effect. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aeyerji|Crowd Control|Stun")
+	FVector StunOverheadOffset = FVector(0.f, 0.f, 100.f);
 
 	/** Created as a sub-object so the ASC owns & replicates it cleanly */
 
@@ -205,6 +255,8 @@ protected:
 	void AddStartupAbilities();
 	void BindDeathEvent();
 	void BindCrowdControlEvents();
+	void BindRuntimeAttributeHooks();
+	void UnbindRuntimeAttributeHooks();
 	void EnsurePrimaryAttributeSetRegistered();
 	void RefreshCollisionCapsuleSize();
 	void WarnOnScaledRootCapsule() const;
@@ -212,8 +264,14 @@ protected:
 	/** Native hook fired immediately on the server when HP reaches zero. */
 	virtual void OnDeath_Implementation();
 
+	/** Lets derived classes adjust native death shutdown, e.g. pooled enemies avoiding corpse cleanup. */
+	virtual FAeyerjiDeathStateOptions BuildDeathStateOptionsForOutOfHealth() const;
+
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastApplyDeathState(FAeyerjiDeathStateOptions Options);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastResetDeathStateForReuse();
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastOnDeath(AActor* Killer, float DamageTaken);
@@ -229,14 +287,30 @@ private:
 	void HandleOutOfHealth(AActor* Victim, AActor* Killer, float DamageTaken);
 
 	void ApplyDeathStateInternal(const FAeyerjiDeathStateOptions& Options);
+	void ResetDeathStateForReuseInternal();
+	void CancelActiveAbilitiesForDeath();
 	void HandleStunTagChanged(const FGameplayTag CallbackTag, int32 NewCount);
+	void HandleStaggerTagChanged(const FGameplayTag CallbackTag, int32 NewCount);
+	void HandleRunSpeedChanged(const FOnAttributeChangeData& Data);
+	void ApplyRunSpeedFromAttribute();
 	void ApplyStunState();
 	void ClearStunState();
+	void ApplyStaggerState();
+	void ClearStaggerState();
+	void ClearCrowdControlStateForDeath();
+	void CancelActiveAbilitiesForCrowdControl();
+	void StopAIForCrowdControl();
+	void SendCurrentCrowdControlStateTreeEvent();
+	void SendAICrowdControlStateTreeEvent(const FGameplayTag& EventTag);
+	void SpawnStunOverheadEffect();
+	void DestroyStunOverheadEffect();
 	void RemoveFloatingWidgets();
 	void StopRegeneration();
 	void StopMovementAndInput();
 	void ShutdownControllerLogic();
 	void DisableDeathCollision();
+	void EnableLivingCollision();
+	void RestartControllerLogicForReuse();
 	void RegisterCorpseForCleanup();
 	void UnregisterCorpseFromCleanup();
 
@@ -244,11 +318,22 @@ private:
 	bool bHasAppliedDeathState = false;
 	bool bCorpseRegisteredForCleanup = false;
 	bool bStunStateApplied = false;
+	bool bStaggerStateApplied = false;
 	bool bStunShouldRestoreMovement = false;
 	bool bStunIgnoredControllerInput = false;
+	bool bPreStunUseControllerRotationYaw = false;
+	bool bPreStunOrientRotationToMovement = false;
+	bool bPreStunUseControllerDesiredRotation = false;
+	bool bWarnedStunOverheadEffectLoadFailure = false;
 	TEnumAsByte<EMovementMode> PreStunMovementMode = MOVE_Walking;
 	uint8 PreStunCustomMovementMode = 0;
 	FDelegateHandle StunTagChangedHandle;
+	FDelegateHandle StaggerTagChangedHandle;
+	FDelegateHandle RunSpeedChangedHandle;
+	TWeakObjectPtr<UAbilitySystemComponent> RuntimeAttributeHookASC;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraComponent> ActiveStunOverheadEffect = nullptr;
 
 	static TArray<TWeakObjectPtr<AAeyerjiCharacter>> CorpsesPendingCleanup;
 

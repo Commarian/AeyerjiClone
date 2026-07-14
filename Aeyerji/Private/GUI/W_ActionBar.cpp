@@ -2,9 +2,11 @@
 
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemInterface.h"
+#include "ActiveGameplayEffectHandle.h"
 #include "Abilities/AeyerjiAbilityTuning.h"
 #include "Abilities/GameplayAbility.h"
 #include "GameplayAbilitySpec.h"
+#include "AeyerjiGameplayTags.h"
 #include "Aeyerji/AeyerjiPlayerController.h"
 #include "GUI/W_ActionSlotNative.h"
 #include "GUI/W_AbilitySelectionNative.h"
@@ -13,13 +15,27 @@
 #include "Components/HorizontalBox.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/GameInstance.h"
+#include "GameplayEffect.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
 #include "Kismet/GameplayStatics.h"
 #include "Logging/AeyerjiLog.h"
 #include "GameFramework/Pawn.h"
+#include "HAL/IConsoleManager.h"
 
 namespace
 {
+	TAutoConsoleVariable<int32> CVarAeyerjiDrawAbilityCastDebug(
+		TEXT("aeyerji.Ability.DrawCastDebug"),
+		0,
+		TEXT("Draws the table-defined ability cast shape from the action bar when set to 1."),
+		ECVF_Default);
+
+	TAutoConsoleVariable<int32> CVarAeyerjiActionBarCooldownDebug(
+		TEXT("aeyerji.ActionBar.CooldownDebug"),
+		0,
+		TEXT("Logs action bar cooldown lookup details when set to 1."),
+		ECVF_Default);
+
 	void ShowActionBarDebugMessage(const UObject* WorldContextObject, const FString& Message)
 	{
 		if (GEngine && IsValid(WorldContextObject))
@@ -27,11 +43,66 @@ namespace
 			GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Red, Message);
 		}
 	}
+
+	FGameplayTagContainer CollectAbilityTags(const FGameplayTagContainer& Tags)
+	{
+		FGameplayTagContainer AbilityTags;
+		for (const FGameplayTag& Tag : Tags)
+		{
+			if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
+			{
+				AbilityTags.AddTag(Tag);
+			}
+		}
+		return AbilityTags;
+	}
+
+	void AppendCooldownTagsFromTuning(const UObject* WorldContextObject, const FGameplayTagContainer& AbilityTags, FGameplayTagContainer& OutCooldownTags)
+	{
+		UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr;
+		UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+		const UAeyerjiAbilityTuningSubsystem* Tuning = GameInstance ? GameInstance->GetSubsystem<UAeyerjiAbilityTuningSubsystem>() : nullptr;
+		if (!Tuning)
+		{
+			return;
+		}
+
+		for (const FGameplayTag& Tag : AbilityTags)
+		{
+			if (const FAeyerjiAbilityTableRow* Row = Tuning->FindAbilityRow(Tag))
+			{
+				if (Row->CooldownTag.IsValid())
+				{
+					OutCooldownTags.AddTag(Row->CooldownTag);
+				}
+			}
+		}
+	}
+
+	const FGameplayAbilitySpec* FindSpecByAbilityTags(UAbilitySystemComponent& AbilitySystem, const FGameplayTagContainer& AbilityTags)
+	{
+		if (AbilityTags.IsEmpty())
+		{
+			return nullptr;
+		}
+
+		for (const FGameplayAbilitySpec& Spec : AbilitySystem.GetActivatableAbilities())
+		{
+			const UGameplayAbility* AbilityCDO = Spec.Ability;
+			if (AbilityCDO && AbilityCDO->GetAssetTags().HasAny(AbilityTags))
+			{
+				return &Spec;
+			}
+		}
+
+		return nullptr;
+	}
 }
 
 UW_ActionBar::UW_ActionBar(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+	DefaultPotionAbilityTag = AeyerjiTags::Ability_Potion_Heal;
 }
 
 
@@ -56,6 +127,7 @@ void UW_ActionBar::Refresh(const TArray<FAeyerjiAbilitySlot> &NewBar)
 		{
 			SlotWidget->StoredSlotIndex = Idx;
 			SlotWidget->StoredSlotData = NewBar[Idx];
+			SlotWidget->bIsPotionSlot = AeyerjiAbilitySlotUtils::IsPotionSlotIndex(Idx, IncomingSize);
 			SlotWidget->ClearCooldownDisplay();
 
 			if (NewBar[Idx].Icon)
@@ -154,6 +226,12 @@ void UW_ActionBar::NativeConstruct()
 	UpdateCooldowns();
 }
 
+void UW_ActionBar::NativeDestruct()
+{
+	UnbindCooldownEffectDelegates();
+	Super::NativeDestruct();
+}
+
 void UW_ActionBar::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
@@ -216,7 +294,10 @@ void UW_ActionBar::HandleSlotRightClicked(int32 Index)
 	}
 
 	PickerInstance->EditingSlotIndex = Index;
+	PickerInstance->SetPotionSlotContext(
+		AeyerjiAbilitySlotUtils::IsPotionSlotIndex(Index, SlotsBox ? SlotsBox->GetChildrenCount() : 0));
 	PickerInstance->SetAbilitySystemForTooltip(ResolveAbilitySystem());
+	PickerInstance->RebuildAbilityGrid();
 }
 
 bool UW_ActionBar::ActivateSlotByIndex(int32 SlotIndex)
@@ -385,16 +466,15 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 	FAeyerjiAbilitySlot EffectiveSlotData = SlotData;
 	if (!EffectiveSlotData.Tag.IsEmpty())
 	{
-		FGameplayTagContainer NormalizedTags;
+		FGameplayTagContainer AbilityTags;
 		for (const FGameplayTag& Tag : EffectiveSlotData.Tag)
 		{
-			const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
-			if (NormalizedTag.IsValid())
+			if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
 			{
-				NormalizedTags.AddTag(NormalizedTag);
+				AbilityTags.AddTag(Tag);
 			}
 		}
-		EffectiveSlotData.Tag = NormalizedTags;
+		EffectiveSlotData.Tag = AbilityTags;
 	}
 
 	if (!EffectiveSlotData.Tag.IsValid() && !EffectiveSlotData.Class)
@@ -460,6 +540,7 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 		return false;
 	}
 
+	const bool bClientWorld = GetWorld() && GetWorld()->GetNetMode() == NM_Client;
 	if (EffectiveSlotData.Tag.IsValid())
 	{
 		int32 MatchingSpecs = 0;
@@ -478,6 +559,16 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 			}
 
 			++MatchingSpecs;
+			const bool bServerAuthoritativeAbility =
+				AbilityCDO->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::ServerOnly
+				|| AbilityCDO->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::ServerInitiated;
+			if (bClientWorld && bServerAuthoritativeAbility)
+			{
+				AJ_LOG(this, TEXT("ExecuteAbilitySlot() Tag match %s uses server-authoritative activation; skipping local CanActivate precheck."),
+					*GetNameSafe(AbilityCDO));
+				continue;
+			}
+
 			FGameplayTagContainer FailureTags;
 			const bool bCanActivate = ActorInfo
 				? AbilityCDO->CanActivateAbility(Spec.Handle, ActorInfo, nullptr, nullptr, &FailureTags)
@@ -544,6 +635,7 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 				if (NetMode == NM_Client)
 				{
 					DrawAbilityDebugShape(EffectiveSlotData);
+					PC->BeginLocalAbilityCastInputLock(PC->GetLocalAbilityCastInputLockDuration());
 					PC->Server_ActivateAbilityInstant(EffectiveSlotData);
 					return true;
 				}
@@ -614,16 +706,15 @@ void UW_ActionBar::HandleAbilityPicked(int32 SlotIndex, FAeyerjiAbilitySlot Pick
 
 	if (!Pick.Tag.IsEmpty())
 	{
-		FGameplayTagContainer NormalizedTags;
+		FGameplayTagContainer AbilityTags;
 		for (const FGameplayTag& Tag : Pick.Tag)
 		{
-			const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
-			if (NormalizedTag.IsValid())
+			if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
 			{
-				NormalizedTags.AddTag(NormalizedTag);
+				AbilityTags.AddTag(Tag);
 			}
 		}
-		Pick.Tag = NormalizedTags;
+		Pick.Tag = AbilityTags;
 	}
 
 	if (APlayerController *PC = GetOwningPlayer())
@@ -694,7 +785,7 @@ void UW_ActionBar::UpdateCooldowns()
 bool UW_ActionBar::TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem, UW_ActionSlotNative& SlotWidget) const
 {
 	const FAeyerjiAbilitySlot& SlotData = SlotWidget.StoredSlotData;
-	if (!SlotData.Class)
+	if (SlotData.Tag.IsEmpty() && !SlotData.Class)
 	{
 		//AJ_LOG(this, TEXT("TryUpdateSlotCooldown SlotIndex=%d no ability class"), SlotWidget.StoredSlotIndex);
 		return false;
@@ -702,19 +793,53 @@ bool UW_ActionBar::TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem,
 
 	float TimeRemaining = 0.f;
 	float TotalDuration = 0.f;
+	FGameplayTagContainer CooldownTags;
+	const FGameplayTagContainer SlotAbilityTags = CollectAbilityTags(SlotData.Tag);
+	const FGameplayAbilitySpec* MatchingSpec = nullptr;
 
-	if (FGameplayAbilitySpec* Spec = AbilitySystem.FindAbilitySpecFromClass(SlotData.Class))
+	if (SlotData.Class)
 	{
-		if (Spec->Ability)
+		MatchingSpec = AbilitySystem.FindAbilitySpecFromClass(SlotData.Class);
+	}
+
+	if (!MatchingSpec)
+	{
+		MatchingSpec = FindSpecByAbilityTags(AbilitySystem, SlotAbilityTags);
+	}
+
+	AppendCooldownTagsFromTuning(this, SlotAbilityTags, CooldownTags);
+
+	if (MatchingSpec && MatchingSpec->Ability)
+	{
+		AppendCooldownTagsFromTuning(this, MatchingSpec->Ability->GetAssetTags(), CooldownTags);
+
+		if (const FGameplayTagContainer* AbilityCooldownTags = MatchingSpec->Ability->GetCooldownTags())
+		{
+			CooldownTags.AppendTags(*AbilityCooldownTags);
+		}
+	}
+
+	if (!CooldownTags.IsEmpty())
+	{
+		const FGameplayEffectQuery Query = FGameplayEffectQuery::MakeQuery_MatchAnyOwningTags(CooldownTags);
+		const TArray<TPair<float, float>> RemainingAndDuration = AbilitySystem.GetActiveEffectsTimeRemainingAndDuration(Query);
+		for (const TPair<float, float>& Pair : RemainingAndDuration)
+		{
+			if (Pair.Key > TimeRemaining)
+			{
+				TimeRemaining = Pair.Key;
+				TotalDuration = Pair.Value;
+			}
+		}
+	}
+
+	if (TimeRemaining <= KINDA_SMALL_NUMBER && MatchingSpec)
+	{
+		if (MatchingSpec->Ability)
 		{
 			if (const FGameplayAbilityActorInfo* ActorInfo = AbilitySystem.AbilityActorInfo.Get())
 			{
-				Spec->Ability->GetCooldownTimeRemainingAndDuration(Spec->Handle, ActorInfo, TimeRemaining, TotalDuration);
-				// AJ_LOG(this, TEXT("TryUpdateSlotCooldown SlotIndex=%d Class=%s Remaining=%.2f Total=%.2f"),
-				// 	SlotWidget.StoredSlotIndex,
-				// 	*GetNameSafe(SlotData.Class),
-				// 	TimeRemaining,
-				// 	TotalDuration);
+				MatchingSpec->Ability->GetCooldownTimeRemainingAndDuration(MatchingSpec->Handle, ActorInfo, TimeRemaining, TotalDuration);
 			}
 			else
 			{
@@ -730,11 +855,33 @@ bool UW_ActionBar::TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem,
 				*GetNameSafe(SlotData.Class));
 		}
 	}
-	else
+	else if (CVarAeyerjiActionBarCooldownDebug.GetValueOnGameThread() > 0 && !MatchingSpec)
 	{
-		AJ_LOG(this, TEXT("TryUpdateSlotCooldown SlotIndex=%d no spec found for class %s"),
+		AJ_LOG(this, TEXT("[CooldownDebug] Slot=%d no spec found ASC=%s Class=%s SlotTags=[%s]"),
 			SlotWidget.StoredSlotIndex,
-			*GetNameSafe(SlotData.Class));
+			*GetNameSafe(&AbilitySystem),
+			*GetNameSafe(SlotData.Class),
+			*SlotAbilityTags.ToStringSimple());
+	}
+
+	if (CVarAeyerjiActionBarCooldownDebug.GetValueOnGameThread() > 0)
+	{
+		FGameplayTagContainer ResolvedAbilityTags;
+		if (MatchingSpec && MatchingSpec->Ability)
+		{
+			ResolvedAbilityTags = MatchingSpec->Ability->GetAssetTags();
+		}
+
+		AJ_LOG(this, TEXT("[CooldownDebug] Slot=%d ASC=%s Class=%s Ability=%s SlotTags=[%s] AbilityTags=[%s] CooldownTags=[%s] Remaining=%.3f Duration=%.3f"),
+			SlotWidget.StoredSlotIndex,
+			*GetNameSafe(&AbilitySystem),
+			*GetNameSafe(SlotData.Class),
+			MatchingSpec ? *GetNameSafe(MatchingSpec->Ability) : TEXT("None"),
+			*SlotAbilityTags.ToStringSimple(),
+			*ResolvedAbilityTags.ToStringSimple(),
+			*CooldownTags.ToStringSimple(),
+			TimeRemaining,
+			TotalDuration);
 	}
 
 	const bool bValidDuration = TotalDuration > KINDA_SMALL_NUMBER;
@@ -755,6 +902,11 @@ bool UW_ActionBar::TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem,
 
 void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) const
 {
+	if (CVarAeyerjiDrawAbilityCastDebug.GetValueOnGameThread() <= 0)
+	{
+		return;
+	}
+
 	UWorld* World = GetWorld();
 	APawn* Pawn = CachedPS ? CachedPS->GetPawn() : nullptr;
 	if (!World || !Pawn || SlotData.Tag.IsEmpty())
@@ -762,7 +914,8 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 		return;
 	}
 
-	const FAeyerjiAbilityTableRow* Row = nullptr;
+	FAeyerjiAbilityResolvedConfig Config;
+	bool bHasConfig = false;
 
 	if (UGameInstance* GameInstance = GetGameInstance())
 	{
@@ -770,11 +923,10 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 		{
 			for (const FGameplayTag& Tag : SlotData.Tag)
 			{
-				const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
-				if (NormalizedTag.IsValid())
+				if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
 				{
-					Row = Tuning->FindAbilityRow(NormalizedTag);
-					if (Row)
+					bHasConfig = Tuning->ResolveAbilityConfig(Tag, FMath::Max(1, SlotData.Level), Config);
+					if (bHasConfig)
 					{
 						break;
 					}
@@ -783,24 +935,7 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 		}
 	}
 
-	if (!Row)
-	{
-		const UDataTable* Table = UAeyerjiAbilityTuningSubsystem::ResolveConfiguredTable();
-		for (const FGameplayTag& Tag : SlotData.Tag)
-		{
-			const FGameplayTag NormalizedTag = UAeyerjiAbilityTuningSubsystem::NormalizeAbilityTag(Tag);
-			if (NormalizedTag.IsValid())
-			{
-				Row = UAeyerjiAbilityTuningSubsystem::FindAbilityRowInTable(Table, NormalizedTag);
-				if (Row)
-				{
-					break;
-				}
-			}
-		}
-	}
-
-	if (!Row)
+	if (!bHasConfig)
 	{
 		return;
 	}
@@ -810,14 +945,14 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 	constexpr float LifeTime = 1.5f;
 	constexpr float Thickness = 2.f;
 
-	switch (Row->Shape)
+	switch (Config.Shape)
 	{
 	case EAeyerjiAbilityTargetShape::OwnerCone:
 	{
-		const float Range = FMath::Max3(Row->MaxRange, Row->Radius, Row->PreviewRange);
+		const float Range = FMath::Max3(Config.MaxRange, Config.Radius, Config.PreviewRange);
 		if (Range > KINDA_SMALL_NUMBER)
 		{
-			const float HalfAngleRadians = FMath::DegreesToRadians(FMath::Clamp(Row->ArcAngleDegrees * 0.5f, 1.f, 179.f));
+			const float HalfAngleRadians = FMath::DegreesToRadians(FMath::Clamp(Config.ArcAngleDegrees * 0.5f, 1.f, 179.f));
 			DrawDebugCone(World, Origin, Forward, Range, HalfAngleRadians, HalfAngleRadians, 32, FColor::Orange, false, LifeTime, 0, Thickness);
 		}
 		break;
@@ -825,7 +960,7 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 	case EAeyerjiAbilityTargetShape::OwnerRadius:
 	case EAeyerjiAbilityTargetShape::GroundRadius:
 	{
-		const float Radius = Row->Radius > KINDA_SMALL_NUMBER ? Row->Radius : Row->PreviewRange;
+		const float Radius = Config.Radius > KINDA_SMALL_NUMBER ? Config.Radius : Config.PreviewRange;
 		if (Radius > KINDA_SMALL_NUMBER)
 		{
 			DrawDebugSphere(World, Origin, Radius, 48, FColor::Cyan, false, LifeTime, 0, Thickness);
@@ -835,7 +970,7 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 	case EAeyerjiAbilityTargetShape::SingleActor:
 	default:
 	{
-		const float Range = Row->MaxRange > KINDA_SMALL_NUMBER ? Row->MaxRange : Row->PreviewRange;
+		const float Range = Config.MaxRange > KINDA_SMALL_NUMBER ? Config.MaxRange : Config.PreviewRange;
 		const FVector End = Origin + Forward * FMath::Max(100.f, Range);
 		DrawDebugLine(World, Origin, End, FColor::Yellow, false, LifeTime, 0, Thickness);
 		DrawDebugSphere(World, End, 50.f, 16, FColor::Yellow, false, LifeTime, 0, Thickness);
@@ -846,11 +981,6 @@ void UW_ActionBar::DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) co
 
 UAbilitySystemComponent* UW_ActionBar::ResolveAbilitySystem()
 {
-	if (CachedAbilitySystem.IsValid())
-	{
-		return CachedAbilitySystem.Get();
-	}
-
 	APawn* PawnToQuery = nullptr;
 
 	if (CachedPS)
@@ -866,8 +996,21 @@ UAbilitySystemComponent* UW_ActionBar::ResolveAbilitySystem()
 		}
 	}
 
+	if (CachedAbilitySystem.IsValid())
+	{
+		if (!PawnToQuery || !CachedPawn.IsValid() || CachedPawn.Get() == PawnToQuery)
+		{
+			BindCooldownEffectDelegates(*CachedAbilitySystem.Get());
+			return CachedAbilitySystem.Get();
+		}
+
+		UnbindCooldownEffectDelegates();
+		CachedAbilitySystem.Reset();
+	}
+
 	if (PawnToQuery && (!CachedPawn.IsValid() || CachedPawn.Get() != PawnToQuery))
 	{
+		UnbindCooldownEffectDelegates();
 		CachedPawn = PawnToQuery;
 		CachedAbilitySystem.Reset();
 	}
@@ -879,6 +1022,7 @@ UAbilitySystemComponent* UW_ActionBar::ResolveAbilitySystem()
 			if (UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent())
 			{
 				CachedAbilitySystem = ASC;
+				BindCooldownEffectDelegates(*ASC);
 				return ASC;
 			}
 		}
@@ -888,8 +1032,61 @@ UAbilitySystemComponent* UW_ActionBar::ResolveAbilitySystem()
 	return nullptr;
 }
 
+void UW_ActionBar::BindCooldownEffectDelegates(UAbilitySystemComponent& AbilitySystem)
+{
+	if (CooldownEffectAddedHandle.IsValid() || CooldownEffectRemovedHandle.IsValid())
+	{
+		return;
+	}
+
+	CooldownEffectAddedHandle = AbilitySystem.OnActiveGameplayEffectAddedDelegateToSelf.AddUObject(
+		this,
+		&UW_ActionBar::HandleActiveGameplayEffectAdded);
+	CooldownEffectRemovedHandle = AbilitySystem.OnAnyGameplayEffectRemovedDelegate().AddUObject(
+		this,
+		&UW_ActionBar::HandleAnyGameplayEffectRemoved);
+}
+
+void UW_ActionBar::UnbindCooldownEffectDelegates()
+{
+	if (UAbilitySystemComponent* AbilitySystem = CachedAbilitySystem.Get())
+	{
+		if (CooldownEffectAddedHandle.IsValid())
+		{
+			AbilitySystem->OnActiveGameplayEffectAddedDelegateToSelf.Remove(CooldownEffectAddedHandle);
+		}
+
+		if (CooldownEffectRemovedHandle.IsValid())
+		{
+			AbilitySystem->OnAnyGameplayEffectRemovedDelegate().Remove(CooldownEffectRemovedHandle);
+		}
+	}
+
+	CooldownEffectAddedHandle.Reset();
+	CooldownEffectRemovedHandle.Reset();
+}
+
+void UW_ActionBar::HandleActiveGameplayEffectAdded(UAbilitySystemComponent* TargetAbilitySystem, const FGameplayEffectSpec& Spec, FActiveGameplayEffectHandle Handle)
+{
+	(void)TargetAbilitySystem;
+	(void)Spec;
+	(void)Handle;
+
+	CooldownTickAccumulator = CooldownTickInterval;
+	UpdateCooldowns();
+}
+
+void UW_ActionBar::HandleAnyGameplayEffectRemoved(const FActiveGameplayEffect& ActiveEffect)
+{
+	(void)ActiveEffect;
+
+	CooldownTickAccumulator = CooldownTickInterval;
+	UpdateCooldowns();
+}
+
 void UW_ActionBar::ResetCachedAbilitySystem()
 {
+	UnbindCooldownEffectDelegates();
 	CachedAbilitySystem.Reset();
 	CachedPawn.Reset();
 }
@@ -919,7 +1116,7 @@ bool UW_ActionBar::IsDefaultPotionSlotConfigured() const
 
 bool UW_ActionBar::IsAbilitySlotEmpty(const FAeyerjiAbilitySlot& SlotData) const
 {
-	return SlotData.Tag.IsEmpty() && SlotData.Class == nullptr && SlotData.SavedAbilityClass.IsNull();
+	return AeyerjiAbilitySlotUtils::IsAbilitySlotEmpty(SlotData);
 }
 
 UW_ActionSlotNative* UW_ActionBar::ResolvePotionSlotWidget()
@@ -955,17 +1152,7 @@ int32 UW_ActionBar::ResolvePotionSlotIndex()
 		return INDEX_NONE;
 	}
 
-	if (UW_ActionSlotNative* SlotWidget = ResolvePotionSlotWidget())
-	{
-		if (SlotWidget->StoredSlotIndex != INDEX_NONE)
-		{
-			return SlotWidget->StoredSlotIndex;
-		}
-
-		return SlotsBox->GetChildIndex(SlotWidget);
-	}
-
-	return INDEX_NONE;
+	return AeyerjiAbilitySlotUtils::GetPotionSlotIndex(SlotsBox->GetChildrenCount());
 }
 
 void UW_ActionBar::EnsureDefaultPotionSlot(const TArray<FAeyerjiAbilitySlot>& NewBar)
@@ -981,11 +1168,6 @@ void UW_ActionBar::EnsureDefaultPotionSlot(const TArray<FAeyerjiAbilitySlot>& Ne
 	}
 
 	if (!CachedPS->IsProfileLoadApplied())
-	{
-		return;
-	}
-
-	if (!IsDefaultPotionSlotConfigured())
 	{
 		return;
 	}
@@ -1010,7 +1192,31 @@ void UW_ActionBar::EnsureDefaultPotionSlot(const TArray<FAeyerjiAbilitySlot>& Ne
 	}
 
 	bApplyingDefaultPotionSlot = true;
-	FAeyerjiAbilitySlot NormalizedDefaultPotionSlot = DefaultPotionSlot;
+	FAeyerjiAbilitySlot NormalizedDefaultPotionSlot;
+	bool bBuiltPotionSlot = false;
+
+	if (DefaultPotionAbilityTag.IsValid())
+	{
+		if (UGameInstance* GameInstance = GetGameInstance())
+		{
+			if (const UAeyerjiAbilityTuningSubsystem* TuningSubsystem = GameInstance->GetSubsystem<UAeyerjiAbilityTuningSubsystem>())
+			{
+				bBuiltPotionSlot = TuningSubsystem->BuildAbilitySlot(DefaultPotionAbilityTag, NormalizedDefaultPotionSlot);
+			}
+		}
+	}
+
+	if (!bBuiltPotionSlot)
+	{
+		if (!IsDefaultPotionSlotConfigured())
+		{
+			bApplyingDefaultPotionSlot = false;
+			return;
+		}
+
+		NormalizedDefaultPotionSlot = DefaultPotionSlot;
+	}
+
 	NormalizedDefaultPotionSlot.CaptureStableReferences();
 	NormalizedDefaultPotionSlot.ResolveSavedReferences();
 	CachedPS->Server_SetActionBarSlot(PotionSlotIndex, NormalizedDefaultPotionSlot);

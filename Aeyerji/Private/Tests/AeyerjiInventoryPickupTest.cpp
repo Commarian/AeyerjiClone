@@ -2,6 +2,10 @@
 
 #include "Misc/AutomationTest.h"
 
+#include "AbilitySystemComponent.h"
+#include "Attributes/GE_Regen_Periodic.h"
+#include "Attributes/AeyerjiAttributeSet.h"
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Items/InventoryComponent.h"
@@ -13,6 +17,29 @@ namespace
 	UAeyerjiInventoryComponent* MakeTestInventory(UObject* Outer)
 	{
 		AActor* Owner = NewObject<AActor>(Outer);
+		UAeyerjiInventoryComponent* Inventory = NewObject<UAeyerjiInventoryComponent>(Owner);
+		Owner->AddInstanceComponent(Inventory);
+		Inventory->SetGridDimensions(4, 4);
+		return Inventory;
+	}
+
+	UAeyerjiInventoryComponent* MakeTestInventoryWithASC(UObject* Outer, UAbilitySystemComponent*& OutASC)
+	{
+		AActor* Owner = GWorld
+			? GWorld->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity)
+			: NewObject<AActor>(Outer);
+		Owner->SetFlags(RF_Transient);
+		OutASC = NewObject<UAbilitySystemComponent>(Owner);
+		Owner->AddInstanceComponent(OutASC);
+		if (Owner->GetWorld())
+		{
+			OutASC->RegisterComponent();
+		}
+
+		UAeyerjiAttributeSet* AttributeSet = NewObject<UAeyerjiAttributeSet>(OutASC);
+		OutASC->AddAttributeSetSubobject(AttributeSet);
+		OutASC->InitAbilityActorInfo(Owner, Owner);
+
 		UAeyerjiInventoryComponent* Inventory = NewObject<UAeyerjiInventoryComponent>(Owner);
 		Owner->AddInstanceComponent(Inventory);
 		Inventory->SetGridDimensions(4, 4);
@@ -133,6 +160,50 @@ bool FAeyerjiInventoryLegacySnapshotLoadTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiInventorySaveDataAttributeSanitizerTest,
+	"Aeyerji.Inventory.SaveDataAttributeSanitizer",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiInventorySaveDataAttributeSanitizerTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FItemStatModifier ValidModifier;
+	ValidModifier.Attribute = UAeyerjiAttributeSet::GetAttackDamageAttribute();
+	ValidModifier.Op = EItemModOp::Additive;
+	ValidModifier.Magnitude = 10.f;
+
+	FItemStatModifier InvalidModifier;
+	InvalidModifier.Op = EItemModOp::Additive;
+	InvalidModifier.Magnitude = 99.f;
+
+	FRolledAffix RolledAffix;
+	RolledAffix.AffixId = TEXT("Automation_InvalidAttribute");
+	RolledAffix.FinalModifiers.Add(InvalidModifier);
+	RolledAffix.FinalModifiers.Add(ValidModifier);
+
+	FInventoryItemSnapshot Snapshot;
+	Snapshot.ItemId = FGuid::NewGuid();
+	Snapshot.FinalAggregatedModifiers.Add(ValidModifier);
+	Snapshot.FinalAggregatedModifiers.Add(InvalidModifier);
+	Snapshot.RolledAffixes.Add(RolledAffix);
+
+	FAeyerjiInventorySaveData SaveData;
+	SaveData.ItemSnapshots.Add(Snapshot);
+
+	const int32 RemovedCount = UAeyerjiInventoryComponent::SanitizeSaveDataAttributes(SaveData);
+	TestEqual(TEXT("Invalid aggregate and rolled-affix attributes are removed."), RemovedCount, 2);
+	TestEqual(TEXT("Aggregate modifiers keep the valid attribute."), SaveData.ItemSnapshots[0].FinalAggregatedModifiers.Num(), 1);
+	TestEqual(TEXT("Rolled affix modifiers keep the valid attribute."), SaveData.ItemSnapshots[0].RolledAffixes[0].FinalModifiers.Num(), 1);
+	TestTrue(TEXT("Valid aggregate attribute is preserved."),
+		SaveData.ItemSnapshots[0].FinalAggregatedModifiers[0].Attribute == UAeyerjiAttributeSet::GetAttackDamageAttribute());
+	TestTrue(TEXT("Valid rolled affix attribute is preserved."),
+		SaveData.ItemSnapshots[0].RolledAffixes[0].FinalModifiers[0].Attribute == UAeyerjiAttributeSet::GetAttackDamageAttribute());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAeyerjiInventorySlotUnlockThresholdTest,
 	"Aeyerji.Inventory.SlotUnlockThresholds",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -172,8 +243,8 @@ bool FAeyerjiInventorySlotUnlockThresholdTest::RunTest(const FString& Parameters
 	TestEqual(TEXT("Legacy four-slot component defaults still unlock five normal slots at level 40."), Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Assault), 5);
 
 	Inventory->SetAutomationOwnerLevelForInventoryRules(50);
-	TestEqual(TEXT("Corruption slots become visible at level 50."), Inventory->GetVisibleEquipmentSlotCount(EEquipmentSlot::Corruption), 2);
-	TestEqual(TEXT("Corruption unlocks two slots at level 50."), Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption), 2);
+	TestEqual(TEXT("Corruption slots become visible at level 50."), Inventory->GetVisibleEquipmentSlotCount(EEquipmentSlot::Corruption), 3);
+	TestEqual(TEXT("Corruption unlocks three slots at level 50."), Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption), 3);
 
 	return true;
 }
@@ -189,17 +260,21 @@ bool FAeyerjiInventoryNormalLaneCompatibilityTest::RunTest(const FString& Parame
 
 	UAeyerjiInventoryComponent* Inventory = MakeTestInventory(GetTransientPackage());
 	Inventory->SetAutomationOwnerLevelForInventoryRules(10);
-	UItemDefinition* Definition = MakeTestDefinition(Inventory, EItemCategory::Assault);
+	UItemDefinition* AssaultDefinition = MakeTestDefinition(Inventory, EItemCategory::Assault);
+	UItemDefinition* GuardDefinition = MakeTestDefinition(Inventory, EItemCategory::Guard);
+	UItemDefinition* FlowDefinition = MakeTestDefinition(Inventory, EItemCategory::Flow);
 	TestNotNull(TEXT("Inventory component can be created."), Inventory);
-	TestNotNull(TEXT("Normal definition can be created."), Definition);
-	if (!Inventory || !Definition)
+	TestNotNull(TEXT("Assault definition can be created."), AssaultDefinition);
+	TestNotNull(TEXT("Guard definition can be created."), GuardDefinition);
+	TestNotNull(TEXT("Flow definition can be created."), FlowDefinition);
+	if (!Inventory || !AssaultDefinition || !GuardDefinition || !FlowDefinition)
 	{
 		return false;
 	}
 
-	UAeyerjiItemInstance* AssaultItem = MakeTestItem(Inventory, Definition, 1);
-	UAeyerjiItemInstance* GuardItem = MakeTestItem(Inventory, Definition, 1);
-	UAeyerjiItemInstance* FlowItem = MakeTestItem(Inventory, Definition, 1);
+	UAeyerjiItemInstance* AssaultItem = MakeTestItem(Inventory, AssaultDefinition, 1);
+	UAeyerjiItemInstance* GuardItem = MakeTestItem(Inventory, GuardDefinition, 1);
+	UAeyerjiItemInstance* FlowItem = MakeTestItem(Inventory, FlowDefinition, 1);
 	Inventory->AddItemInstance(AssaultItem, true);
 	Inventory->AddItemInstance(GuardItem, true);
 	Inventory->AddItemInstance(FlowItem, true);
@@ -211,6 +286,9 @@ bool FAeyerjiInventoryNormalLaneCompatibilityTest::RunTest(const FString& Parame
 	TestNotNull(TEXT("Normal item equips in Assault."), Inventory->GetEquipped(EEquipmentSlot::Assault, 0));
 	TestNotNull(TEXT("Normal item equips in Guard."), Inventory->GetEquipped(EEquipmentSlot::Guard, 0));
 	TestNotNull(TEXT("Normal item equips in Flow."), Inventory->GetEquipped(EEquipmentSlot::Flow, 0));
+	TestFalse(TEXT("Assault item cannot equip in Guard."), Inventory->CanEquipItemInSlot(AssaultItem, EEquipmentSlot::Guard, 0));
+	TestFalse(TEXT("Guard item cannot equip in Flow."), Inventory->CanEquipItemInSlot(GuardItem, EEquipmentSlot::Flow, 0));
+	TestFalse(TEXT("Flow item cannot equip in Assault."), Inventory->CanEquipItemInSlot(FlowItem, EEquipmentSlot::Assault, 0));
 	TestFalse(TEXT("Normal item cannot equip in Corruption."), Inventory->CanEquipItemInSlot(AssaultItem, EEquipmentSlot::Corruption, 0));
 
 	return true;
@@ -248,7 +326,7 @@ bool FAeyerjiInventoryCorruptionUnlockTest::RunTest(const FString& Parameters)
 	TestNull(TEXT("Corruption item remains unequipped below level 50."), Inventory->GetEquipped(EEquipmentSlot::Corruption, 0));
 
 	Inventory->SetAutomationOwnerLevelForInventoryRules(50);
-	TestEqual(TEXT("Exactly two Corruption slots unlock at level 50."), Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption), 2);
+	TestEqual(TEXT("Exactly three Corruption slots unlock at level 50."), Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption), 3);
 	TestTrue(TEXT("Corruption item can equip in slot 0 at level 50."), Inventory->CanEquipItemInSlot(First, EEquipmentSlot::Corruption, 0));
 	TestFalse(TEXT("Corruption item cannot equip in normal lane."), Inventory->CanEquipItemInSlot(First, EEquipmentSlot::Assault, 0));
 
@@ -258,8 +336,155 @@ bool FAeyerjiInventoryCorruptionUnlockTest::RunTest(const FString& Parameters)
 
 	TestNotNull(TEXT("Corruption slot 0 is occupied."), Inventory->GetEquipped(EEquipmentSlot::Corruption, 0));
 	TestNotNull(TEXT("Corruption slot 1 is occupied."), Inventory->GetEquipped(EEquipmentSlot::Corruption, 1));
-	TestNull(TEXT("No third Corruption slot is available."), Inventory->GetEquipped(EEquipmentSlot::Corruption, 2));
+	TestNotNull(TEXT("Corruption slot 2 is occupied."), Inventory->GetEquipped(EEquipmentSlot::Corruption, 2));
 
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiInventoryEquipmentStatContributionTest,
+	"Aeyerji.Inventory.EquipmentStatContributions",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiInventoryEquipmentStatContributionTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	UAbilitySystemComponent* ASC = nullptr;
+	UAeyerjiInventoryComponent* Inventory = MakeTestInventoryWithASC(GetTransientPackage(), ASC);
+	Inventory->SetAutomationOwnerLevelForInventoryRules(50);
+	UItemDefinition* Definition = MakeTestDefinition(Inventory, EItemCategory::Assault);
+	TestNotNull(TEXT("Inventory component can be created."), Inventory);
+	TestNotNull(TEXT("ASC can be created."), ASC);
+	TestNotNull(TEXT("Definition can be created."), Definition);
+	if (!Inventory || !ASC || !Definition)
+	{
+		return false;
+	}
+
+	FItemStatModifier DamageModifier;
+	DamageModifier.Attribute = UAeyerjiAttributeSet::GetAttackDamageAttribute();
+	DamageModifier.Op = EItemModOp::Additive;
+	DamageModifier.Magnitude = 10.f;
+	Definition->BaseModifiers.Add(DamageModifier);
+
+	FItemStatModifier CritModifier;
+	CritModifier.Attribute = UAeyerjiAttributeSet::GetCritChanceAttribute();
+	CritModifier.Op = EItemModOp::Additive;
+	CritModifier.Magnitude = 100.f;
+	Definition->BaseModifiers.Add(CritModifier);
+
+	FItemStatModifier EnemyOnlyModifier;
+	EnemyOnlyModifier.Attribute = UAeyerjiAttributeSet::GetVisionRangeAttribute();
+	EnemyOnlyModifier.Op = EItemModOp::Additive;
+	EnemyOnlyModifier.Magnitude = 500.f;
+	Definition->BaseModifiers.Add(EnemyOnlyModifier);
+
+	UAeyerjiItemInstance* Item = MakeTestItem(Inventory, Definition, 1);
+	Item->RebuildAggregation();
+	Inventory->AddItemInstance(Item, true);
+
+	const float BaselineDamage = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackDamageAttribute());
+	const float BaselineCrit = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetCritChanceAttribute());
+	const float BaselineVision = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetVisionRangeAttribute());
+
+	Inventory->Server_EquipItem(Item->UniqueId, EEquipmentSlot::Assault, 0);
+	TestTrue(TEXT("AttackDamage contribution applies once."),
+		FMath::IsNearlyEqual(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackDamageAttribute()), BaselineDamage + 10.f));
+	TestTrue(TEXT("CritChance raw 100 normalizes to 1.0."),
+		FMath::IsNearlyEqual(Inventory->GetCurrentEquipmentStatContribution(UAeyerjiAttributeSet::GetCritChanceAttribute()), 1.f));
+	TestTrue(TEXT("Enemy-only VisionRange is ignored by player equipment."),
+		FMath::IsNearlyEqual(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetVisionRangeAttribute()), BaselineVision));
+
+	Inventory->Server_UnequipSlot(EEquipmentSlot::Assault, 0);
+	TestTrue(TEXT("AttackDamage returns to baseline after unequip."),
+		FMath::IsNearlyEqual(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetAttackDamageAttribute()), BaselineDamage));
+	TestTrue(TEXT("CritChance returns to baseline after unequip."),
+		FMath::IsNearlyEqual(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetCritChanceAttribute()), BaselineCrit));
+
+	if (AActor* TestOwner = Inventory->GetOwner(); TestOwner && TestOwner->GetWorld())
+	{
+		TestOwner->Destroy();
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiInventoryEquipmentEffectLifecycleTest,
+	"Aeyerji.Inventory.EquipmentEffectLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiInventoryEquipmentEffectLifecycleTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	UAbilitySystemComponent* ASC = nullptr;
+	UAeyerjiInventoryComponent* Inventory = MakeTestInventoryWithASC(GetTransientPackage(), ASC);
+	Inventory->SetAutomationOwnerLevelForInventoryRules(50);
+	UItemDefinition* Definition = MakeTestDefinition(Inventory, EItemCategory::Assault);
+	TestNotNull(TEXT("Inventory component can be created."), Inventory);
+	TestNotNull(TEXT("ASC can be created."), ASC);
+	TestNotNull(TEXT("Definition can be created."), Definition);
+	if (!Inventory || !ASC || !Definition)
+	{
+		return false;
+	}
+
+	FItemGrantedEffect PersistentEffect;
+	PersistentEffect.EffectClass = UGE_Regen_Periodic::StaticClass();
+	PersistentEffect.EffectLevel = 1.f;
+	Definition->GrantedEffects.Add(PersistentEffect);
+
+	UAeyerjiItemInstance* FirstItem = MakeTestItem(Inventory, Definition, 1);
+	UAeyerjiItemInstance* ReplacementItem = MakeTestItem(Inventory, Definition, 1);
+	FirstItem->RebuildAggregation();
+	ReplacementItem->RebuildAggregation();
+	Inventory->AddItemInstance(FirstItem, true);
+	Inventory->AddItemInstance(ReplacementItem, true);
+
+	auto CountActiveEffects = [](const UAbilitySystemComponent* AbilitySystem)
+	{
+		return AbilitySystem
+			? AbilitySystem->GetActiveEffects(FGameplayEffectQuery()).Num()
+			: 0;
+	};
+
+	Inventory->Server_EquipItem(FirstItem->UniqueId, EEquipmentSlot::Assault, 0);
+	TestEqual(TEXT("Equipping applies one persistent granted effect."), CountActiveEffects(ASC), 1);
+	Inventory->Server_EquipItem(FirstItem->UniqueId, EEquipmentSlot::Assault, 0);
+	TestEqual(TEXT("Re-equipping the same item cannot duplicate its effect."), CountActiveEffects(ASC), 1);
+
+	Inventory->Server_EquipItem(ReplacementItem->UniqueId, EEquipmentSlot::Assault, 0);
+	TestEqual(TEXT("Replacement removes the prior effect and applies one new effect."), CountActiveEffects(ASC), 1);
+	TestEqual(TEXT("Replacement occupies the requested slot."),
+		Inventory->GetEquipped(EEquipmentSlot::Assault, 0), ReplacementItem);
+
+	const FAeyerjiInventorySaveData SavedInventory = Inventory->BuildSaveData();
+	UAbilitySystemComponent* ReconnectedASC = nullptr;
+	UAeyerjiInventoryComponent* ReconnectedInventory = MakeTestInventoryWithASC(GetTransientPackage(), ReconnectedASC);
+	ReconnectedInventory->SetAutomationOwnerLevelForInventoryRules(50);
+	ReconnectedInventory->ApplySaveData(SavedInventory);
+	TestEqual(TEXT("Reconnect hydration restores one equipped effect."), CountActiveEffects(ReconnectedASC), 1);
+	TestEqual(TEXT("Reconnect hydration does not duplicate item ownership."),
+		ReconnectedInventory->BuildSaveData().ItemSnapshots.Num(), 2);
+
+	ReconnectedInventory->ApplySaveData(SavedInventory);
+	TestEqual(TEXT("Repeated hydration cleans old handles before restoring effects."), CountActiveEffects(ReconnectedASC), 1);
+	TestEqual(TEXT("Repeated hydration cannot duplicate items."),
+		ReconnectedInventory->BuildSaveData().ItemSnapshots.Num(), 2);
+
+	ReconnectedInventory->Server_UnequipSlot(EEquipmentSlot::Assault, 0);
+	TestEqual(TEXT("Unequip removes the persistent granted effect."), CountActiveEffects(ReconnectedASC), 0);
+
+	if (AActor* Owner = Inventory->GetOwner(); Owner && Owner->GetWorld())
+	{
+		Owner->Destroy();
+	}
+	if (AActor* Owner = ReconnectedInventory->GetOwner(); Owner && Owner->GetWorld())
+	{
+		Owner->Destroy();
+	}
 	return true;
 }
 

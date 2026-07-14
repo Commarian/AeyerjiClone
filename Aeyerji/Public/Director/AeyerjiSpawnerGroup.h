@@ -4,9 +4,12 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Controller.h"
+#include "GameplayAbilitySpec.h"
 #include "GameplayEffectTypes.h"
 #include "GameplayTagContainer.h"
 #include "Delegates/Delegate.h"
+#include "UObject/ObjectKey.h"
+#include "AeyerjiObjectiveTypes.h"
 #include "Enemy/EnemyScalingTable.h"
 #include "AeyerjiSpawnerGroup.generated.h"
 
@@ -14,14 +17,19 @@ class UBoxComponent;
 class UPrimitiveComponent;
 class AAeyerjiEncounterDirector;
 class AAeyerjiLevelDirector;
+class AAeyerjiSpawnRegion;
 class UAeyerjiGameplayEventSubsystem;
 class AController;
 class APawn;
 class UAeyerjiEncounterDefinition;
+class UNiagaraComponent;
 class UNiagaraSystem;
 class UGameplayEffect;
 class UGameplayAbility;
 class UAbilitySystemComponent;
+class APlayerStart;
+class UDataTable;
+struct FStreamableHandle;
 struct FGameplayEventData;
 
 USTRUCT(BlueprintType)
@@ -81,6 +89,10 @@ struct AEYERJI_API FEnemySet
 	/** How many of this enemy to spawn in this set. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0"))
 	int32 Count = 0;
+
+	/** Weighted Greater Rift progress granted only when a registered enemy actually dies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn|Rift", meta=(ClampMin="1"))
+	int32 ProgressPoints = 1;
 
 	/** Time between spawns of this set. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(ClampMin="0.0"))
@@ -198,7 +210,81 @@ struct AEYERJI_API FSpawnerAggroSettings
 	/** Acceptance radius for the MoveTo command when issuing MoveTo commands. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aggro", meta=(ClampMin="0.0", EditCondition="bIssueMoveCommand"))
 	float MoveAcceptanceRadius = 150.f;
+
+	/** Reissues focus/MoveTo commands while an encounter is active so survival enemies keep chasing their target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aggro", meta=(EditCondition="bEnableAggro"))
+	bool bReissueAggroWhileActive = true;
+
+	/** Seconds between repeated aggro commands. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aggro", meta=(ClampMin="0.1", EditCondition="bEnableAggro && bReissueAggroWhileActive", Units="s"))
+	float ReissueAggroIntervalSeconds = 10.f;
 };
+
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiEnemyPoolSettings
+{
+	GENERATED_BODY()
+
+	/** Enables spawner-owned pooling for enemies spawned or registered through this spawner. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling")
+	bool bEnablePooling = false;
+
+	/** Maximum inactive actors kept per class/archetype/elite key before overflow actors are destroyed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling", meta=(ClampMin="0"))
+	int32 MaxInactivePerPoolKey = 12;
+
+	/** Prewarms configured enemy sets while world-flow loading is active. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling")
+	bool bPrewarmDuringWorldFlowLoading = true;
+
+	/** Maximum number of fresh inactive actors created by one prewarm call. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling", meta=(ClampMin="1"))
+	int32 PrewarmPerTick = 4;
+
+	/** Relative location from this spawner where inactive pooled enemies are hidden and parked. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling")
+	FVector PoolParkingOffset = FVector(0.f, 0.f, -5000.f);
+};
+
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiEnemyPoolKey
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pooling")
+	TSubclassOf<APawn> EnemyClass = nullptr;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pooling")
+	FGameplayTag EnemyArchetypeTag;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pooling")
+	bool bIsElite = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pooling")
+	bool bIsMiniBoss = false;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Pooling")
+	bool bIsBoss = false;
+
+	bool operator==(const FAeyerjiEnemyPoolKey& Other) const
+	{
+		return EnemyClass == Other.EnemyClass
+			&& EnemyArchetypeTag == Other.EnemyArchetypeTag
+			&& bIsElite == Other.bIsElite
+			&& bIsMiniBoss == Other.bIsMiniBoss
+			&& bIsBoss == Other.bIsBoss;
+	}
+};
+
+FORCEINLINE uint32 GetTypeHash(const FAeyerjiEnemyPoolKey& Key)
+{
+	uint32 Hash = GetTypeHash(Key.EnemyClass.Get());
+	Hash = HashCombine(Hash, GetTypeHash(Key.EnemyArchetypeTag));
+	Hash = HashCombine(Hash, GetTypeHash(static_cast<uint8>(Key.bIsElite)));
+	Hash = HashCombine(Hash, GetTypeHash(static_cast<uint8>(Key.bIsMiniBoss)));
+	Hash = HashCombine(Hash, GetTypeHash(static_cast<uint8>(Key.bIsBoss)));
+	return Hash;
+}
 
 UENUM(BlueprintType)
 enum class EAeyerjiSpawnPointMode : uint8
@@ -208,9 +294,27 @@ enum class EAeyerjiSpawnPointMode : uint8
 	Symmetrical UMETA(DisplayName="Symmetrical")
 };
 
+USTRUCT()
+struct AEYERJI_API FCachedAeyerjiSpawnRegion
+{
+	GENERATED_BODY()
+
+	/** Region actor sampled for survival/world spawn placement while this cache is valid. */
+	UPROPERTY()
+	TObjectPtr<AAeyerjiSpawnRegion> Region = nullptr;
+
+	/** Cached world bounds so each spawn does not ask the region actor to recompute them. */
+	FBox Bounds;
+
+	/** Authored region weight; values <= 0 are excluded when the cache is built. */
+	float Weight = 0.f;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpawnerClearedSignature, class AAeyerjiSpawnerGroup*, Spawner);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpawnerStartedSignature, class AAeyerjiSpawnerGroup*, Spawner);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FSpawnerBossDefeatedSignature, class AAeyerjiSpawnerGroup*, Spawner, AActor*, BossEnemy);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FSpawnerTrackedEnemiesRemovedSignature, class AAeyerjiSpawnerGroup*, Spawner, int32, RemovedCount);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FSpawnerWaveStartedSignature, class AAeyerjiSpawnerGroup*, Spawner, int32, WaveIndex);
 
 /**
  * Mechanical spawn executor for one encounter room.
@@ -271,6 +375,39 @@ public:
 	                           AController* ActivationController = nullptr,
 	                           bool bSkipRandomEliteResolution = false);
 
+	/**
+	 * Spawns or reuses an enemy actor from this spawner, then registers it for scaling, elite setup, aggro, and progress.
+	 * This is the pooled path used by BPFL when a valid spawner is supplied.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Spawner|Pooling", meta=(AutoCreateRefTerm="SpawnTransform"))
+	APawn* SpawnRegisteredEnemyFromSet(const FEnemySet& EnemySet,
+	                                    const FTransform& SpawnTransform,
+	                                    AActor* SpawnOwner = nullptr,
+	                                    APawn* InstigatorPawn = nullptr,
+	                                    bool bApplyEliteSettings = true,
+	                                    bool bApplyAggro = true,
+	                                    bool bAutoActivate = true,
+	                                    bool bAutoActivateOnlyIfNoWaves = true,
+	                                    AActor* ActivationInstigator = nullptr,
+	                                    AController* ActivationController = nullptr,
+	                                    bool bSkipRandomEliteResolution = false);
+
+	/** Returns a dead pooled enemy to its inactive hidden state; non-pooled enemies return false and should be destroyed. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Spawner|Pooling")
+	bool ReturnEnemyToPool(APawn* EnemyPawn);
+
+	/** Destroys inactive pooled actors and clears runtime bookkeeping. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Spawner|Pooling")
+	void ReleaseEnemyPool(bool bDestroyInactiveEnemies = true);
+
+	/** Returns the total number of inactive enemies currently retained by this spawner. */
+	UFUNCTION(BlueprintPure, Category="Spawner|Pooling")
+	int32 GetInactivePooledEnemyCount() const;
+
+	/** Pre-creates inactive pooled enemies for the supplied sets, respecting MaxInactivePerPoolKey and PrewarmPerTick. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Spawner|Pooling")
+	void PrewarmPoolForEnemySets(const TArray<FEnemySet>& EnemySets, int32 DesiredCountPerSet = 1);
+
 	/** True once all waves are complete and no tracked enemies remain. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	bool IsCleared() const { return bCleared; }
@@ -278,6 +415,26 @@ public:
 	/** True while this encounter is currently active and has not yet cleared. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	bool IsActive() const { return bActive; }
+
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Number of accepted inactive-to-active transitions; used to prove simultaneous overlaps dedupe. */
+	int32 GetAutomationActivationCount() const { return AutomationActivationCount; }
+#endif
+
+	/** Configures this common executor for server-owned region spawns and permanent nearest-player pursuit. */
+	void ConfigureAsRiftPopulationExecutor(AAeyerjiLevelDirector* InLevelDirector);
+
+	/** Assigns the defendable survival target pushed to spawned AI controllers. */
+	UFUNCTION(BlueprintCallable, Category="Spawner|Aggro")
+	void ConfigureDefenseObjectiveTarget(AActor* ObjectiveActor, const FAeyerjiDefenseTargetingSettings& TargetingSettings);
+
+	/** Clears the defendable survival target from this spawner and tracked enemies. */
+	UFUNCTION(BlueprintCallable, Category="Spawner|Aggro")
+	void ClearDefenseObjectiveTarget();
+
+	/** Returns the current defendable survival target, if one is assigned. */
+	UFUNCTION(BlueprintPure, Category="Spawner|Aggro")
+	AActor* GetDefenseObjectiveTarget() const { return DefenseObjectiveTargetActor.Get(); }
 
 	/**
 	 * When assigned, the encounter auto-starts when the player pawn overlaps this box.
@@ -411,13 +568,57 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="Spawner|Events")
 	FSpawnerBossDefeatedSignature OnBossDefeated;
 
+	/** Fired whenever one or more tracked enemies leave the live set because they died or were destroyed. */
+	UPROPERTY(BlueprintAssignable, Category="Spawner|Events")
+	FSpawnerTrackedEnemiesRemovedSignature OnTrackedEnemiesRemoved;
+
+	/** Fired when the active wave changes. WaveIndex is zero-based. */
+	UPROPERTY(BlueprintAssignable, Category="Spawner|Events")
+	FSpawnerWaveStartedSignature OnWaveStarted;
+
 	/** Returns the current number of alive enemies spawned by this encounter. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	int32 GetLiveEnemyCount() const { return LiveEnemies; }
 
+	/** Returns the zero-based active wave index, or INDEX_NONE when no runtime wave is active. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	int32 GetCurrentWaveIndex() const { return CurrentWaveIndex; }
+
+	/** Returns the number of runtime waves currently owned by this spawner. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	int32 GetWaveCount() const { return EncounterWavesRuntime.Num(); }
+
+	/** Returns the authored enemy count for a runtime wave after mission scaling has already been applied. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	int32 GetWaveEnemyTotal(int32 WaveIndex) const;
+
+	/** Returns the authored enemy count for the active runtime wave after mission scaling has already been applied. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	int32 GetCurrentWaveEnemyTotal() const { return GetWaveEnemyTotal(CurrentWaveIndex); }
+
+	/** Returns the designer-authored label for a runtime wave. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	FText GetWaveDisplayLabel(int32 WaveIndex) const;
+
+	/** Returns the designer-authored label for the active runtime wave. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	FText GetCurrentWaveDisplayLabel() const { return GetWaveDisplayLabel(CurrentWaveIndex); }
+
+	/** Returns true when any set in the runtime wave is authored as a boss. */
+	UFUNCTION(BlueprintPure, Category="Spawner")
+	bool DoesWaveContainBoss(int32 WaveIndex) const;
+
 	/** Aggro behavior applied to freshly spawned enemies. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Aggro", meta=(ShowOnlyInnerProperties, AdvancedDisplay))
 	FSpawnerAggroSettings AggroSettings;
+
+	/** Runtime flag set by the Rift plan: enemies continuously pursue the nearest living participant. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Spawner|Rift")
+	bool bPermanentRiftPursuit = false;
+
+	/** Controls whether this spawner parks dead enemies for reuse instead of destroying them. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Pooling", meta=(ShowOnlyInnerProperties))
+	FAeyerjiEnemyPoolSettings PoolSettings;
 
 	/** When true, non-elite spawns have a chance to be promoted to elites. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites")
@@ -581,6 +782,41 @@ protected:
 	/** Spawns one pawn from the provided wave/set definition and begins tracking it. */
 	bool SpawnOneFromSet(int32 WaveIndex, int32 SetIndex);
 
+	/** Builds the class/archetype/role key used to bucket inactive pooled enemies. */
+	FAeyerjiEnemyPoolKey MakePoolKey(const FEnemySet& EnemySet) const;
+
+	/** Creates a fresh pawn actor without registering it, shared by normal spawn and prewarm paths. */
+	APawn* SpawnRawEnemyActor(const FEnemySet& EnemySet, const FTransform& SpawnTransform, AActor* SpawnOwner, APawn* InstigatorPawn, bool bValidateNav);
+
+	/** Finds and removes an inactive pawn from the matching pool bucket, if one is ready for checkout. */
+	APawn* AcquireInactivePooledEnemy(const FAeyerjiEnemyPoolKey& PoolKey);
+
+	/** Captures original actor scale and unmodified attributes before spawner scaling/elite packages run. */
+	void CapturePooledEnemyBaseline(APawn* EnemyPawn, const FEnemySet& ResolvedEnemySet);
+
+	/** Restores attributes, scale, gameplay tags, effects, abilities, and VFX that this spawner applied previously. */
+	void RestorePooledEnemyForCheckout(APawn* EnemyPawn, const FEnemySet& ResolvedEnemySet, const FTransform& SpawnTransform);
+
+	/** Removes the current spawner-applied package from a pooled enemy without touching blueprint/base startup grants. */
+	void CleanupSpawnerAppliedRuntimeState(APawn* EnemyPawn);
+
+	void TrackPooledActorTag(APawn* EnemyPawn, FName ActorTag);
+	void TrackPooledLooseTag(APawn* EnemyPawn, FGameplayTag GameplayTag);
+	void TrackPooledAbility(APawn* EnemyPawn, FGameplayAbilitySpecHandle AbilityHandle);
+	void TrackPooledEffect(APawn* EnemyPawn, FActiveGameplayEffectHandle EffectHandle);
+	void TrackPooledNiagara(APawn* EnemyPawn, UNiagaraComponent* NiagaraComponent);
+	FVector ResolvePooledOriginalScale(APawn* EnemyPawn) const;
+	FVector GetPoolParkingLocation() const;
+	void SetPooledEnemyInactiveState(APawn* EnemyPawn, const FVector& ParkingLocation);
+	void SetPooledEnemyActiveState(APawn* EnemyPawn, const FTransform& SpawnTransform);
+	void DestroySpawnerAppliedVFX(APawn* EnemyPawn);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastSetPooledEnemyInactive(APawn* EnemyPawn, FVector ParkingLocation);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastSetPooledEnemyActive(APawn* EnemyPawn, FTransform SpawnTransform);
+
 	/** Resolves the player/PlayerStart location used for survival reachability checks. */
 	bool ResolveSpawnReferenceLocation(FVector& OutLocation) const;
 
@@ -608,7 +844,7 @@ protected:
 	void ResetTrackedEnemies();
 
 	/** Registers this enemy with the encounter director for progress tracking if needed. */
-	void RegisterProgressEnemy(APawn* SpawnedPawn);
+	void RegisterProgressEnemy(APawn* SpawnedPawn, int32 ProgressPoints);
 
 	/** Applies elite presentation (scale/VFX) when the enemy set is flagged as elite. */
 	void ApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<const FEliteAffixDefinition*>& Affixes, bool bApplyScale = true);
@@ -618,7 +854,7 @@ protected:
 
 	/** Multicast cosmetic-only RPC so dedicated servers can still show elite FX on clients. */
 	UFUNCTION(NetMulticast, Reliable)
-	void MulticastApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<FGameplayTag>& AffixTags);
+	void MulticastApplyElitePresentation(APawn* SpawnedPawn, float ScaleMultiplier, const TArray<FGameplayTag>& AffixTags, FVector BaseScale);
 
 	/** Applies elite stat bumps to the pawn's attribute set (server only). */
 	void ApplyEliteStats(APawn* SpawnedPawn, float HealthMultiplier, float DamageMultiplier, float RangeMultiplier, bool bPreserveHealthRatio = false);
@@ -641,6 +877,8 @@ public:
 	FGameplayAttribute ResolveAttribute(const FName& AttributeName) const;
 
 protected:
+	/** Returns the current survival-round multiplier for attributes the mission owns, otherwise 1. */
+	float ResolveSurvivalRoundAttributeMultiplier(const FGameplayAttribute& Attribute) const;
 	/** Captures an unscaled attribute value the first time we see it so later refreshes can rebuild from that baseline. */
 	void CaptureTrackedBaseValueIfNeeded(const TWeakObjectPtr<AActor>& EnemyKey, UAbilitySystemComponent* ASC, const FGameplayAttribute& Attribute, const FName& AttributeName);
 	/** Preserves the current resource percentage during a live rescale instead of hard-healing to full. */
@@ -652,13 +890,29 @@ protected:
 	APawn* ResolveAggroTargetPawn() const;
 	AController* ResolveAggroController() const;
 	void ApplyAggroToSpawnedPawn(APawn* SpawnedPawn);
+	void StartAggroReissueTimer();
+	void StopAggroReissueTimer();
+	void ReissueAggroToTrackedEnemies();
+	APawn* ResolveNearestLivePlayer(const FVector& FromLocation) const;
 	void ClearAggroCache();
 	void RebuildSpawnPointOrder();
 	int32 GetNextSpawnPointIndex();
 	void ResetSpawnPointCycle();
+	/** Discovers spawn regions and the fallback PlayerStart once for the active encounter window. */
+	void RebuildSpawnDiscoveryCache();
+	/** Starts async loading and retention for the shared enemy scaling table. */
+	void BeginEnemyScalingTablePreload();
+	/** Retains the scaling table pointer and clears row caches after async loading completes. */
+	void HandleEnemyScalingTableLoaded();
+	/** Returns the cached capsule half-height for a pawn class, resolving the CDO once if needed. */
+	float GetCachedSpawnHalfHeight(TSubclassOf<APawn> EnemyClass);
 
 	UPROPERTY(VisibleAnywhere, Category="Spawner|State")
 	bool bActive = false;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	int32 AutomationActivationCount = 0;
+#endif
 
 	UPROPERTY(VisibleAnywhere, Category="Spawner|State")
 	bool bCleared = false;
@@ -691,6 +945,33 @@ protected:
 	/** Runtime scaling cache so resyncs can recompute from the original baseline instead of compounding. */
 	TMap<TWeakObjectPtr<AActor>, FTrackedEnemyScalingState> TrackedEnemyScalingStates;
 
+	enum class EAeyerjiPooledEnemyState : uint8
+	{
+		Active,
+		PendingReturn,
+		Inactive
+	};
+
+	struct FPooledEnemyRuntimeState
+	{
+		FAeyerjiEnemyPoolKey PoolKey;
+		FVector OriginalScale = FVector::OneVector;
+		TMap<FName, float> BaselineAttributeValues;
+		TSet<FName> AppliedActorTags;
+		TArray<FGameplayTag> AppliedLooseTags;
+		TArray<FGameplayAbilitySpecHandle> GrantedAbilityHandles;
+		TArray<FActiveGameplayEffectHandle> AppliedEffectHandles;
+		TArray<TWeakObjectPtr<UNiagaraComponent>> SpawnedNiagaraComponents;
+		EAeyerjiPooledEnemyState State = EAeyerjiPooledEnemyState::Active;
+		bool bBaselineCaptured = false;
+	};
+
+	/** Inactive reusable enemies bucketed by class/archetype/elite role. */
+	TMap<FAeyerjiEnemyPoolKey, TArray<TWeakObjectPtr<APawn>>> InactiveEnemyPools;
+
+	/** Runtime cleanup package owned by this spawner for every pool-managed enemy. */
+	TMap<TWeakObjectPtr<APawn>, FPooledEnemyRuntimeState> PooledEnemyStates;
+
 	/** Remaining spawn counts for each wave/set (runtime state). */
 	TArray<TArray<int32>> PendingSpawnCounts;
 
@@ -706,9 +987,16 @@ protected:
 	/** Timer handle controlling any configured initial spawn delay. */
 	FTimerHandle InitialSpawnDelayHandle;
 
+	/** Timer handle for repeatedly reasserting chase/focus on live tracked enemies. */
+	FTimerHandle AggroReissueTimerHandle;
+
 	/** Cached activation information used to drive aggro behavior. */
 	TWeakObjectPtr<AActor> CachedAggroActor;
 	TWeakObjectPtr<AController> CachedAggroController;
+
+	/** Optional defendable survival objective handed to enemy AI controllers. */
+	TWeakObjectPtr<AActor> DefenseObjectiveTargetActor;
+	FAeyerjiDefenseTargetingSettings DefenseTargetingSettings;
 
 	/** Runtime copy of waves (from inline authoring or encounter definition). */
 	TArray<FWaveDefinition> EncounterWavesRuntime;
@@ -716,4 +1004,19 @@ protected:
 	/** Spawn point iteration cache for sequential/symmetrical patterns. */
 	TArray<int32> SpawnPointOrder;
 	int32 SpawnPointCursor = 0;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UDataTable> CachedEnemyScalingTable = nullptr;
+
+	TSharedPtr<FStreamableHandle> EnemyScalingTableHandle;
+	mutable TMap<FGameplayTag, const FEnemyScalingRow*> CachedScalingRows;
+	mutable TSet<FGameplayTag> CachedMissingScalingRows;
+
+	UPROPERTY(Transient)
+	TArray<FCachedAeyerjiSpawnRegion> CachedSpawnRegions;
+
+	UPROPERTY(Transient)
+	TObjectPtr<APlayerStart> CachedFallbackPlayerStart = nullptr;
+
+	TMap<TObjectKey<UClass>, float> CachedSpawnHalfHeights;
 };

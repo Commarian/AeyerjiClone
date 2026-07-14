@@ -24,6 +24,16 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	}
 
 	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
+	if (Definition->GetEffectiveRequiredLevel() > ClampedItemLevel)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ItemLevelClamp] RollItemInstance rejected %s RequiredLevel=%d RequestedItemLevel=%d ClampedItemLevel=%d"),
+			*GetNameSafe(Definition),
+			Definition->GetEffectiveRequiredLevel(),
+			ItemLevel,
+			ClampedItemLevel);
+		return nullptr;
+	}
 
 	int32 MinAffixes = 0;
 	int32 MaxAffixes = 0;

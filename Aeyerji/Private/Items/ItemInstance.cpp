@@ -10,6 +10,7 @@
 #include "Systems/LootService.h"
 #include "Systems/LootTable.h"
 #include "UObject/CoreNet.h"
+#include "GUI/AeyerjiStringLibrary.h"
 
 UAeyerjiItemInstance::UAeyerjiItemInstance()
 {
@@ -84,7 +85,8 @@ void UAeyerjiItemInstance::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 
 FText UAeyerjiItemInstance::GetDisplayName() const
 {
-	const FText BaseName = Definition ? Definition->DisplayName : FText::FromString(TEXT("Unknown Item"));
+	// Fallback resolved from GlobalStringTable.csv. Reimport string table after CSV update.
+	const FText BaseName = Definition ? Definition->DisplayName : AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("UnknownItem"));
 
 	const UObject* OuterObj = GetOuter();
 	const UWorld* World = OuterObj ? OuterObj->GetWorld() : nullptr;

@@ -56,19 +56,6 @@ const FItemStatScalingRow* UAeyerjiLootTable::FindScalingForAttribute(const FGam
 		const FName AttributeName(*AttributeNameString);
 		const FName NormalizedAttributeName = NormalizeAttributeName(AttributeName);
 
-		if (const FItemStatScalingRow* DirectRow = Table->FindRow<FItemStatScalingRow>(AttributeName, TEXT("LootTable Stat Scaling")))
-		{
-			return DirectRow;
-		}
-
-		if (NormalizedAttributeName != AttributeName)
-		{
-			if (const FItemStatScalingRow* DirectRow = Table->FindRow<FItemStatScalingRow>(NormalizedAttributeName, TEXT("LootTable Stat Scaling")))
-			{
-				return DirectRow;
-			}
-		}
-
 		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
 		{
 			const FItemStatScalingRow* Row = reinterpret_cast<const FItemStatScalingRow*>(Pair.Value);
@@ -89,8 +76,13 @@ const FItemStatScalingRow* UAeyerjiLootTable::FindScalingForAttribute(const FGam
 			}
 		}
 
-		UE_LOG(LogAeyerji, Error, TEXT("LootTable stat scaling missing for attribute %s (normalized=%s) in %s."),
-			*AttributeName.ToString(), *NormalizedAttributeName.ToString(), *GetNameSafe(Table));
+		static TSet<FName> LoggedMissingRows;
+		if (!LoggedMissingRows.Contains(AttributeName))
+		{
+			LoggedMissingRows.Add(AttributeName);
+			UE_LOG(LogAeyerji, Warning, TEXT("[LootReward] Optional stat scaling missing for attribute %s (normalized=%s) in %s; leaving modifier magnitude unscaled."),
+				*AttributeName.ToString(), *NormalizedAttributeName.ToString(), *GetNameSafe(Table));
+		}
 	}
 
 	return nullptr;

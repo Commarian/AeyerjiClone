@@ -4,10 +4,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "InputCoreTypes.h"
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "InputAction.h"
-#include "NiagaraSystem.h"
+#include "AeyerjiGameState.h"
 #include "Avoidance/AeyerjiAvoidanceProfile.h"
 #include "Abilities/AeyerjiAbilitySlot.h"
 #include "Abilities/AeyerjiTargetingManager.h"
@@ -17,9 +18,19 @@
 class APawn;
 class UAbilitySystemComponent;
 class UStaticMeshComponent;
+class UNiagaraSystem;
+class AAeyerjiEncounterDirector;
+class AAeyerjiLevelDirector;
+class AAeyerjiGameState;
+class AAeyerjiPlayerState;
+class UW_EndRunScreen;
+class UW_AeyerjiMissionHUD;
+class UUserWidget;
 class UAeyerjiCameraOcclusionFadeComponent;
 class UAeyerjiViewDistanceCullComponent;
+class AAeyerjiLinkedTeleporter;
 struct FGameplayTagContainer;
+struct FAbilityEndedData;
 
 
 UENUM(BlueprintType)
@@ -27,6 +38,32 @@ enum class EAeyerjiMoveLoopMode : uint8
 {
 	StopOnly        UMETA(DisplayName="Stop Only"),
 	FollowOnly      UMETA(DisplayName="Follow Only") // friendly follow: keep looping, idle when close
+};
+
+UENUM()
+enum class EAeyerjiMouseButton : uint8
+{
+	None,
+	Left,
+	Right
+};
+
+UENUM()
+enum class EAeyerjiMouseIntent : uint8
+{
+	None,
+	GroundMove,
+	BasicAttack,
+	Interaction,
+	SuppressedUntilRelease
+};
+
+UENUM()
+enum class EAeyerjiMousePhase : uint8
+{
+	None,
+	Held,
+	ReleasedPendingAttack
 };
 
 USTRUCT(BlueprintType)
@@ -46,6 +83,7 @@ class AEnemyParentNative;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FAeyerjiMoveLoopArrivedSig, AActor*, Target);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FAeyerjiFacingReadySig, AActor*, Target);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnExtractionCountdownUpdatedSignature);
 
 /** BP notify: local client detected a Pawn under the cursor during click */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCursorPawnHitSignature, AActor*, Actor, const FHitResult&, Hit);
@@ -61,9 +99,13 @@ class AEYERJI_API AAeyerjiPlayerController : public APlayerController
 
 public:
     AAeyerjiPlayerController();
-    virtual void Tick(float DeltaSeconds) override;
+	virtual void Tick(float DeltaSeconds) override;
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
+
+	/** Rebinds any live inventory bag widgets to the currently possessed player pawn. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Inventory")
+	void RebindInventoryWidgetsToCurrentPawn();
 
 
 	UFUNCTION(Server, Reliable)
@@ -71,22 +113,47 @@ public:
 
 	void AbortMovement_Local() const;
 	void AbortMovement_Both();
+	void BeginLocalAbilityCastInputLock(float DurationSeconds);
+	float GetLocalAbilityCastInputLockDuration() const { return LocalAbilityCastInputLockDuration; }
 
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Facing")
     void EnsureLocomotionRotationMode();
 
-	// --- pending-pickup timer (10 Hz) ---
-	FTimerHandle PendingPickupTimer;
-	
-	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Loot")
-	float PendingPickupInterval = 0.10f; // 10 Hz
+	// --- pending-teleporter timer (10 Hz) ---
+	FTimerHandle PendingTeleporterTimer;
 
-	void StartPendingPickup(AAeyerjiLootPickup* Loot);
-	void StopPendingPickup();
-    void ProcessPendingPickup(); // timer callback
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Teleporter")
+	float PendingTeleporterInterval = 0.10f;
 
-	// Helper: choose a reachable point near the loot
-    bool ComputePickupGoal(const AAeyerjiLootPickup* Loot, FVector& OutGoal) const;
+	/** Starts watching for arrival at a clicked teleporter endpoint. */
+	void StartPendingTeleporter(AAeyerjiLinkedTeleporter* Teleporter, uint8 EndpointIndex);
+
+	/** Clears the current pending teleporter request, if any. */
+	void StopPendingTeleporter();
+
+	/** Timer callback that fires the server use request after movement reaches interaction range. */
+	void ProcessPendingTeleporter();
+
+	/** Chooses a reachable point near the selected teleporter endpoint. */
+	bool ComputeTeleporterGoal(const AAeyerjiLinkedTeleporter* Teleporter, uint8 EndpointIndex, FVector& OutGoal) const;
+
+	// --- pending generic interaction timer (10 Hz) ---
+	FTimerHandle PendingInteractionTimer;
+
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Interaction")
+	float PendingInteractionInterval = 0.10f;
+
+	/** Starts watching for arrival at a clicked generic interactable actor. */
+	void StartPendingInteraction(AActor* InteractableActor);
+
+	/** Clears the current pending generic interaction request, if any. */
+	void StopPendingInteraction();
+
+	/** Timer callback that requests server interaction once the pawn reaches interaction range. */
+	void ProcessPendingInteraction();
+
+	/** Chooses a reachable point near a generic interactable actor. */
+	bool ComputeInteractionGoal(AActor* InteractableActor, FVector& OutGoal) const;
 
     // Optional: Apply an avoidance profile (map-specific tuning)
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Movement|Avoidance")
@@ -97,8 +164,17 @@ public:
 	UPROPERTY(Transient) TObjectPtr<UInputMappingContext> IMC_ShowLootFallback = nullptr;
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_Attack_Click = nullptr;
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_Move_Click = nullptr;
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_Interact = nullptr;
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input")
+	FKey AttackClickPhysicalKey = EKeys::LeftMouseButton;
+	/** Cached physical key for IA_Interact, resolved from IMC_Default so same-key mouse binds can de-duplicate. */
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input")
+	FKey InteractClickPhysicalKey = EKeys::Invalid;
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input")
+	FKey MoveClickPhysicalKey = EKeys::RightMouseButton;
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_ShowLoot = nullptr; // LeftAlt (Hold)
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_DropItem = nullptr;
+	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_CancelAction = nullptr;
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|VFX") TObjectPtr<UNiagaraSystem> FX_Cursor = nullptr;
     UPROPERTY(EditAnywhere, Category="Aeyerji|Navigation")
     float MouseNavCacheRefreshInterval = 0.05f;
@@ -111,23 +187,140 @@ public:
 	UFUNCTION() void OnShowLootReleased();
 
 	// Client→Server RPCs the client is allowed to call
-	UFUNCTION(Server, Reliable) void Server_AddPickupIntent(FName LootActorName);
-	UFUNCTION(Server, Reliable) void Server_ClearPickupIntent(FName LootActorName);
-	UFUNCTION(Server, Reliable) void Server_RequestPickup   (FName LootActorName);
+	UFUNCTION(Server, Reliable) void Server_SetDifficultySlider(float NewDifficultySlider);
+	UFUNCTION(Server, Reliable) void Server_SetWorldTier(int32 NewWorldTier);
+	UFUNCTION(Server, Reliable) void Server_RequestZoneTransition(FName TargetZoneId);
+	UFUNCTION(Server, Reliable) void Server_ReportZoneReady(int32 ReportedTransitionId);
 
-	// Accept a generic actor pointer to avoid hot-reload class mismatches; we validate and cast on the server.
-	UFUNCTION(Server, Reliable) void Server_RequestPickupActor(AActor* LootActor);
+	/** Requests server-authoritative use of a clicked linked teleporter endpoint. */
+	UFUNCTION(Server, Reliable) void Server_RequestLinkedTeleporterUse(AActor* TeleporterActor, uint8 EndpointIndex);
+
+	/** Requests server-authoritative use of a generic interactable actor. */
+	UFUNCTION(Server, Reliable) void Server_RequestInteractableUse(AActor* InteractableActor);
+
+	/** Requests a server-validated gold repair for the active survival defense objective. */
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category="Aeyerji|Survival|Defense")
+	void Server_RequestDefenseObjectiveRepair(AActor* ObjectiveActor, FName OptionId);
+
+	/** Server-to-owning-client hook that opens the local repair menu for the active defense objective. */
+	UFUNCTION(Client, Reliable)
+	void Client_ShowDefenseObjectiveRepairMenu(AActor* ObjectiveActor, const TArray<FAeyerjiDefenseRepairOption>& RepairOptions, int64 CurrentGold, float CurrentHealth, float MaxHealth);
+
+	/** Server-to-owning-client hook for localized mission feedback such as repair validation failures. */
+	UFUNCTION(Client, Reliable)
+	void Client_ShowMissionMessageKey(FName MessageKey, float DisplaySeconds);
+
+	/** Requests a server-validated between-round survival upgrade choice. */
+	UFUNCTION(Server, Reliable, BlueprintCallable, Category="Aeyerji|Survival|Upgrades")
+	void Server_SelectSurvivalUpgrade(FName OptionId, int32 OfferRevision);
 
 	void BeginAbilityTargeting(const FAeyerjiAbilitySlot& Slot);
 	UFUNCTION(Server, Reliable) void Server_ActivateAbilityAtLocation(const FAeyerjiAbilitySlot& Slot, FVector_NetQuantize Target);
 	UFUNCTION(Server, Reliable) void Server_ActivateAbilityOnActor(const FAeyerjiAbilitySlot& Slot, AActor* TargetActor);
 	UFUNCTION(Server, Reliable) void Server_ActivateAbilityInstant(const FAeyerjiAbilitySlot& Slot);
+	UFUNCTION(Server, Reliable) void Server_CancelActiveAbilityCast();
+	/** Resolves the current melee-valid enemy under the cursor using the shared click/snap rules. */
+	bool ResolveAttackTargetUnderCursor(FHitResult& OutHit) const;
+	/** Resolves only a directly clicked attack target, without hover/recent/snap forgiveness. */
+	bool ResolveDirectAttackTargetUnderCursor(FHitResult& OutHit) const;
 
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|HUD")
 	void ShowPopupMessage(const FText& Message, float Duration = 2.f);
 
 	UFUNCTION(BlueprintImplementableEvent, Category="Aeyerji|HUD")
 	void BP_ShowPopupMessage(const FText& Message, float Duration);
+
+	/** Optional native end-of-run widget class used for results, retry, and menu return. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	TSubclassOf<UW_EndRunScreen> EndRunScreenClass = nullptr;
+
+	/** Optional main-menu widget class used as a fallback when a streamed menu zone does not bootstrap UI on its own. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	TSubclassOf<UUserWidget> MainMenuWidgetClass = nullptr;
+
+	/** Z-order used when the controller adds the fallback main-menu widget to the viewport. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	int32 MainMenuWidgetZOrder = 300;
+
+	/** Optional mission/objective HUD widget class owned locally by the controller. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD", meta=(DisplayName="Mission HUD Class"))
+	TSubclassOf<UW_AeyerjiMissionHUD> MissionHUDClass = nullptr;
+
+	/** Z-order used when the controller adds the mission HUD to the viewport. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD", meta=(DisplayName="Mission HUD Z Order"))
+	int32 MissionHUDZOrder = 25;
+
+	/** Local HUD state: true while the player is standing inside the extraction portal countdown. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	bool bExtractionCountdownActive = false;
+
+	/** Local HUD state: total extraction countdown length in seconds. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	float ExtractionCountdownDurationSeconds = 0.f;
+
+	/** Local HUD state: elapsed extraction countdown time in seconds. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	float ExtractionCountdownElapsedSeconds = 0.f;
+
+	/** Local HUD state: time remaining before the map exits in seconds. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	float ExtractionCountdownSecondsRemaining = 0.f;
+
+	/** Local HUD state: normalized extraction countdown progress in the range [0..1]. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
+	float ExtractionCountdownProgress = 0.f;
+
+	/** Local-only HUD signal fired whenever the extraction countdown state changes. */
+	UPROPERTY(BlueprintAssignable, Category="Aeyerji|HUD")
+	FOnExtractionCountdownUpdatedSignature OnExtractionCountdownUpdated;
+
+	/** Server-driven UI notify that starts the local extraction countdown display. */
+	UFUNCTION(Client, Reliable)
+	void Client_BeginExtractionCountdown(float DurationSeconds);
+
+	/** Server-driven UI notify that clears the local extraction countdown display. */
+	UFUNCTION(Client, Reliable)
+	void Client_ResetExtractionCountdown();
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	AAeyerjiEncounterDirector* GetEncounterDirector() const { return EncounterDirector; }
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	AAeyerjiLevelDirector* GetLevelDirector() const { return LevelDirector; }
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	bool HasActiveRunTimeLimit() const;
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	float GetActiveRunTimeLimitSeconds() const;
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	float GetRunTimerProgress01() const;
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	float GetRunTimerSecondsRemaining() const;
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	bool IsKillTargetRun() const;
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	bool IsBossClearedRun() const;
+
+	/** Deprecated legacy HUD bridge; objective widgets should consume replicated objective snapshots instead. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Legacy HUD bridge. Use FAeyerjiObjectiveState from AAeyerjiGameState instead.", BlueprintInternalUseOnly="true"))
+	bool IsKillTargetThenBossRun() const;
+
+	/** Re-resolves gameplay-only actor references after streamed zone activation or possession changes. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Director")
+	void RefreshZoneRuntimeReferences();
 
 	/** NEW: Client→Server notify of pawn click (optional if you need server-side reaction) */
 	UFUNCTION(Server, Reliable)
@@ -151,27 +344,66 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="Aeyerji|Input")
 	FOnServerPawnClickedSignature OnServerPawnClicked;
 
-	// Loot
-	TWeakObjectPtr<AAeyerjiLootPickup> PendingPickup; // optional UI state
-	//TODO add to stats some of these vars
-	//small unit
-	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|TODOPutInStats")
-	float PickupAcceptRadius = 22000.f;
+	TWeakObjectPtr<AAeyerjiLinkedTeleporter> PendingTeleporter;
+	TWeakObjectPtr<AActor> PendingInteractable;
+	uint8 PendingTeleporterEndpointIndex = 0;
 	
 	// Debug
 	UFUNCTION(Exec)
 	void RefreshLootScalingDebug();
 
+	/** Prints the current desktop resolution, active screen resolution, window mode, and resolution scale. */
+	UFUNCTION(Exec)
+	void AJ_DisplayInfo();
+
+	/** Sets the current game window resolution and mode, applies it immediately, and saves the result. */
+	UFUNCTION(Exec)
+	void AJ_SetResolution(int32 Width, int32 Height, int32 WindowMode = 1);
+
+	/** Switches to the current desktop resolution in borderless fullscreen, applies it immediately, and saves the result. */
+	UFUNCTION(Exec)
+	void AJ_UseDesktopResolution();
+
+	/** Sets the current resolution scale percentage, applies it immediately, and saves the result. */
+	UFUNCTION(Exec)
+	void AJ_SetResolutionScale(float ScalePercent = 100.f);
+
+	/** Sets the overall scalability level, where 0=Low, 1=Medium, 2=High, 3=Epic, 4=Cinematic. */
+	UFUNCTION(Exec)
+	void AJ_SetOverallQuality(int32 QualityLevel = 3);
+
+	/** Sets the local FPS limit, where 0 disables the cap. */
+	UFUNCTION(Exec)
+	void AJ_SetFPSLimit(float FPSLimit = 0.f);
+
+	/** Sets the engine fixed framerate, where 0 disables the fixed timestep cap. */
+	UFUNCTION(Exec)
+	void AJ_SetFixedFPS(float FixedFPS = 0.f);
+
+	/** Sets the controlled pawn's AttackDamage base attribute on the server. */
+	UFUNCTION(Exec)
+	void AJ_SetDamage(float DamageValue);
+
+	/** Sets the controlled pawn's HPMax and current HP to the same value on the server. */
+	UFUNCTION(Exec)
+	void AJ_SetHP(float HPValue);
+
+	/** Opens the built-in UE console in non-shipping builds when the viewport console is available. */
+	UFUNCTION(Exec)
+	void AJ_OpenConsole();
+
 	UFUNCTION(Server, Reliable)
 	void ServerRefreshLootScalingDebug();
-	
-	/** Local BP “on click” hook. Return true to CONSUME the click (skip default move/attack). */
-	UFUNCTION(BlueprintNativeEvent, Category="Aeyerji|Input")
-	bool OnClick();
 
-	/** Blueprint hook: attempt to activate the primary attack ability (no hold logic). */
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_SetDamage(float DamageValue);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_SetHP(float HPValue);
+	
+	/** Attempts to activate the primary attack ability, optionally with an explicit mouse-selected target. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Attack")
-	bool ActivatePrimaryAttackAbility();
+	bool ActivatePrimaryAttackAbility(AActor* ExplicitTarget = nullptr);
 
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Movement")
 	void StartMoveToActorLoop(AActor* Target,
@@ -216,11 +448,14 @@ public:
 
 protected:
 	virtual void OnRep_Pawn() override;
-	AAeyerjiLootPickup* FindLootPickupByName(FName LootActorName) const;
-
+	virtual void OnRep_PlayerState() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	// AActor
 	virtual void BeginPlay() override;
 	virtual void SetupInputComponent() override;
+
+	/** Restores the gameplay viewport focus/capture mode so the first click still reaches Enhanced Input. */
+	void ApplyGameplayMouseInputMode(bool bFlushInput = false);
 
 	/** Local-only roof occlusion fade helper. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Camera", meta=(AllowPrivateAccess="true"))
@@ -229,10 +464,78 @@ protected:
 	/** Local-only view distance culling helper. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Camera", meta=(AllowPrivateAccess="true"))
 	TObjectPtr<UAeyerjiViewDistanceCullComponent> ViewDistanceCull = nullptr;
+
+	/** Cached encounter director retained only for legacy HUD bridge functions during migration. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|Director", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<AAeyerjiEncounterDirector> EncounterDirector = nullptr;
+
+	/** Cached level director retained only for legacy HUD bridge functions during migration. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|Director", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<AAeyerjiLevelDirector> LevelDirector = nullptr;
+	/** Binds to streamed-world delegates when a GameState is available. */
+	void BindWorldFlowDelegates();
+
+	/** Refreshes controller-side gameplay references when a gameplay zone becomes active. */
+	UFUNCTION()
+	void HandleZoneGameplayReady(FName ZoneId, int32 ReadyTransitionId);
+
+	/** Local-only: reacts to world-flow phase changes so gameplay HUD only exists in gameplay zones. */
+	UFUNCTION()
+	void HandleWorldFlowPhaseChanged(EAeyerjiWorldFlowPhase NewPhase, EAeyerjiWorldFlowPhase OldPhase, int32 TransitionId);
+
+	/** Local-only: reacts to replicated run-state changes for UI messaging. */
+	UFUNCTION()
+	void HandleRunStateChanged(EAeyerjiRunState NewState, EAeyerjiRunState OldState);
+
+	/** Local-only: opens and populates the end-of-run widget once results are ready. */
+	UFUNCTION()
+	void HandleRunResultsReady(const FAeyerjiRunResults& Results);
+
+	/** Local-only: pushes the latest replicated objective snapshot into the controller-owned HUD widget. */
+	UFUNCTION()
+	void HandleObjectiveStateChanged(const FAeyerjiObjectiveState& ObjectiveState);
+
+	/** Local-only: pushes the latest replicated survival-round snapshot into the controller-owned HUD widget. */
+	UFUNCTION()
+	void HandleSurvivalRoundStateChanged(const FAeyerjiSurvivalRoundState& SurvivalState);
+
+	/** Local-only: pushes the latest replicated survival upgrade offer into the controller-owned HUD widget. */
+	UFUNCTION()
+	void HandleSurvivalUpgradeOfferChanged(const FAeyerjiSurvivalUpgradeOfferState& OfferState);
+
+	/** Local-only: pushes replicated gold changes into the controller-owned HUD widget. */
+	UFUNCTION()
+	void HandleGoldChanged(int64 NewGold, int64 Delta);
+
+	void ShowEndRunScreen(const FAeyerjiRunResults& Results);
+	void HideEndRunScreen(bool bRestoreGameplayInput);
+	void EnsureMainMenuWidget(bool bAllowCreate);
+	void ResetMainMenuWidgetInstance();
+	void HideMainMenuWidget();
+	void EnsureMissionHUD();
+	void ApplyCurrentObjectiveStateFromGameState();
+	void ApplyCurrentSurvivalRoundStateFromGameState();
+	void ApplyCurrentSurvivalUpgradeOfferFromGameState();
+	void ApplyCurrentGoldStateToMissionHUD();
+	void ApplyObjectiveStateToMissionHUD(const FAeyerjiObjectiveState& ObjectiveState);
+	void ApplySurvivalRoundStateToMissionHUD(const FAeyerjiSurvivalRoundState& SurvivalState);
+	void ApplySurvivalUpgradeOfferToMissionHUD(const FAeyerjiSurvivalUpgradeOfferState& OfferState);
+	void BindGoldDelegate();
+	void UnbindGoldDelegate();
+	bool IsGameplayInputSuppressedByModalUI() const;
+	void StartExtractionCountdownState(float DurationSeconds);
+	void RefreshExtractionCountdownState();
+	void ResetExtractionCountdownState();
+	void BroadcastExtractionCountdownUpdated();
 	
 	/** How close is “close enough” that we should not issue a move? (centimeters) */
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
 	float MinMoveDistanceCm = 100.f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Input", meta=(ClampMin="0.0", Units="s"))
+	float LocalAbilityCastInputLockDuration = 0.65f;
+
+	double LocalAbilityCastInputLockEndTime = -1.0;
 	
 	// Input
 	void OnAttackClickPressed (const FInputActionValue& Val);
@@ -242,7 +545,41 @@ protected:
 	void OnMoveClickPressed (const FInputActionValue& Val);
 	void OnMoveClickHeld    (const FInputActionValue& Val);
 	void OnMoveClickReleased(const FInputActionValue& Val);
+	void OnInteractClickPressed(const FInputActionValue& Val);
+	void BeginMouseCommand(EAeyerjiMouseButton Button);
+	void ReleaseMouseCommand(EAeyerjiMouseButton Button);
+	void UpdateMouseCommand(float DeltaSeconds);
+	void TransitionMouseIntent(EAeyerjiMouseIntent NewIntent, AActor* NewTarget, const FVector& NewGroundGoal, bool bSpawnMoveFx);
+	void CancelMouseOwnedMovement();
+	void CancelMouseOwnedCombat();
+	void CancelMouseOwnedInteraction();
+	void ClearMouseCommandData();
+	void CancelMouseCommandCompletely();
+	bool IsMouseButtonPhysicallyDown(EAeyerjiMouseButton Button) const;
+	bool TryResolveDirectHostileUnderCursor(FHitResult& OutHit, AActor*& OutTarget) const;
+	AActor* ResolveAttackableActorFromCursorHit(const FHitResult& Hit) const;
+	bool IsMouseCommandTargetInBasicAttackRange(AActor* TargetActor) const;
+	void EnsureMouseActorChase(AActor* TargetActor);
+	void StartMouseGroundMove(const FVector& Goal, bool bSpawnCursorFX);
+	void UpdateMouseGroundMove(const FVector& Goal);
+	bool TriggerPrimaryAttackAbility(UAbilitySystemComponent* ASC, AActor* ExplicitTarget);
+	FGameplayAbilitySpecHandle FindPrimaryAttackAbilityHandle(UAbilitySystemComponent* ASC) const;
 	void OnDropItemPressed(const FInputActionValue& Val);
+	void OnCancelActionPressed(const FInputActionValue& Val);
+	bool IsAbilityCastInputLocked() const;
+	void BindMouseCommandRecoveryDelegates();
+	void UnbindMouseCommandRecoveryDelegates();
+	void HandleObservedAbilityEnded(const FAbilityEndedData& EndedData);
+	void HandleCastingTagChanged(const FGameplayTag Tag, int32 NewCount);
+	void ScheduleMouseCommandRecovery();
+	void RecoverMouseCommandAfterAbility();
+	void CancelMouseCommandRecovery(bool bSuppressCurrentCommandUntilRelease);
+	/** Returns true when IA_Interact and IA_Attack_Click resolve to the same physical key. */
+	bool IsInteractClickMappedToAttackClick() const;
+	/** Returns true for the short duplicate window after one same-key interaction path handled the click. */
+	bool WasSameKeyInteractionHandledRecently() const;
+	/** Marks the current click as handled so the paired same-key input action does not run twice. */
+	void MarkSameKeyInteractionHandled();
 
 	// Build the tag search container for the primary ability (leaf + parents).
 	bool BuildPrimaryAttackTagSearch(UAbilitySystemComponent* ASC, FGameplayTagContainer& OutTags) const;
@@ -251,6 +588,7 @@ protected:
 
 	TWeakObjectPtr<class AAeyerjiLootPickup> HoveredLoot;
 	TWeakObjectPtr<class AEnemyParentNative> HoveredEnemy;
+	TWeakObjectPtr<AAeyerjiPlayerState> BoundGoldPlayerState;
 	FTimerHandle HoverTimer;
 	
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Loot|UI")
@@ -265,7 +603,7 @@ protected:
 	float EnemyHoverReleaseGrace = 0.15f;
 	
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Movement")
-	float MinTimeBetweenMoves = 0.1; // 100ms minimum between move commands
+	float MinTimeBetweenMoves = 0.1f; // 100ms minimum between move commands
 
 	void StartHoverPolling();
 	void StopHoverPolling();
@@ -277,6 +615,8 @@ protected:
 	// Commands
 	void IssueMoveRPC(const FVector& Goal);
 	void IssueMoveRPC(AActor* Target);
+	UFUNCTION(Server, Reliable)
+	void Server_ActivatePrimaryAttackOnActor(AActor* TargetActor);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
 	void ServerMoveToLocation(const FVector& Goal);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
@@ -291,7 +631,16 @@ protected:
 	// Helpers
 	void SpawnCursorFX(const FVector& Loc) const;
 	bool IsAttackableActor(const AActor* Other) const;
+	/** Resolves a requested move target to a nav-safe location for the controlled pawn. */
+	bool ResolveSafeMoveGoal(const FVector& DesiredGoal, FVector& OutGoal) const;
+	/** Authority-side helper that repairs the controlled pawn before issuing a path request. */
+	bool EnsureControlledPawnOnSafeNav(bool bImmediateRecover) const;
 	void RefreshLootScalingDebug_Internal();
+	void EnsureViewportConsole();
+	void PrintDisplayDebugMessage(const FString& Message);
+	UAbilitySystemComponent* GetCheatTargetAbilitySystemComponent() const;
+	void ApplyCheatAttackDamage(float DamageValue);
+	void ApplyCheatHP(float HPValue);
 	bool AreCheatsAllowed() const;
 
 	// Cached targeting
@@ -303,7 +652,7 @@ protected:
 	TWeakObjectPtr<AActor> PendingMoveTarget;
 
 	// Click/hold semantics
-	float LastServerCmdTs = 0.0;
+	float LastServerCmdTs = 0.0f;
 	double LastClickMoveCommandTime = -1.0;
 	FVector LastClickMoveCommandGoal = FVector::ZeroVector;
 	bool bCursorFollowActive = false;
@@ -316,22 +665,88 @@ protected:
 	float SavedCursorFollowYawRate = 0.f;
 	double LastCursorFollowRepathTime = -1.0;
 	FVector LastCursorFollowRepathGoal = FVector::ZeroVector;
+	double LastCursorFollowClientDiagTime = -1.0;
+	double LastCursorFollowServerDiagTime = -1.0;
 	double CursorFollowHoldStartTime = -1.0;
 	FVector CursorFollowHoldStartGoal = FVector::ZeroVector;
 	bool bCursorFollowHoldPrimed = false;
 	bool bCursorFollowHoldActive = false;
 
-	// Attack input state (used for click/drag movement).
+	// Attack/move input state.
+	bool bMoveClickHeld = false;
 	bool bAttackClickHeld = false;
+
+	struct FMouseCommandState
+	{
+		EAeyerjiMouseButton Owner = EAeyerjiMouseButton::None;
+		EAeyerjiMouseIntent Intent = EAeyerjiMouseIntent::None;
+		EAeyerjiMousePhase Phase = EAeyerjiMousePhase::None;
+		TWeakObjectPtr<AActor> TargetActor;
+		TWeakObjectPtr<AActor> IssuedMoveTarget;
+		FVector GroundGoal = FVector::ZeroVector;
+		bool bAttackCommitted = false;
+		uint32 CommandSerial = 0;
+		double LastAttackAttemptTime = -1.0;
+	};
+
+	FMouseCommandState MouseCommand;
+	uint32 NextMouseCommandSerial = 1;
+
+	/** True while a mouse command is temporarily suspended by an action-bar ability cast. */
+	bool bMouseCommandPausedByAbilityCast = false;
+	TWeakObjectPtr<UAbilitySystemComponent> MouseCommandRecoveryASC;
+	FDelegateHandle ObservedAbilityEndedHandle;
+	FDelegateHandle CastingTagChangedHandle;
+	FTimerHandle MouseCommandRecoveryTimerHandle;
+	uint32 RecoveryBlockedCommandSerial = 0;
+	bool bMouseCommandRecoveryPending = false;
+	double LastMouseAttackChaseLogTime = -1.0;
+	double LastMouseAttackRangeLogTime = -1.0;
+	double LastSameKeyInteractionHandledTime = -1.0;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Input|MouseCommand", meta=(ClampMin="0.0"))
+	float BasicAttackRetryInterval = 0.08f;
+
+	/** Keeps melee facing stable briefly after the phase tags clear (seconds). */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Combat|Melee", meta=(ClampMin="0.0"))
+	float PrimaryMeleeRotationLockGraceSeconds = 0.12f;
+
+	/** Percent of AttackRange at which attack-hold movement should stop chasing the current target. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Combat|Melee", meta=(ClampMin="0.0"))
+	float PrimaryAttackMoveStopAtPercentOfRange = 1.0f;
+
+	/** Extra forgiveness added to the melee stop range so hold-attack does not creep forward once the target is hittable. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Combat|Melee", meta=(ClampMin="0.0", Units="cm"))
+	float PrimaryAttackMoveStopExtraBufferCm = 25.f;
+
+	double PrimaryMeleeRotationLockReleaseTime = -1.0;
+	bool bPrimaryMeleeRotationLockActive = false;
+	bool bPrimaryMeleeMovementBlockActive = false;
+
+	bool bHasQueuedMovementCommand = false;
+	bool bQueuedMovementIsActor = false;
+	bool bQueuedMovementSpawnCursorFX = false;
+	bool bQueuedMovementWasContinuous = false;
+	FVector QueuedMovementGoal = FVector::ZeroVector;
+	TWeakObjectPtr<AActor> QueuedMovementTarget;
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
 	TArray<FCursorFollowTurnRateBucket> CursorFollowTurnRateBuckets;
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
-	float CursorFollowRepathDistance = 120.f;
+	float CursorFollowRepathDistance = 45.f;
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
-	float CursorFollowRepathInterval = 0.08f;
+	float CursorFollowRepathInterval = 0.025f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowGoalInterpSpeed = 22.f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowGoalSnapDistance = 650.f;
+
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
+	float CursorFollowPathObservationDistance = 80.f;
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
 	float CursorFollowHoldStartDelay = 0.06f;
@@ -365,10 +780,6 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="1.0", Units="cm"))
 	float TargetSnapCameraDistanceRef = 1200.f;
-
-	/** If true, skip snap when loot is under the cursor. */
-	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting")
-	bool bTargetSnapRequiresNoLootUnderCursor = true;
 
 	UPROPERTY()
 	TObjectPtr<UAeyerjiTargetingManager> TargetingManager = nullptr;
@@ -424,24 +835,26 @@ protected:
 	bool ShouldIgnoreCursorActor(const AActor* Actor) const;
 	bool TryGetGroundHit(FHitResult& OutHit) const;
 	bool TryGetPawnHit(FHitResult& OutHit) const;
-	bool TryGetLootHit(FHitResult& OutHit) const;
+	bool TryGetLinkedTeleporterHit(FHitResult& OutHit, AAeyerjiLinkedTeleporter*& OutTeleporter, uint8& OutEndpointIndex) const;
+	bool TryGetInteractableHit(FHitResult& OutHit, AActor*& OutInteractable) const;
 	bool TryDropItemUnderCursor();
 
 	// Flow helpers
 	FAeyerjiTargetingClickContext BuildTargetingClickContext() const;
 
-	/** Handles a clicked loot actor: pickup if in range, otherwise enqueue intent & move towards it. Returns true if consumed. */
-	bool HandleLootUnderCursor(AAeyerjiLootPickup* Loot, const FHitResult& LootHit);
+	/** Handles a clicked linked teleporter endpoint: use if in range, otherwise move toward it. Returns true if consumed. */
+	bool HandleLinkedTeleporterUnderCursor(AAeyerjiLinkedTeleporter* Teleporter, uint8 EndpointIndex, const FHitResult& TeleporterHit);
+
+	/** Handles a clicked generic interactable: use if in range, otherwise move toward it. Returns true if consumed. */
+	bool HandleInteractableUnderCursor(AActor* InteractableActor, const FHitResult& InteractableHit);
 
 	/** Broadcasts pawn-hit hooks and lets BP consume the click; returns true if BP consumed. */
 	bool TryConsumePawnHit(const FHitResult& PawnHit);
 
-	/** Clears any pending pickup intent (safe to call when none). */
-	void ClearPickupIntentIfAny();
-
 	/** Clears targeting state (delegates to the targeting manager). */
 	void ClearTargeting();
 	void EnsureTargetingManagerInitialized();
+	void ClearAttackInputIntent();
 
     /** Sets CachedGoal/Target from a surface hit and dispatches movement. */
     void MoveToGroundFromHit(const FHitResult& SurfaceHit, bool bSpawnCursorFX, bool bIsContinuous);
@@ -466,6 +879,28 @@ protected:
     /** Cancels blocking abilities if allowed; returns true when movement should be suppressed. */
     bool HandleMovementBlockedByAbilities();
 
+	/** Applies or clears temporary melee rotation locking based on active melee phase tags. */
+	void UpdatePrimaryMeleeRotationLock();
+
+	/** Returns true if any primary melee phase tag is active on the ASC. */
+	bool HasActivePrimaryMeleePhaseTag(const UAbilitySystemComponent* ASC) const;
+
+	/** Temporarily freezes movement-driven/controller-driven yaw changes during melee. */
+	void PushPrimaryMeleeRotationLockMode();
+	void PopPrimaryMeleeRotationLockMode();
+
+	/** Stores the latest move request while primary melee owns locomotion. */
+	void QueueMovementCommand(const FVector& Goal, bool bSpawnCursorFX, bool bIsContinuous);
+
+	/** Stores the latest actor move request while primary melee owns locomotion. */
+	void QueueMovementCommand(AActor* Target, bool bIsContinuous);
+
+	/** Clears any deferred movement command waiting for the melee lock to release. */
+	void ClearQueuedMovementCommand();
+
+	/** Runs the deferred movement command once primary melee releases locomotion. */
+	void FlushQueuedMovementCommandIfAllowed();
+
 	/** Returns true if our pawn's capsule is touching the other actor's capsule (2D), with small buffers. */
 	static bool AreCapsulesTouching2D(const APawn* SelfPawn, const AActor* OtherActor,
 	                                  float ExtraRadiusBufferCm = 6.f, float ZSlackCm = 30.f);
@@ -483,6 +918,16 @@ protected:
 		float SavedRotationRateYaw = 360.f;
 	};
 	FSavedFacingRotationMode SavedFacingMode;
+
+	struct FSavedPrimaryMeleeRotationMode
+	{
+		bool bValid = false;
+		bool bUseControllerRotationYaw = false;
+		bool bOrientRotationToMovement = true;
+		bool bUseControllerDesiredRotation = false;
+		float SavedRotationRateYaw = 360.f;
+	};
+	FSavedPrimaryMeleeRotationMode SavedPrimaryMeleeRotationMode;
 
 	void PushFacingRotationMode(float DesiredYawRateDegPerSec);
 	void PopFacingRotationMode();
@@ -596,4 +1041,22 @@ private:
 	void UpdatePathFollowingForPawnState();
 	bool bPathFollowingTickSuppressed = false;
 	bool bShowLootFallbackAdded = false;
+
+	/** Last GameState this controller bound to for streamed world-flow events. */
+	TWeakObjectPtr<AAeyerjiGameState> BoundWorldFlowGameState;
+
+	/** Lazily-created end-of-run widget owned by this controller. */
+	UPROPERTY(Transient)
+	TObjectPtr<UW_EndRunScreen> EndRunScreenWidget = nullptr;
+
+	/** Lazily-created fallback main-menu widget owned by this controller. */
+	UPROPERTY(Transient)
+	TObjectPtr<UUserWidget> MainMenuWidget = nullptr;
+
+	/** Lazily-created mission/objective HUD widget owned by this controller. */
+	UPROPERTY(Transient)
+	TObjectPtr<UW_AeyerjiMissionHUD> MissionHUDWidget = nullptr;
+
+	/** Local start time used to animate the extraction countdown HUD after the server notifies us. */
+	double ExtractionCountdownStartTimeSeconds = -1.0;
 };

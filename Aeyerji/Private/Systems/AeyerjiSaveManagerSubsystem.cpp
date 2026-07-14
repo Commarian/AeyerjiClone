@@ -7,9 +7,11 @@
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "Interfaces/OnlineUserCloudInterface.h"
+#include "Items/InventoryComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "OnlineSubsystem.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
+#include "Systems/AeyerjiRiftRules.h"
 #include "Systems/AeyerjiStreamingSaveGame.h"
 #include "Systems/AeyerjiWorldStateSaveGame.h"
 #include "HAL/PlatformMisc.h"
@@ -18,7 +20,7 @@
 
 namespace
 {
-	constexpr int32 AeyerjiSaveSchemaVersion = 1;
+	constexpr int32 AeyerjiSaveSchemaVersion = 2;
 	const TCHAR* LegacyStreamingSlotName = TEXT("AeyerjiStreamingState");
 	const TCHAR* SharedWorldStateOwnerKey = TEXT("SharedWorld");
 	const TCHAR* SharedWorldStateSlotName = TEXT("AeyerjiWorldState");
@@ -104,6 +106,26 @@ namespace
 		return SaveData->Inventory.ItemSnapshots.Num()
 			+ SaveData->Inventory.EquippedItems.Num()
 			+ SaveData->Inventory.GridPlacements.Num();
+	}
+
+	int32 SanitizeProfileInventoryAttributes(UAeyerjiSaveGame* SaveData, const TCHAR* Phase)
+	{
+		if (!SaveData)
+		{
+			return 0;
+		}
+
+		const int32 RemovedCount = UAeyerjiInventoryComponent::SanitizeSaveDataAttributes(SaveData->Inventory);
+		if (RemovedCount > 0)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[ProfileCommit] Phase=%s PrunedInvalidItemStatAttributes=%d Owner=%s Revision=%lld"),
+				Phase ? Phase : TEXT("Unknown"),
+				RemovedCount,
+				*SaveData->OwnerKey,
+				SaveData->Revision);
+		}
+		return RemovedCount;
 	}
 
 	bool ShouldPreferProfile(const UAeyerjiSaveGame* Candidate, const UAeyerjiSaveGame* Current)
@@ -402,6 +424,7 @@ bool UAeyerjiSaveManagerSubsystem::CommitResolvedProfileForLocalOwner(const FAey
 		SaveData->ActionBar.Num(),
 		CountResolvedActionBarClasses(SaveData));
 	MirrorProfileToCloud(SaveData, OwnerKey);
+	OnProfileChanged.Broadcast(OwnerKey, SaveData->Revision);
 	return true;
 }
 
@@ -536,6 +559,7 @@ bool UAeyerjiSaveManagerSubsystem::MutateCachedProfileDifficulty(const float Dif
 	}
 
 	MirrorProfileToCloud(SaveData, OwnerKey);
+	OnProfileChanged.Broadcast(OwnerKey, SaveData->Revision);
 	return true;
 }
 
@@ -570,10 +594,16 @@ UAeyerjiSaveGame* UAeyerjiSaveManagerSubsystem::CreateDefaultProfile(const FStri
 	SaveData->Attributes.Level = UAeyerjiDifficultySettings::ClampGameplayLevel(InitialLevel);
 	SaveData->Inventory = FAeyerjiInventorySaveData();
 	SaveData->SelectedPassiveId = NAME_None;
+	SaveData->AbilityProgressEntries.Reset();
+	SaveData->UnspentAbilityPoints = 0;
+	SaveData->TotalAbilityPointSpends = 0;
+	SaveData->Gold = 0;
 	SaveData->DifficultySlider = 0.f;
 	SaveData->bHasDifficultySelection = false;
 	SaveData->WorldTier = 0;
 	SaveData->bHasWorldTierSelection = false;
+	SaveData->HighestUnlockedRiftTier = 1;
+	SaveData->LastSelectedRiftTier = 1;
 	SaveData->BestRunTimeSecondsByDifficulty.Reset();
 	SaveData->RecentRuns.Reset();
 	SaveData->SchemaVersion = AeyerjiSaveSchemaVersion;
@@ -604,6 +634,9 @@ UAeyerjiSaveGame* UAeyerjiSaveManagerSubsystem::DeserializeProfileFromTransport(
 	const FString ExplicitSlotOverride = GetSanitizedExplicitSaveSlotOverride(Header);
 	SaveData->OwnerKey = !ExplicitSlotOverride.IsEmpty() ? ExplicitSlotOverride : Header.OwnerKey;
 	SaveData->ArtifactKind = EAeyerjiSaveArtifactKind::Profile;
+	AeyerjiRiftRules::NormalizeProfileTiers(
+		SaveData->HighestUnlockedRiftTier, SaveData->LastSelectedRiftTier);
+	SanitizeProfileInventoryAttributes(SaveData, TEXT("Deserialize"));
 	return SaveData;
 }
 
@@ -624,7 +657,9 @@ bool UAeyerjiSaveManagerSubsystem::BuildTransportFromProfile(const UAeyerjiSaveG
 	OutHeader.LastModifiedUtc = SaveData->LastModifiedUtc;
 	OutHeader.bHadPersistedData = true;
 
-	return UGameplayStatics::SaveGameToMemory(const_cast<UAeyerjiSaveGame*>(SaveData), OutBytes);
+	UAeyerjiSaveGame* MutableSaveData = const_cast<UAeyerjiSaveGame*>(SaveData);
+	SanitizeProfileInventoryAttributes(MutableSaveData, TEXT("BuildTransport"));
+	return UGameplayStatics::SaveGameToMemory(MutableSaveData, OutBytes);
 }
 
 bool UAeyerjiSaveManagerSubsystem::PrepareProfileForServerCommit(APlayerState* PlayerState, UAeyerjiSaveGame* SaveData, const bool bBumpRevision, FAeyerjiSaveTransportHeader& OutHeader, TArray<uint8>& OutBytes)
@@ -636,6 +671,7 @@ bool UAeyerjiSaveManagerSubsystem::PrepareProfileForServerCommit(APlayerState* P
 
 	const FString OwnerKey = ResolveOwnerKey(PlayerState);
 	StampProfileMetadata(SaveData, OwnerKey, bBumpRevision);
+	SanitizeProfileInventoryAttributes(SaveData, TEXT("PrepareServerCommit"));
 
 	ServerProfileCache.Add(OwnerKey, DuplicateObject<UAeyerjiSaveGame>(SaveData, this));
 	const bool bBuilt = BuildTransportFromProfile(SaveData, OutHeader, OutBytes);
@@ -740,6 +776,7 @@ UAeyerjiSaveGame* UAeyerjiSaveManagerSubsystem::LoadProfileFromLocalSlot(const F
 	if (SaveData)
 	{
 		bOutLoadedExisting = true;
+		SanitizeProfileInventoryAttributes(SaveData, TEXT("LoadSlot"));
 	}
 	return SaveData;
 }
@@ -790,6 +827,8 @@ bool UAeyerjiSaveManagerSubsystem::SaveProfileToLocalSlot(UAeyerjiSaveGame* Save
 			*GetNameSafe(SaveData));
 		return false;
 	}
+
+	SanitizeProfileInventoryAttributes(SaveData, TEXT("SaveSlot"));
 
 	if (!UGameplayStatics::SaveGameToSlot(SaveData, SlotName, 0))
 	{
@@ -1045,6 +1084,7 @@ void UAeyerjiSaveManagerSubsystem::FinalizePendingProfileResolve(const bool bClo
 		Winner = CreateDefaultProfile(Pending.OwnerKey, 1);
 		bHadPersistedData = false;
 	}
+	SanitizeProfileInventoryAttributes(Winner, TEXT("FinalizeResolve"));
 
 	UAeyerjiSaveGame* ResolvedSave = DuplicateObject<UAeyerjiSaveGame>(Winner, this);
 	LocalProfileCache.Add(Pending.OwnerKey, ResolvedSave);
@@ -1057,6 +1097,11 @@ void UAeyerjiSaveManagerSubsystem::FinalizePendingProfileResolve(const bool bClo
 	if (bRepairCloud)
 	{
 		MirrorProfileToCloud(ResolvedSave, Pending.OwnerKey);
+	}
+
+	if (ResolvedSave)
+	{
+		OnProfileChanged.Broadcast(Pending.OwnerKey, ResolvedSave->Revision);
 	}
 
 	for (const FAeyerjiOnProfileResolved& Callback : Pending.Callbacks)
@@ -1134,6 +1179,7 @@ void UAeyerjiSaveManagerSubsystem::HandleReadUserFileComplete(const bool bWasSuc
 			{
 				if (UAeyerjiSaveGame* CloudSave = Cast<UAeyerjiSaveGame>(RawSave))
 				{
+					SanitizeProfileInventoryAttributes(CloudSave, TEXT("ReadCloud"));
 					PendingProfileResolve->CloudSave.Reset(DuplicateObject<UAeyerjiSaveGame>(CloudSave, this));
 					PendingProfileResolve->bHadCloudPersistedData = true;
 					PendingProfileResolve->bCloudManagerEra = IsManagerEraProfileForOwner(CloudSave, PendingProfileResolve->OwnerKey);

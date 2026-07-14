@@ -5,6 +5,7 @@
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#include "AeyerjiCharacter.h"
 #include "StateTreeExecutionContext.h"
 #include "Enemy/EnemyAIController.h"
 
@@ -12,16 +13,34 @@ EStateTreeRunStatus USTT_FocusTargetTask::EnterState(FStateTreeExecutionContext&
 {
     // On entering the state, immediately set focus if a target exists.
     AAIController* AI = Cast<AAIController>(Context.GetOwner());
-    if (AI && AI->GetFocusActor() == nullptr)  // GetFocusActor() returns current focused actor if any
+    if (AI)
+    {
+        if (const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(AI->GetPawn()))
+        {
+            if (ControlledCharacter->IsCrowdControlled())
+            {
+                AI->ClearFocus(EAIFocusPriority::Gameplay);
+                AI->ClearFocus(EAIFocusPriority::Move);
+                return EStateTreeRunStatus::Succeeded;
+            }
+        }
+    }
+
+    if (AI)
     {
         AActor* Target = nullptr;
         if (AI->IsA<AEnemyAIController>())
         {
             Target = Cast<AEnemyAIController>(AI)->GetTargetActor();
         }
+
         if (Target)
         {
             AI->SetFocus(Target, EAIFocusPriority::Gameplay);
+        }
+        else
+        {
+            AI->ClearFocus(EAIFocusPriority::Gameplay);
         }
     }
     // Succeed immediately so this task does not block state completion.

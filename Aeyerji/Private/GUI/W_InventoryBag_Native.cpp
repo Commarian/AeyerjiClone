@@ -32,7 +32,7 @@ void UW_InventoryBag_Native::NativeConstruct()
 	Super::NativeConstruct();
 
 	DiscoverEquipmentSlots();
-	RefreshCorruptionLaneVisibility(false);
+	RefreshCorruptionLaneVisibility(Inventory.IsValid() && Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption) > 0);
 
 	if (!ItemTileClass)
 	{
@@ -207,8 +207,9 @@ void UW_InventoryBag_Native::RegisterEquipmentSlot(UW_EquipmentSlot* SlotWidget)
 		return;
 	}
 
-	const int32 SlotIndex = SlotWidget ? SlotWidget->GetEffectiveSlotIndex() : -1;
-	AJ_LOG(this, TEXT("RegisterEquipmentSlot Widget=%s SlotIndex=%d"), *GetNameSafe(SlotWidget), SlotIndex);
+	int32 SlotIndex = SlotWidget ? SlotWidget->GetEffectiveSlotIndex() : -1;
+	const EEquipmentSlot SlotType = SlotWidget->GetEffectiveSlotType();
+	AJ_LOG(this, TEXT("RegisterEquipmentSlot Widget=%s Slot=%d SlotIndex=%d"), *GetNameSafe(SlotWidget), static_cast<int32>(SlotType), SlotIndex);
 	RegisteredEquipmentSlots.RemoveAll([](const TWeakObjectPtr<UW_EquipmentSlot>& SlotEntry)
 	{
 		return !SlotEntry.IsValid();
@@ -223,6 +224,50 @@ void UW_InventoryBag_Native::RegisterEquipmentSlot(UW_EquipmentSlot* SlotWidget)
 				SlotWidget->BindInventory(Inventory.Get());
 			}
 			return;
+		}
+	}
+
+	bool bDuplicateResolvedIndex = false;
+	TSet<int32> UsedIndicesForSlot;
+	for (const TWeakObjectPtr<UW_EquipmentSlot>& SlotEntry : RegisteredEquipmentSlots)
+	{
+		const UW_EquipmentSlot* ExistingSlot = SlotEntry.Get();
+		if (!ExistingSlot || ExistingSlot->GetEffectiveSlotType() != SlotType)
+		{
+			continue;
+		}
+
+		const int32 ExistingIndex = ExistingSlot->GetEffectiveSlotIndex();
+		UsedIndicesForSlot.Add(ExistingIndex);
+		if (ExistingIndex == SlotIndex)
+		{
+			bDuplicateResolvedIndex = true;
+			AJ_LOG(this, TEXT("[EquipmentSlotIndex] Duplicate equipment slot binding Slot=%d Index=%d Existing=%s New=%s. Check widget names or SlotIndex values."),
+				static_cast<int32>(SlotType),
+				SlotIndex,
+				*GetNameSafe(ExistingSlot),
+				*GetNameSafe(SlotWidget));
+		}
+	}
+
+	if (bDuplicateResolvedIndex)
+	{
+		const int32 MaxCandidateSlots = Inventory.IsValid()
+			? FMath::Max(1, Inventory->GetVisibleEquipmentSlotCount(SlotType))
+			: (SlotType == EEquipmentSlot::Corruption ? 3 : 5);
+
+		for (int32 CandidateIndex = 0; CandidateIndex < MaxCandidateSlots; ++CandidateIndex)
+		{
+			if (!UsedIndicesForSlot.Contains(CandidateIndex))
+			{
+				SlotWidget->SetRuntimeSlotIndexOverride(CandidateIndex);
+				SlotIndex = CandidateIndex;
+				AJ_LOG(this, TEXT("[EquipmentSlotIndex] Auto-corrected duplicate equipment slot Widget=%s Slot=%d NewIndex=%d"),
+					*GetNameSafe(SlotWidget),
+					static_cast<int32>(SlotType),
+					SlotIndex);
+				break;
+			}
 		}
 	}
 
@@ -284,6 +329,10 @@ void UW_InventoryBag_Native::AttachToInventory(UAeyerjiInventoryComponent* Inv)
 			Inv->Items.Num(),
 			Inv->EquippedItems.Num(),
 			Inv->GridPlacements.Num());
+		DiscoverEquipmentSlots();
+		RefreshRegisteredEquipmentSlots();
+		Inv->RefreshEquipmentSlotUnlockState();
+		RefreshCorruptionLaneVisibility(Inv->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption) > 0);
 		DispatchRebuild();
 		return;
 	}
@@ -316,6 +365,7 @@ void UW_InventoryBag_Native::AttachToInventory(UAeyerjiInventoryComponent* Inv)
 	RefreshRegisteredEquipmentSlots();
 	BP_OnInventoryComponentBound(Inv);
 	Inventory->RefreshEquipmentSlotUnlockState();
+	RefreshCorruptionLaneVisibility(Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption) > 0);
 	DispatchRebuild();
 }
 
@@ -352,11 +402,29 @@ void UW_InventoryBag_Native::HandleEquipmentSlotUnlocksChanged(int32 PlayerLevel
 
 void UW_InventoryBag_Native::RefreshCorruptionLaneVisibility(bool bCorruptionUnlocked)
 {
+	if (!CorruptionBorder && WidgetTree)
+	{
+		CorruptionBorder = WidgetTree->FindWidget(FName(TEXT("CorruptionBorder")));
+	}
+
 	if (!CorruptionBorder)
 	{
+		AJ_LOG(this, TEXT("[ItemBorder][CorruptionLane] Refresh skipped: CorruptionBorder binding missing Widget=%s Inventory=%s Unlocked=%s"),
+			*GetNameSafe(this),
+			*GetNameSafe(Inventory.Get()),
+			bCorruptionUnlocked ? TEXT("true") : TEXT("false"));
 		return;
 	}
 
+	const int32 PlayerLevel = Inventory.IsValid() ? Inventory->GetOwnerLevelForInventoryRules() : 1;
+	const int32 CorruptionSlots = Inventory.IsValid() ? Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption) : 0;
+	AJ_LOG(this, TEXT("[ItemBorder][CorruptionLane] Refresh Widget=%s Border=%s Level=%d CorruptionSlots=%d Unlocked=%s Visibility=%s"),
+		*GetNameSafe(this),
+		*GetNameSafe(CorruptionBorder),
+		PlayerLevel,
+		CorruptionSlots,
+		bCorruptionUnlocked ? TEXT("true") : TEXT("false"),
+		bCorruptionUnlocked ? TEXT("Visible") : TEXT("Collapsed"));
 	CorruptionBorder->SetVisibility(bCorruptionUnlocked ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
 }
 

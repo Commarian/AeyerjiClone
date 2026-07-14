@@ -20,7 +20,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 namespace
 {
-	const FGameplayTag& DeadStateTag()
+	const FGameplayTag& BossResolveDeadStateTag()
 	{
 		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), /*ErrorIfNotFound=*/false);
 		return Tag;
@@ -97,7 +97,7 @@ bool USTT_BossResolveTargetTask::IsActorDead(const AActor* Actor) const
 		return true;
 	}
 
-	const FGameplayTag DeadTag = DeadStateTag();
+	const FGameplayTag DeadTag = BossResolveDeadStateTag();
 	if (DeadTag.IsValid() && Actor->Tags.Contains(DeadTag.GetTagName()))
 	{
 		return true;

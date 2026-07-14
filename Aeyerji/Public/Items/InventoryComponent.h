@@ -28,9 +28,6 @@ struct AEYERJI_API FItemActiveEffectSet
 	FActiveGameplayEffectHandle StatsHandle;
 
 	UPROPERTY()
-	bool bAppliedItemStats = false;
-
-	UPROPERTY()
 	TArray<FActiveGameplayEffectHandle> AdditionalHandles;
 
 	UPROPERTY()
@@ -229,6 +226,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory|GAS")
 	TSubclassOf<UGameplayEffect> ItemStatsEffectClass;
 
+	/** Commits a profile checkpoint shortly after inventory changes so PIE stop is not the only persistence point. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory|Save")
+	bool bAutoCommitInventoryChanges = true;
+
+	/** Delay used to coalesce pickup/equip/grid changes into one profile commit. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory|Save", meta = (ClampMin = "0.0", UIMin = "0.0"))
+	float InventoryAutoCommitDelaySeconds = 0.75f;
+
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	UAbilitySystemComponent* GetASC() const;
 
@@ -309,6 +314,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Inventory|Equipment")
 	bool CanEquipItemInSlot(const UAeyerjiItemInstance* Item, EEquipmentSlot Slot, int32 SlotIndex) const;
 
+	/** Recomputes equipped item stat modifiers and applies only the changed contribution to the ASC. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Equipment")
+	void RebuildEquipmentStatContributions();
+
+	/** Returns the currently applied equipment contribution for an attribute after clamping. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Equipment")
+	float GetCurrentEquipmentStatContribution(FGameplayAttribute Attribute) const;
+
 	/** Forces the equipment slot unlock delegate to fire using the current replicated player level. Useful after UI binds. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Equipment")
 	void RefreshEquipmentSlotUnlockState();
@@ -351,6 +364,9 @@ public:
 
 	FAeyerjiInventorySaveData BuildSaveData();
 	void ApplySaveData(const FAeyerjiInventorySaveData& SaveData);
+
+	/** Removes invalid item stat attribute references from persisted inventory data before it is reused or saved. */
+	static int32 SanitizeSaveDataAttributes(FAeyerjiInventorySaveData& SaveData);
 
 	/** Convenience helper for client/UI to request a drop. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory")
@@ -396,6 +412,8 @@ protected:
 	void ResolveEquippedItems();
 	/** Refreshes the in-memory server profile after runtime inventory changes without committing to disk. */
 	void SyncProfileInventoryCache(const TCHAR* Reason);
+	void ScheduleInventoryAutosave(const TCHAR* Reason);
+	void HandleInventoryAutosave();
 	void BindItemInstanceDelegates(UAeyerjiItemInstance* Item);
 	void UnbindItemInstanceDelegates(UAeyerjiItemInstance* Item);
 	void HandleServerItemStateChanged();
@@ -408,6 +426,10 @@ protected:
 	UPROPERTY()
 	FTimerHandle GridSyncRetryHandle;
 	bool bGridSyncRetryScheduled = false;
+
+	TMap<FGameplayAttribute, float> AppliedEquipmentStatContributions;
+
+	FTimerHandle InventoryAutosaveTimerHandle;
 
 	FTimerHandle LevelBindingRetryHandle;
 	FDelegateHandle LevelChangedHandle;
@@ -430,4 +452,5 @@ protected:
 	bool TryPlaceItemAt(UAeyerjiItemInstance* Item, const FIntPoint& TopLeft);
 	bool UnequipSlotInternal(EEquipmentSlot Slot, int32 SlotIndex, const FIntPoint* PreferredTopLeft);
 	void PruneEmptyEquippedEntries();
+	void ClearEquipmentStatContributions();
 };

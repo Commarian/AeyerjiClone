@@ -25,9 +25,19 @@ protected:
 								 const FGameplayAbilityActivationInfo ActivationInfo,
 								 const FGameplayEventData* TriggerEventData) override;
 
+	virtual void ApplyCooldown(const FGameplayAbilitySpecHandle Handle,
+							   const FGameplayAbilityActorInfo* ActorInfo,
+							   const FGameplayAbilityActivationInfo ActivationInfo) const override;
+
+	virtual const FGameplayTagContainer* GetCooldownTags() const override;
+
 	/* -------- Tunables -------- */
 	UPROPERTY(EditDefaultsOnly, Category = "Blink|Tuning", meta=(ClampMin="0"))
 	float MaxBlinkDistance = 1000.f;
+
+	/** Fallback cooldown used when this legacy Blink instance has no table row and no explicit cooldown GE. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Blink|Tuning", meta=(ClampMin="0"))
+	float FallbackCooldownSeconds = 1.f;
 
 	/* Optional local container for our cooldown tag */
 	UPROPERTY(EditDefaultsOnly, Category="Blink|Tags")

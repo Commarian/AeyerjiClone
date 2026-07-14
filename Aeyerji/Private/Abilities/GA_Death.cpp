@@ -8,22 +8,50 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AeyerjiCharacter.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
 #include "AeyerjiGameplayTags.h"
+#include "Director/AeyerjiLevelDirector.h"
+#include "Enemy/EnemyParentNative.h"
+#include "EngineUtils.h"
 #include "GameFramework/GameModeBase.h"
 #include "Logging/AeyerjiLog.h"
 #include "TimerManager.h"
+
+namespace
+{
+	float ResolvePlayerDeathFinalizeDelay(const ACharacter* Character, const float DefaultDelay)
+	{
+		if (!Character || !Character->IsPlayerControlled())
+		{
+			return DefaultDelay;
+		}
+
+		UWorld* World = Character->GetWorld();
+		if (!World)
+		{
+			return DefaultDelay;
+		}
+
+		for (TActorIterator<AAeyerjiLevelDirector> It(World); It; ++It)
+		{
+			const AAeyerjiLevelDirector* Director = *It;
+			if (Director && Director->IsActiveSurvivalRun())
+			{
+				return Director->ResolvePlayerRespawnDelaySeconds(DefaultDelay);
+			}
+		}
+
+		return DefaultDelay;
+	}
+}
 
 UGA_Death::UGA_Death()
 {
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerInitiated;
 
-	// Identify this ability so AI tasks can ignore it when rotating abilities.
-	if (const FGameplayTag DeathTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.Death"), /*ErrorIfNotFound=*/false); DeathTag.IsValid())
-	{
-		FGameplayTagContainer AssetTags = GetAssetTags();
-		AssetTags.AddTag(DeathTag);
-		SetAssetTags(AssetTags);
-	}
+	// Identify this ability so death-state cancellation can exclude finalization.
+	FGameplayTagContainer AssetTags = GetAssetTags();
+	AssetTags.AddTag(AeyerjiTags::Ability_Death);
+	SetAssetTags(AssetTags);
 
 	// Passive, non-cancelable
 	FAbilityTriggerData Trigger;
@@ -73,7 +101,7 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 		return;
 	}
 
-	const float FinalizeDelay = FMath::Max(RespawnDelay, 0.f);
+	const float FinalizeDelay = FMath::Max(ResolvePlayerDeathFinalizeDelay(Char, RespawnDelay), 0.f);
 	if (FinalizeDelay <= 0.f)
 	{
 		Server_FinishDeath();
@@ -200,6 +228,14 @@ void UGA_Death::Server_FinishDeath()
 	}
 	else
 	{
+		if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(DeadChar))
+		{
+			if (Enemy->TryReturnToOwningSpawnerPool())
+			{
+				return;
+			}
+		}
+
 		// Destroy after cancelling abilities to avoid ASC teardown during active callbacks.
 		DeadChar->Destroy();
 	}

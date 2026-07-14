@@ -7,6 +7,7 @@
 #include "AbilitySystemComponent.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "GameFramework/Pawn.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "StateTreeExecutionContext.h"
 #include "Enemy/EnemyAIController.h"
 
@@ -24,6 +25,14 @@ EStateTreeRunStatus USTT_FindPatrolTask::EnterState(FStateTreeExecutionContext& 
     {
         return EStateTreeRunStatus::Failed;
     }
+
+	FAeyerjiNavSafetyResolveParams NavSafetyParams;
+	NavSafetyParams.ProjectionExtent = FVector(200.f, 200.f, 500.f);
+	FVector SafePawnLocation = Pawn->GetActorLocation();
+	if (!UAeyerjiNavSafetyLibrary::EnsurePawnOnSafeNav(Pawn, NavSafetyParams, /*bRecoverIfOffNav=*/true, SafePawnLocation))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
 
     // If we already have a combat target, skip finding patrol and let higher-priority
     // states handle chasing/attacking immediately.

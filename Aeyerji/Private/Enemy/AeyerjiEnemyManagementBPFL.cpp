@@ -4,6 +4,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Logging/AeyerjiLog.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 
 APawn* UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 	UObject* WorldContextObject,
@@ -51,6 +52,22 @@ APawn* UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 		bSkipRandomEliteResolution ? 1 : 0,
 		*SpawnTransform.GetLocation().ToCompactString());
 
+	if (Spawner)
+	{
+		return Spawner->SpawnRegisteredEnemyFromSet(
+			EnemySet,
+			SpawnTransform,
+			Owner,
+			InstigatorPawn,
+			bApplyEliteSettings,
+			bApplyAggro,
+			bAutoActivate,
+			bAutoActivateOnlyIfNoWaves,
+			ActivationInstigator,
+			ActivationController,
+			bSkipRandomEliteResolution);
+	}
+
 	FActorSpawnParameters Params;
 	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 	Params.Owner = Owner;
@@ -63,6 +80,33 @@ APawn* UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
 			*GetNameSafe(EnemySet.EnemyClass),
 			*SpawnTransform.GetLocation().ToCompactString());
 		return nullptr;
+	}
+
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
+	NavParams.SearchRadius = 600.f;
+	NavParams.GroundTraceHeight = 400.f;
+	NavParams.GroundTraceDepth = 1000.f;
+
+	FAeyerjiNavSafetyResult SpawnNavResult;
+	if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(WorldContextObject, SpawnedPawn->GetActorLocation(), SpawnedPawn, NavParams, SpawnNavResult))
+	{
+		AJ_LOG(WorldContextObject, TEXT("SpawnAndRegisterEnemyFromSet rejected off-nav spawn: Pawn=%s Class=%s Location=%s Reason=%s"),
+			*GetNameSafe(SpawnedPawn),
+			*GetNameSafe(EnemySet.EnemyClass),
+			*SpawnedPawn->GetActorLocation().ToCompactString(),
+			*SpawnNavResult.FailureReason.ToString());
+		SpawnedPawn->Destroy();
+		return nullptr;
+	}
+
+	if (!SpawnedPawn->GetActorLocation().Equals(SpawnNavResult.GroundedLocation, 1.f))
+	{
+		SpawnedPawn->SetActorLocation(
+			SpawnNavResult.GroundedLocation,
+			/*bSweep=*/false,
+			nullptr,
+			ETeleportType::TeleportPhysics);
 	}
 
 	if (Spawner)

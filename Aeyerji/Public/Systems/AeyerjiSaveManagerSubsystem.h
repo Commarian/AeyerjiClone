@@ -14,6 +14,7 @@ class UAeyerjiStreamingSaveGame;
 class UAeyerjiWorldStateSaveGame;
 
 DECLARE_DELEGATE_ThreeParams(FAeyerjiOnProfileResolved, bool, bool, UAeyerjiSaveGame*);
+DECLARE_MULTICAST_DELEGATE_TwoParams(FAeyerjiProfileChangedNative, const FString&, int64);
 
 /**
  * Central save entrypoint for per-player profile and streaming save data.
@@ -39,6 +40,9 @@ public:
 
 	/** Resolves the current local profile, reconciling local and Steam UserCloud when available. */
 	void ResolveProfileForLocalOwner(const FAeyerjiOnProfileResolved& Callback, const APlayerState* PreferredPlayerState = nullptr);
+
+	/** Native event emitted after local profile resolution or an authoritative client commit. */
+	FAeyerjiProfileChangedNative OnProfileChanged;
 
 	/** Returns the cached/local profile immediately without waiting for cloud reconciliation. */
 	bool GetCachedOrLocalProfileForOwner(UAeyerjiSaveGame*& OutSaveData, const APlayerState* PreferredPlayerState = nullptr);

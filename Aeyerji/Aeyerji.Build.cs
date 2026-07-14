@@ -7,8 +7,9 @@ public class Aeyerji : ModuleRules
 	public Aeyerji(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+		// Frontend session code uses the existing OnlineSubsystem/OnlineSubsystemUtils dependencies below.
 
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "Niagara", "EnhancedInput", "GameplayAbilities", "GameplayTags", "GameplayTasks", "StateTreeModule", "GameplayStateTreeModule", "NavigationSystem", "OnlineSubsystem", "OnlineSubsystemUtils", "UMG", "SlateCore", "DeveloperSettings", "NetCore", "PhysicsCore" });
-        PrivateDependencyModuleNames.AddRange(new string[] { "AITestSuite" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "ApplicationCore", "AssetRegistry", "Json" });
 	}
 }

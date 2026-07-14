@@ -32,6 +32,10 @@ public:
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Stats")
     void StopRegeneration();
 
+    /** Starts or restarts the server-side regen timer once the ASC and attributes are available. */
+    UFUNCTION(BlueprintCallable, Category="Aeyerji|Stats")
+    void EnsureRegenerationActive();
+
 private:
     UAbilitySystemComponent*        GetASC() const;
     const UAeyerjiAttributeSet*     GetAttr() const;

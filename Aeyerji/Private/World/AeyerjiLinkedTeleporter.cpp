@@ -6,6 +6,8 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerState.h"
+#include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 
@@ -105,6 +107,8 @@ void AAeyerjiLinkedTeleporter::GetLifetimeReplicatedProps(TArray<FLifetimeProper
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(AAeyerjiLinkedTeleporter, EndpointBRelativeTransform);
+	DOREPLIFETIME(AAeyerjiLinkedTeleporter, bAllowEndpointAToB);
+	DOREPLIFETIME(AAeyerjiLinkedTeleporter, bAllowEndpointBToA);
 }
 
 bool AAeyerjiLinkedTeleporter::ResolveEndpointFromComponent(const UPrimitiveComponent* Component, uint8& OutEndpointIndex) const
@@ -209,9 +213,23 @@ bool AAeyerjiLinkedTeleporter::TryTeleport(AAeyerjiPlayerController* Controller,
 	const FVector DestinationLocation = DestinationTransform.TransformPosition(ExitOffsetLocal);
 	const FRotator DestinationRotation = DestinationTransform.GetRotation().Rotator();
 
+	FAeyerjiNavSafetyResolveParams NavParams;
+	NavParams.ProjectionExtent = FVector(200.f, 200.f, 600.f);
+	NavParams.SearchRadius = FMath::Max(InteractionRadius + 400.f, 600.f);
+	NavParams.SearchStep = 150.f;
+	NavParams.GroundTraceHeight = 300.f;
+	NavParams.GroundTraceDepth = 600.f;
+
+	FAeyerjiNavSafetyResult NavResult;
+	if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(this, DestinationLocation, Pawn, NavParams, NavResult))
+	{
+		BP_OnTeleportRejected(Pawn, EndpointIndex);
+		return false;
+	}
+
 	Controller->AbortMovement_Local();
 	Pawn->SetActorLocationAndRotation(
-		DestinationLocation,
+		NavResult.GroundedLocation,
 		DestinationRotation,
 		/*bSweep=*/false,
 		nullptr,
@@ -220,9 +238,31 @@ bool AAeyerjiLinkedTeleporter::TryTeleport(AAeyerjiPlayerController* Controller,
 	Controller->ForceNetUpdate();
 
 	StartCooldownForController(Controller);
+	if (EndpointIndex == EndpointAIndex && Controller->PlayerState)
+	{
+		PlayersEnteredFromEndpointA.Add(Controller->PlayerState);
+	}
 	BP_OnTeleported(Pawn, EndpointIndex, DestinationEndpointIndex);
 
 	return true;
+}
+
+void AAeyerjiLinkedTeleporter::SetAllowedDirections(const bool bAllowAToB, const bool bAllowBToA)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+	bAllowEndpointAToB = bAllowAToB;
+	bAllowEndpointBToA = bAllowBToA;
+	ApplyEndpointConfiguration();
+	ForceNetUpdate();
+}
+
+bool AAeyerjiLinkedTeleporter::HasPlayerEnteredFromEndpointA(const APlayerState* PlayerState) const
+{
+	return PlayerState && PlayersEnteredFromEndpointA.Contains(
+		TWeakObjectPtr<APlayerState>(const_cast<APlayerState*>(PlayerState)));
 }
 
 void AAeyerjiLinkedTeleporter::ApplyEndpointConfiguration()
@@ -260,6 +300,11 @@ void AAeyerjiLinkedTeleporter::ApplyEndpointConfiguration()
 }
 
 void AAeyerjiLinkedTeleporter::OnRep_EndpointBRelativeTransform()
+{
+	ApplyEndpointConfiguration();
+}
+
+void AAeyerjiLinkedTeleporter::OnRep_AllowedDirections()
 {
 	ApplyEndpointConfiguration();
 }

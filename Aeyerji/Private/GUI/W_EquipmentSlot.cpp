@@ -13,6 +13,7 @@
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "InputCoreTypes.h"
 #include "Logging/AeyerjiLog.h"
+#include "GUI/AeyerjiStringLibrary.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
 namespace
@@ -35,6 +36,51 @@ namespace
 		}
 
 		return FString::FromInt(static_cast<int32>(Rarity));
+	}
+
+	FString ItemCategoryToLogString(EItemCategory Category)
+	{
+		if (const UEnum* Enum = StaticEnum<EItemCategory>())
+		{
+			return Enum->GetNameStringByValue(static_cast<int64>(Category));
+		}
+
+		return FString::FromInt(static_cast<int32>(Category));
+	}
+
+	bool LooksLikeEquipmentSlotWidgetName(const FString& Name)
+	{
+		return Name.Contains(TEXT("ItemIcon"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Equipment"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Assault"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Offense"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Guard"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Defense"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Flow"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Magic"), ESearchCase::IgnoreCase)
+			|| Name.Contains(TEXT("Corruption"), ESearchCase::IgnoreCase);
+	}
+
+	bool TryParseEquipmentSlotIndex(const FString& Name, int32& OutIndex)
+	{
+		if (!LooksLikeEquipmentSlotWidgetName(Name))
+		{
+			return false;
+		}
+
+		int32 DigitStart = Name.Len();
+		while (DigitStart > 0 && FChar::IsDigit(Name[DigitStart - 1]))
+		{
+			--DigitStart;
+		}
+
+		if (DigitStart >= Name.Len())
+		{
+			return false;
+		}
+
+		OutIndex = FCString::Atoi(*Name.Mid(DigitStart));
+		return OutIndex >= 0;
 	}
 }
 
@@ -164,18 +210,20 @@ UTexture2D* UW_EquipmentSlot::GetLockedSlotIcon() const
 
 FText UW_EquipmentSlot::GetSlotDisplayText() const
 {
+	// Lane names live in GlobalStringTable.csv. Reimport after CSV edits.
+	using namespace AeyerjiStringLibrary;
 	switch (GetEffectiveSlotType())
 	{
 	case EEquipmentSlot::Assault:
-		return FText::FromString(TEXT("Assault"));
+		return GetGlobalStringTableText(TEXT("Assault"));
 	case EEquipmentSlot::Guard:
-		return FText::FromString(TEXT("Guard"));
+		return GetGlobalStringTableText(TEXT("Guard"));
 	case EEquipmentSlot::Flow:
-		return FText::FromString(TEXT("Flow"));
+		return GetGlobalStringTableText(TEXT("Flow"));
 	case EEquipmentSlot::Corruption:
-		return FText::FromString(TEXT("Corruption"));
+		return GetGlobalStringTableText(TEXT("Corruption"));
 	default:
-		return FText::FromString(TEXT("Assault"));
+		return GetGlobalStringTableText(TEXT("Assault"));
 	}
 }
 
@@ -183,7 +231,8 @@ FText UW_EquipmentSlot::GetSlotTooltipText() const
 {
 	if (GetEffectiveSlotType() == EEquipmentSlot::Corruption && IsSlotLocked())
 	{
-		return FText::FromString(TEXT("Corruption Slot\nUnlocks at Level 50.\nCorruption items grant unstable power with dangerous tradeoffs."));
+		// Multi-line description from GlobalStringTable.csv
+		return AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("CorruptionSlotTooltip"));
 	}
 
 	return GetSlotDisplayText();
@@ -414,8 +463,39 @@ bool UW_EquipmentSlot::NativeOnDrop(
     UAeyerjiItemDragOperation* DragOp =
         Cast<UAeyerjiItemDragOperation>(InOperation);
 
-    if (!Inventory.IsValid() || !DragOp || !DragOp->ItemInstance || !IsSlotInteractionEnabled())
+	const bool bCanAcceptDrop = DragOp && CanAcceptDragOperation(DragOp);
+    if (!Inventory.IsValid()
+		|| !DragOp
+		|| !DragOp->ItemInstance
+		|| !IsSlotInteractionEnabled()
+		|| !bCanAcceptDrop)
     {
+		if (DragOp)
+		{
+			const UItemDefinition* Definition = DragOp->ItemInstance ? DragOp->ItemInstance->Definition.Get() : nullptr;
+			AJ_LOG(this, TEXT("[ItemBorder][EquipmentDrop] Drop rejected Widget=%s TargetSlot=%s TargetIndex=%d Item=%s Category=%s Inventory=%s Interaction=%s CanAccept=%s"),
+				*GetNameSafe(this),
+				*EquipmentSlotToLogString(GetEffectiveSlotType()),
+				GetEffectiveSlotIndex(),
+				DragOp->ItemInstance ? *DragOp->ItemInstance->UniqueId.ToString() : TEXT("None"),
+				Definition ? *ItemCategoryToLogString(Definition->ItemCategory) : TEXT("None"),
+				*GetNameSafe(Inventory.Get()),
+				IsSlotInteractionEnabled() ? TEXT("true") : TEXT("false"),
+				bCanAcceptDrop ? TEXT("true") : TEXT("false"));
+
+			if (DragOp->Source == EAeyerjiItemDragSource::Bag
+				|| DragOp->Source == EAeyerjiItemDragSource::Equipment)
+			{
+				AJ_LOG(this, TEXT("[ItemBorder][EquipmentDrop] Invalid equipment drop consumed so item stays in original slot Source=%d SourceSlot=%s SourceIndex=%d TargetSlot=%s TargetIndex=%d Item=%s"),
+					static_cast<int32>(DragOp->Source),
+					*EquipmentSlotToLogString(DragOp->SourceEquipmentSlot),
+					DragOp->SourceEquipmentSlotIndex,
+					*EquipmentSlotToLogString(GetEffectiveSlotType()),
+					GetEffectiveSlotIndex(),
+					DragOp->ItemInstance ? *DragOp->ItemInstance->UniqueId.ToString() : TEXT("None"));
+				return true;
+			}
+		}
         return false;
     }
 
@@ -761,7 +841,42 @@ EEquipmentSlot UW_EquipmentSlot::GetEffectiveSlotType() const
 
 int32 UW_EquipmentSlot::GetEffectiveSlotIndex() const
 {
+	if (RuntimeSlotIndexOverride != INDEX_NONE)
+	{
+		return RuntimeSlotIndexOverride;
+	}
+
+	int32 InferredIndex = INDEX_NONE;
+	if (bInferSlotIndexFromWidgetName && TryInferSlotIndexFromWidgetName(InferredIndex))
+	{
+		return InferredIndex;
+	}
+
 	return FMath::Max(0, SlotIndex);
+}
+
+void UW_EquipmentSlot::SetRuntimeSlotIndexOverride(int32 InSlotIndex)
+{
+	RuntimeSlotIndexOverride = InSlotIndex >= 0 ? InSlotIndex : INDEX_NONE;
+	UpdateSlotVisuals();
+}
+
+bool UW_EquipmentSlot::TryInferSlotIndexFromWidgetName(int32& OutSlotIndex) const
+{
+	if (TryParseEquipmentSlotIndex(GetName(), OutSlotIndex))
+	{
+		return true;
+	}
+
+	if (const UImage* EffectiveInsideImage = GetInsideImageWidget())
+	{
+		if (TryParseEquipmentSlotIndex(EffectiveInsideImage->GetName(), OutSlotIndex))
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 UWidget* UW_EquipmentSlot::CreateFallbackDragVisual() const

@@ -36,8 +36,6 @@ FLootContext ULootSourceRuleSet::ResolveContext(const FLootContext& BaseContext,
 	Result.PitySuccessRarity = ResolvedProfile.PitySuccessRarity;
 	Result.DifficultyScale = ResolvedProfile.DifficultyScale;
 	Result.RarityWeights = ResolvedProfile.RarityWeights;
-	Result.ItemLevelJitterMin = ResolvedProfile.ItemLevelJitterMin;
-	Result.ItemLevelJitterMax = ResolvedProfile.ItemLevelJitterMax;
 	Result.PitySoftStartOverride = ResolvedProfile.PitySoftStartOverride;
 	Result.PitySoftSlopeOverride = ResolvedProfile.PitySoftSlopeOverride;
 	Result.PityHardAttemptsOverride = ResolvedProfile.PityHardAttemptsOverride;
@@ -55,12 +53,6 @@ FLootContext ULootSourceRuleSet::ResolveContext(const FLootContext& BaseContext,
 	for (TPair<EItemRarity, float>& Kvp : Result.RarityWeights)
 	{
 		Kvp.Value = ClampNonNegative(Kvp.Value);
-	}
-
-	// Ensure jitter min <= max
-	if (Result.ItemLevelJitterMin > Result.ItemLevelJitterMax)
-	{
-		Swap(Result.ItemLevelJitterMin, Result.ItemLevelJitterMax);
 	}
 
 	return Result;

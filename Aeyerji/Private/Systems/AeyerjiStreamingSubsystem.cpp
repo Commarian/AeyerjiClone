@@ -4,6 +4,7 @@
 #include "Systems/AeyerjiSaveManagerSubsystem.h"
 #include "Systems/AeyerjiStreamingSaveGame.h"
 #include "Systems/AeyerjiWorldStateSubsystem.h"
+#include "Frontend/AeyerjiFrontendRules.h"
 #include "Engine/GameInstance.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/World.h"
@@ -294,13 +295,14 @@ bool UAeyerjiStreamingSubsystem::IsLevelLoaded(const FName LevelName) const
 
 bool UAeyerjiStreamingSubsystem::StartGameplaySession(const bool bCampaignMode)
 {
+	// Legacy direct-menu entry point. New frontend assembly must use the validated lobby request path.
+	PendingFrontendRunLaunch = FAeyerjiPendingRunLaunchRequest();
 	FAeyerjiGameplayMapDef MapDef;
 	FName MapPackageName = NAME_None;
 	if (!SelectGameplayMap(bCampaignMode, true, MapDef, MapPackageName))
 	{
 		return false;
 	}
-
 	if (!MapDef.EntryZoneId.IsNone())
 	{
 		CurrentZoneId = MapDef.EntryZoneId;
@@ -312,6 +314,79 @@ bool UAeyerjiStreamingSubsystem::StartGameplaySession(const bool bCampaignMode)
 	OnGameplayMapSelected.Broadcast(CurrentGameplayMapId, MapPackageName);
 	MarkStateDirtyAndMaybeSave();
 	return TravelToMapPackage(MapPackageName);
+}
+
+bool UAeyerjiStreamingSubsystem::PrepareFrontendRunLaunch(const EAeyerjiRiftActivityType ActivityType,
+	const int32 ExcursionTier, FAeyerjiPendingRunLaunchRequest& OutRequest)
+{
+	OutRequest = FAeyerjiPendingRunLaunchRequest();
+	UWorld* World = GetRuntimeWorld();
+	if (!World || World->GetNetMode() == NM_Client
+		|| (ActivityType == EAeyerjiRiftActivityType::Excursion && ExcursionTier <= 0))
+	{
+		return false;
+	}
+
+	const bool bCampaignMode = ActivityType == EAeyerjiRiftActivityType::StandardRift;
+	FAeyerjiGameplayMapDef MapDef;
+	FName MapPackageName = NAME_None;
+	if (!SelectGameplayMap(bCampaignMode, true, MapDef, MapPackageName))
+	{
+		return false;
+	}
+	if (!MapDef.EntryZoneId.IsNone())
+	{
+		CurrentZoneId = MapDef.EntryZoneId;
+	}
+
+	PendingFrontendRunLaunch.RequestId = FMath::Max(NextFrontendRunLaunchRequestId++, 1);
+	PendingFrontendRunLaunch.ActivityType = ActivityType;
+	PendingFrontendRunLaunch.ExcursionTier = ActivityType == EAeyerjiRiftActivityType::Excursion ? ExcursionTier : 0;
+	PendingFrontendRunLaunch.MapId = CurrentGameplayMapId;
+	PendingFrontendRunLaunch.MapPackageName = MapPackageName;
+	if (!PendingFrontendRunLaunch.IsValid())
+	{
+		PendingFrontendRunLaunch = FAeyerjiPendingRunLaunchRequest();
+		return false;
+	}
+	OutRequest = PendingFrontendRunLaunch;
+	UE_LOG(LogTemp, Display, TEXT("[LobbyLaunch] Prepared RequestId=%d Activity=%d Tier=%d MapId=%s Package=%s"),
+		OutRequest.RequestId, static_cast<int32>(OutRequest.ActivityType), OutRequest.ExcursionTier,
+		*OutRequest.MapId.ToString(), *OutRequest.MapPackageName.ToString());
+	return true;
+}
+
+bool UAeyerjiStreamingSubsystem::ExecutePendingFrontendRunLaunch()
+{
+	if (!PendingFrontendRunLaunch.IsValid())
+	{
+		return false;
+	}
+	PendingStartupZoneOverride = NAME_None;
+	bCurrentZoneReadyPending = false;
+	OnGameplayMapSelected.Broadcast(PendingFrontendRunLaunch.MapId, PendingFrontendRunLaunch.MapPackageName);
+	MarkStateDirtyAndMaybeSave();
+	UE_LOG(LogTemp, Display, TEXT("[LobbyLaunch] Travel RequestId=%d Package=%s"),
+		PendingFrontendRunLaunch.RequestId, *PendingFrontendRunLaunch.MapPackageName.ToString());
+	return TravelToMapPackage(PendingFrontendRunLaunch.MapPackageName);
+}
+
+bool UAeyerjiStreamingSubsystem::GetPendingFrontendRunLaunch(FAeyerjiPendingRunLaunchRequest& OutRequest) const
+{
+	OutRequest = PendingFrontendRunLaunch;
+	return OutRequest.IsValid();
+}
+
+bool UAeyerjiStreamingSubsystem::ConsumePendingFrontendRunLaunch(const int32 RequestId)
+{
+	if (!PendingFrontendRunLaunch.IsValid() || PendingFrontendRunLaunch.RequestId != RequestId)
+	{
+		return false;
+	}
+	UE_LOG(LogTemp, Display, TEXT("[LobbyLaunch] Consumed RequestId=%d Activity=%d Tier=%d"),
+		PendingFrontendRunLaunch.RequestId, static_cast<int32>(PendingFrontendRunLaunch.ActivityType),
+		PendingFrontendRunLaunch.ExcursionTier);
+	return AeyerjiFrontendRules::ConsumeLaunchRequest(PendingFrontendRunLaunch, RequestId);
 }
 
 bool UAeyerjiStreamingSubsystem::RestartCurrentGameplaySession(const FName ZoneIdOverride, const bool bPreferSeamlessTravel)

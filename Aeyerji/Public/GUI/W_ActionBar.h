@@ -9,6 +9,7 @@
 #include "Blueprint/UserWidget.h"
 #include "../AeyerjiPlayerState.h"
 #include "Components/HorizontalBox.h"
+#include "GameplayTagContainer.h"
 #include "W_ActionBar.generated.h"
 
 class UHorizontalBox;
@@ -17,6 +18,9 @@ class UAbilitySystemComponent;
 class APawn;
 class UGameplayAbility;
 class UWidget;
+struct FActiveGameplayEffect;
+struct FActiveGameplayEffectHandle;
+struct FGameplayEffectSpec;
 struct FAeyerjiAbilitySlot;
 
 /** Widget class representing an action bar for abilities. */
@@ -54,15 +58,20 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category="Action Bar|Potion")
 	bool bAutoAssignDefaultPotionSlot = true;
 
-	/** Widget name used to locate the potion slot in the UMG hierarchy. */
+	/** Deprecated compatibility setting. Potion slot identity is now the fixed final action-bar index. */
 	UPROPERTY(EditDefaultsOnly, Category="Action Bar|Potion")
 	FName PotionSlotWidgetName = TEXT("BP_PotionSlot_0");
 
-	/** Base potion ability data to inject when the potion slot is empty. */
+	/** Default potion row to inject into the fixed final action-bar slot when it is empty. */
+	UPROPERTY(EditDefaultsOnly, Category="Action Bar|Potion")
+	FGameplayTag DefaultPotionAbilityTag;
+
+	/** Compatibility fallback used only if the tuning row cannot build the default potion slot. */
 	UPROPERTY(EditDefaultsOnly, Category="Action Bar|Potion")
 	FAeyerjiAbilitySlot DefaultPotionSlot;
 
 	virtual void NativeConstruct() override;
+	virtual void NativeDestruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 	/* --------- refresh called from delegate --------- */
@@ -107,6 +116,10 @@ private:
 	bool TryUpdateSlotCooldown(UAbilitySystemComponent& AbilitySystem, UW_ActionSlotNative& SlotWidget) const;
 	void DrawAbilityDebugShape(const FAeyerjiAbilitySlot& SlotData) const;
 	UAbilitySystemComponent* ResolveAbilitySystem();
+	void BindCooldownEffectDelegates(UAbilitySystemComponent& AbilitySystem);
+	void UnbindCooldownEffectDelegates();
+	void HandleActiveGameplayEffectAdded(UAbilitySystemComponent* TargetAbilitySystem, const FGameplayEffectSpec& Spec, FActiveGameplayEffectHandle Handle);
+	void HandleAnyGameplayEffectRemoved(const FActiveGameplayEffect& ActiveEffect);
 	void ResetCachedAbilitySystem();
 	/** Applies the configured default potion slot if the target slot is empty. */
 	void EnsureDefaultPotionSlot(const TArray<FAeyerjiAbilitySlot>& NewBar);
@@ -114,9 +127,9 @@ private:
 	bool IsDefaultPotionSlotConfigured() const;
 	/** Returns true if a slot is effectively empty. */
 	bool IsAbilitySlotEmpty(const FAeyerjiAbilitySlot& SlotData) const;
-	/** Finds and caches the potion slot widget from the widget tree. */
+	/** Deprecated compatibility helper for older widget layouts. Fixed final index is authoritative. */
 	UW_ActionSlotNative* ResolvePotionSlotWidget();
-	/** Resolves the action bar index for the potion slot widget. */
+	/** Resolves the fixed final action-bar index used by the potion slot. */
 	int32 ResolvePotionSlotIndex();
 
 	UPROPERTY(EditDefaultsOnly, Category="Action Bar|Cooldown")
@@ -127,6 +140,8 @@ private:
 	TWeakObjectPtr<UAbilitySystemComponent> CachedAbilitySystem;
 	TWeakObjectPtr<APawn> CachedPawn;
 	TWeakObjectPtr<UW_ActionSlotNative> CachedPotionSlot;
+	FDelegateHandle CooldownEffectAddedHandle;
+	FDelegateHandle CooldownEffectRemovedHandle;
 
 	bool bApplyingDefaultPotionSlot = false;
 

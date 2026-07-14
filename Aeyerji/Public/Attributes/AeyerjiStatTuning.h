@@ -36,6 +36,22 @@ struct FAeyerjiArmorMitigationTuning
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Armor") float ArmorTailCap   = 0.52f;
 };
 
+/** Global clamps and poise timing used by the physical combat pipeline. */
+USTRUCT(BlueprintType)
+struct FAeyerjiCombatLimitsTuning
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxCritChance = 1.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxCriticalDamageMultiplier = 5.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxArmorPenetration = 0.75f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxLifeSteal = 0.25f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxStaggerResistance = 0.90f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float StaggerDuration = 0.35f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float PoiseRecoveryDelay = 1.5f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float PoiseRecoveryPerSecond = 35.f;
+};
+
 /** Flat data object with multipliers: keep numbers in one place for easy tuning. */
 UCLASS(BlueprintType)
 class AEYERJI_API UAeyerjiAttributeTuning : public UDataAsset
@@ -47,6 +63,9 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Tuning")
     FAeyerjiArmorMitigationTuning ArmorMitigation;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Tuning")
+    FAeyerjiCombatLimitsTuning CombatLimits;
 };
 
 /** Developer settings to pick the default tuning DataAsset */

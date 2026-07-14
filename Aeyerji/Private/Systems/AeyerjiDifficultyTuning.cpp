@@ -1,6 +1,7 @@
 #include "Systems/AeyerjiDifficultyTuning.h"
 
 #include "Curves/RichCurve.h"
+#include "Engine/DataTable.h"
 
 namespace
 {
@@ -89,6 +90,22 @@ const UAeyerjiDifficultyTuning* UAeyerjiDifficultySettings::Get()
 	}
 
 	return GetDefault<UAeyerjiDifficultyTuning>();
+}
+
+const UDataTable* UAeyerjiDifficultySettings::GetRiftTierTable()
+{
+	const UAeyerjiDifficultySettings* Settings = GetDefault<UAeyerjiDifficultySettings>();
+	if (Settings && !Settings->DefaultRiftTierTable.IsNull())
+	{
+		return Settings->DefaultRiftTierTable.LoadSynchronous();
+	}
+	return nullptr;
+}
+
+int32 UAeyerjiDifficultySettings::GetRiftEnemyReferenceLevel()
+{
+	const UAeyerjiDifficultySettings* Settings = GetDefault<UAeyerjiDifficultySettings>();
+	return ClampGameplayLevel(Settings ? Settings->RiftEnemyReferenceLevel : GetMaxGameplayLevel());
 }
 
 int32 UAeyerjiDifficultySettings::GetMaxGameplayLevel()

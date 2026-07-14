@@ -1,0 +1,611 @@
+[
+	{
+		"Name": "Default",
+		"PhysicalHit": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Whoosh_Attack_Cue_Default.Whoosh_Attack_Cue_Default'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/FabMarketplace/Knife_light/VFX/NS_DefaultAttack.NS_DefaultAttack'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0,
+			"WorldShakeOuterRadius": 0,
+			"WorldShakeFalloff": 1,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"CriticalHit": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Stab_4-1_Cue.Stab_4-1_Cue'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/Sabertooth/VFX/FX_Impact.FX_Impact'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"Dodged": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Whoosh_1-1_Cue.Whoosh_1-1_Cue'",
+			"Effect": "None",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"Staggered": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Hit_Generic_5-1_Cue.Hit_Generic_5-1_Cue'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/Abilities/StunEffect/NiagaraStunEffect.NiagaraStunEffect'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"KillingHit": {
+			"Sound": "/Script/Engine.SoundWave'/Game/Free_Sounds_Pack/wav/Coins_2-1.Coins_2-1'",
+			"Effect": "None",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		}
+	},
+	{
+		"Name": "Mechanical",
+		"PhysicalHit": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Whoosh_Attack_Cue_Default.Whoosh_Attack_Cue_Default'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/FabMarketplace/Knife_light/VFX/NS_DefaultAttack.NS_DefaultAttack'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0,
+			"WorldShakeOuterRadius": 0,
+			"WorldShakeFalloff": 1,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"CriticalHit": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Stab_4-1_Cue.Stab_4-1_Cue'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/Sabertooth/VFX/FX_Impact.FX_Impact'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"Dodged": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Whoosh_1-1_Cue.Whoosh_1-1_Cue'",
+			"Effect": "None",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"Staggered": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Hit_Generic_5-1_Cue.Hit_Generic_5-1_Cue'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/Abilities/StunEffect/NiagaraStunEffect.NiagaraStunEffect'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"KillingHit": {
+			"Sound": "/Script/Engine.SoundWave'/Game/Free_Sounds_Pack/wav/Coins_2-1.Coins_2-1'",
+			"Effect": "None",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		}
+	},
+	{
+		"Name": "AstralGuardian",
+		"PhysicalHit": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Whoosh_Attack_Cue_Default.Whoosh_Attack_Cue_Default'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/FabMarketplace/Knife_light/VFX/NS_DefaultAttack.NS_DefaultAttack'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0,
+			"WorldShakeOuterRadius": 0,
+			"WorldShakeFalloff": 1,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"CriticalHit": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Stab_4-1_Cue.Stab_4-1_Cue'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/Sabertooth/VFX/FX_Impact.FX_Impact'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"Dodged": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Whoosh_1-1_Cue.Whoosh_1-1_Cue'",
+			"Effect": "None",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"Staggered": {
+			"Sound": "/Script/Engine.SoundCue'/Game/Free_Sounds_Pack/cue/Hit_Generic_5-1_Cue.Hit_Generic_5-1_Cue'",
+			"Effect": "/Script/Niagara.NiagaraSystem'/Game/Abilities/StunEffect/NiagaraStunEffect.NiagaraStunEffect'",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		},
+		"KillingHit": {
+			"Sound": "/Script/Engine.SoundWave'/Game/Free_Sounds_Pack/wav/Coins_2-1.Coins_2-1'",
+			"Effect": "None",
+			"bUseCueLocation": true,
+			"bAttachEffectToTarget": false,
+			"AttachSocket": "None",
+			"LocationOffset": {
+				"X": 0,
+				"Y": 0,
+				"Z": 0
+			},
+			"RotationOffset": {
+				"Pitch": 0,
+				"Yaw": 0,
+				"Roll": 0
+			},
+			"EffectScale": {
+				"X": 1,
+				"Y": 1,
+				"Z": 1
+			},
+			"VolumeMultiplier": 1,
+			"PitchRange": {
+				"X": 0.949999988079071,
+				"Y": 1.0499999523162842
+			},
+			"CameraShake": "None",
+			"CameraShakeScale": 1.0,
+			"CameraShakePlaySpace": "CameraLocal",
+			"bPlayCameraShakeInWorld": false,
+			"WorldShakeInnerRadius": 0.0,
+			"WorldShakeOuterRadius": 0.0,
+			"WorldShakeFalloff": 1.0,
+			"CameraLensEffect": "None",
+			"ForceFeedback": "None",
+			"ForceFeedbackIntensity": 1.0,
+			"bLoopForceFeedback": false,
+			"bIgnoreForceFeedbackTimeDilation": false,
+			"bPlayForceFeedbackWhilePaused": false
+		}
+	}
+]

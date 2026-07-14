@@ -1,9 +1,8 @@
 #include "Abilities/GravitonPull/GA_AGGravitonPull.h"
 
-#include "AeyerjiGameplayTags.h"
 #include "NativeGameplayTags.h"
 
-namespace GravitonTags
+namespace AeyerjiGravitonPullTags
 {
 	const FGameplayTag& AbilityTag()
 	{
@@ -14,10 +13,11 @@ namespace GravitonTags
 
 UGA_AGGravitonPull::UGA_AGGravitonPull()
 {
+	AbilityTag = AeyerjiGravitonPullTags::AbilityTag();
+
 	FGameplayTagContainer AssetTags;
-	AssetTags.AddTag(GravitonTags::AbilityTag());
+	AssetTags.AddTag(AbilityTag);
 	SetAssetTags(AssetTags);
 
-	AbilityTag = GravitonTags::AbilityTag();
-	DefaultDamageTypeTag = AeyerjiTags::DamageType_Physical;
+	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 }

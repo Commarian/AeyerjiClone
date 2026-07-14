@@ -5,6 +5,7 @@
 #include "GameFramework/Pawn.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
+#include "GameFramework/PlayerController.h"
 #include "StateTree.h"
 #include "GameplayTagContainer.h"
 
@@ -17,6 +18,8 @@
 
 namespace
 {
+	constexpr double DefenseDamageThreatMemorySeconds = 4.0;
+
 	const FGameplayTag& TargetAcquiredTag()
 	{
 		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("Event.TargetAcquired"));
@@ -29,7 +32,7 @@ namespace
 		return Tag;
 	}
 
-	const FGameplayTag& DeadStateTag()
+	const FGameplayTag& EnemyAIDeadStateTag()
 	{
 		static const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), /*ErrorIfNotFound=*/false);
 		return Tag;
@@ -42,7 +45,7 @@ namespace
 			return true;
 		}
 
-		const FGameplayTag DeadTag = DeadStateTag();
+		const FGameplayTag DeadTag = EnemyAIDeadStateTag();
 		if (DeadTag.IsValid() && Actor->Tags.Contains(DeadTag.GetTagName()))
 		{
 			return true;
@@ -185,10 +188,23 @@ void AEnemyAIController::OnTargetPerception(AActor* Actor, FAIStimulus Stimulus)
 
     if (bSensed && !bIsDead)
     {
+		if (IsValid(DefenseObjectiveTarget.Get()))
+		{
+			RefreshDefenseObjectiveTarget();
+			return;
+		}
+
         TryAcquireTarget(Actor, /*bBroadcastAllyAlert=*/true);
     }
 	else if (Actor == CurrentTarget && (!bSensed || bIsDead))        // ← added tests
 	{
+		// Rift pursuit is authority-driven by the owning spawner. Losing perception must not
+		// send a living target back through patrol/leash fallback before the next retarget tick.
+		if (bPermanentRiftPursuit && !bIsDead)
+		{
+			RememberTargetLocation(Actor);
+			return;
+		}
 		if (!bIsDead)
 		{
 			RememberTargetLocation(Actor);
@@ -198,7 +214,13 @@ void AEnemyAIController::OnTargetPerception(AActor* Actor, FAIStimulus Stimulus)
 			ClearLastKnownTarget();
 		}
 
-		CurrentTarget = nullptr;
+		if (IsValid(DefenseObjectiveTarget.Get()) && !HasDeadStateTag(DefenseObjectiveTarget.Get()))
+		{
+			RefreshDefenseObjectiveTarget();
+			return;
+		}
+
+		AssignCurrentTarget(nullptr, EAeyerjiEnemyTargetSource::None, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
 		if (StateTreeComponent)
 		{
 			StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetLostTag()));
@@ -220,7 +242,13 @@ void AEnemyAIController::OnPerceptionUpdated(const TArray<AActor*>& UpdatedActor
 		if (UpdatedActor && UpdatedActor == CurrentTarget && HasDeadStateTag(UpdatedActor))
 		{
 			ClearLastKnownTarget();
-			CurrentTarget = nullptr;
+			if (IsValid(DefenseObjectiveTarget.Get()) && !HasDeadStateTag(DefenseObjectiveTarget.Get()))
+			{
+				RefreshDefenseObjectiveTarget();
+				break;
+			}
+
+			AssignCurrentTarget(nullptr, EAeyerjiEnemyTargetSource::None, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
 			UE_LOG(LogTemp, Display, TEXT("TargetLostEvent!"));
 			if (StateTreeComponent)
 			{
@@ -245,13 +273,7 @@ bool AEnemyAIController::TryAcquireTarget(AActor* NewTarget, const bool bBroadca
 		return false;
 	}
 
-	CurrentTarget = NewTarget;
-	StopMovement();
-
-	if (StateTreeComponent)
-	{
-		StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetAcquiredTag()));
-	}
+	AssignCurrentTarget(NewTarget, EAeyerjiEnemyTargetSource::HostileActor, /*bSendTargetAcquiredEvent=*/true, /*bStopCurrentMovement=*/true);
 
 	UE_LOG(LogTemp, Log, TEXT("Target acquired: %s"), *GetNameSafe(NewTarget));
 
@@ -264,6 +286,188 @@ bool AEnemyAIController::TryAcquireTarget(AActor* NewTarget, const bool bBroadca
 	}
 
 	return true;
+}
+
+void AEnemyAIController::SetTargetActor(AActor* NewTarget)
+{
+	const EAeyerjiEnemyTargetSource NewSource = IsValid(NewTarget) && NewTarget == DefenseObjectiveTarget.Get()
+		? EAeyerjiEnemyTargetSource::DefenseObjective
+		: (IsValid(NewTarget) ? EAeyerjiEnemyTargetSource::HostileActor : EAeyerjiEnemyTargetSource::None);
+
+	AssignCurrentTarget(NewTarget, NewSource, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
+}
+
+void AEnemyAIController::SetDefenseObjectiveTargetActor(AActor* NewTarget)
+{
+	if (!IsValid(NewTarget) && CurrentTarget == DefenseObjectiveTarget)
+	{
+		CurrentTarget = nullptr;
+		CurrentTargetSource = EAeyerjiEnemyTargetSource::None;
+	}
+
+	DefenseObjectiveTarget = NewTarget;
+}
+
+void AEnemyAIController::ConfigureDefenseObjectiveTargeting(AActor* NewTarget, const FAeyerjiDefenseTargetingSettings& TargetingSettings)
+{
+	DefenseObjectiveTarget = NewTarget;
+	DefenseTargetingSettings = TargetingSettings;
+	DefenseTargetingSettings.PlayerThreatAcquireRadius = FMath::Max(0.f, DefenseTargetingSettings.PlayerThreatAcquireRadius);
+	DefenseTargetingSettings.PlayerThreatReleaseRadius = FMath::Max(
+		DefenseTargetingSettings.PlayerThreatAcquireRadius,
+		DefenseTargetingSettings.PlayerThreatReleaseRadius);
+	DefenseTargetingSettings.PlayerThreatObjectiveAcquireRadius = DefenseTargetingSettings.PlayerThreatObjectiveAcquireRadius > 0.f
+		? DefenseTargetingSettings.PlayerThreatObjectiveAcquireRadius
+		: FAeyerjiDefenseTargetingSettings().PlayerThreatObjectiveAcquireRadius;
+	DefenseTargetingSettings.PlayerThreatObjectiveReleaseRadius = DefenseTargetingSettings.PlayerThreatObjectiveReleaseRadius > 0.f
+		? DefenseTargetingSettings.PlayerThreatObjectiveReleaseRadius
+		: FAeyerjiDefenseTargetingSettings().PlayerThreatObjectiveReleaseRadius;
+	DefenseTargetingSettings.PlayerThreatObjectiveReleaseRadius = FMath::Max(
+		DefenseTargetingSettings.PlayerThreatObjectiveAcquireRadius,
+		DefenseTargetingSettings.PlayerThreatObjectiveReleaseRadius);
+	DefenseTargetingSettings.PlayerDistanceBias = FMath::Max(0.f, DefenseTargetingSettings.PlayerDistanceBias);
+
+	RefreshDefenseObjectiveTarget();
+}
+
+bool AEnemyAIController::ShouldAcquireTargetWithDefenseObjective(AActor* Candidate) const
+{
+	if (!IsValid(Candidate))
+	{
+		return false;
+	}
+
+	if (HasDeadStateTag(Candidate))
+	{
+		return false;
+	}
+
+	AActor* Objective = DefenseObjectiveTarget.Get();
+	if (!IsValid(Objective) || HasDeadStateTag(Objective))
+	{
+		return true;
+	}
+
+	if (Candidate == Objective)
+	{
+		return true;
+	}
+
+	const APawn* ControlledPawn = GetPawn();
+	if (!IsValid(ControlledPawn))
+	{
+		return false;
+	}
+
+	const FVector SelfLocation = ControlledPawn->GetActorLocation();
+	const FVector CandidateLocation = Candidate->GetActorLocation();
+	const FVector ObjectiveLocation = Objective->GetActorLocation();
+	const float CandidateDistance2D = FVector::Dist2D(SelfLocation, CandidateLocation);
+	const float ObjectiveDistance2D = FVector::Dist2D(SelfLocation, ObjectiveLocation);
+	const bool bAlreadyTargetingCandidate = Candidate == CurrentTarget.Get();
+	const float Radius = bAlreadyTargetingCandidate
+		? DefenseTargetingSettings.PlayerThreatReleaseRadius
+		: DefenseTargetingSettings.PlayerThreatAcquireRadius;
+
+	if (CandidateDistance2D > FMath::Max(0.f, Radius))
+	{
+		return false;
+	}
+
+	const float ObjectiveThreatRadius = bAlreadyTargetingCandidate
+		? DefenseTargetingSettings.PlayerThreatObjectiveReleaseRadius
+		: DefenseTargetingSettings.PlayerThreatObjectiveAcquireRadius;
+	if (FVector::Dist2D(CandidateLocation, ObjectiveLocation) > ObjectiveThreatRadius)
+	{
+		return false;
+	}
+
+	if (DefenseTargetingSettings.bRequirePlayerCloserThanObjective
+		&& CandidateDistance2D + FMath::Max(0.f, DefenseTargetingSettings.PlayerDistanceBias) > ObjectiveDistance2D)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool AEnemyAIController::RefreshDefenseObjectiveTarget(const bool bSendTargetAcquiredEvent, const bool bStopCurrentMovement)
+{
+	AActor* Objective = DefenseObjectiveTarget.Get();
+	if (!IsValid(Objective) || HasDeadStateTag(Objective))
+	{
+		return false;
+	}
+
+	AActor* DesiredTarget = FindBestDefenseThreatTarget();
+	EAeyerjiEnemyTargetSource DesiredSource = EAeyerjiEnemyTargetSource::HostileActor;
+	if (!DesiredTarget)
+	{
+		DesiredTarget = Objective;
+		DesiredSource = EAeyerjiEnemyTargetSource::DefenseObjective;
+	}
+
+	if (CurrentTarget.Get() == DesiredTarget)
+	{
+		CurrentTargetSource = DesiredSource;
+		return false;
+	}
+
+	AssignCurrentTarget(DesiredTarget, DesiredSource, bSendTargetAcquiredEvent, bStopCurrentMovement);
+	return true;
+}
+
+void AEnemyAIController::NotifyDamagedBy(AActor* DamageInstigator)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	AActor* ThreatActor = DamageInstigator;
+	if (const AController* InstigatorController = Cast<AController>(ThreatActor))
+	{
+		ThreatActor = InstigatorController->GetPawn();
+	}
+
+	const APawn* ControlledPawn = GetPawn();
+	if (!IsValid(ThreatActor)
+		|| !IsValid(ControlledPawn)
+		|| ThreatActor == ControlledPawn
+		|| HasDeadStateTag(ThreatActor)
+		|| GetTeamAttitudeTowards(*ThreatActor) != ETeamAttitude::Hostile)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	RecentDamageThreat = ThreatActor;
+	RecentDamageThreatExpiryTime = World->GetTimeSeconds() + DefenseDamageThreatMemorySeconds;
+	RememberTargetLocation(ThreatActor);
+
+	if (IsValid(DefenseObjectiveTarget.Get()) && !HasDeadStateTag(DefenseObjectiveTarget.Get()))
+	{
+		AssignCurrentTarget(ThreatActor, EAeyerjiEnemyTargetSource::HostileActor, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/true);
+	}
+	else
+	{
+		AssignCurrentTarget(ThreatActor, EAeyerjiEnemyTargetSource::HostileActor, /*bSendTargetAcquiredEvent=*/true, /*bStopCurrentMovement=*/true);
+	}
+}
+
+void AEnemyAIController::SendAICrowdControlEvent(const FGameplayTag& EventTag)
+{
+	if (!HasAuthority() || !EventTag.IsValid() || !StateTreeComponent)
+	{
+		return;
+	}
+
+	StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(EventTag));
 }
 
 bool AEnemyAIController::IsTargetValidForAcquisition(AActor* Candidate) const
@@ -284,7 +488,102 @@ bool AEnemyAIController::IsTargetValidForAcquisition(AActor* Candidate) const
 		return false;
 	}
 
-	return GetTeamAttitudeTowards(*Candidate) == ETeamAttitude::Hostile;
+	return GetTeamAttitudeTowards(*Candidate) == ETeamAttitude::Hostile
+		&& ShouldAcquireTargetWithDefenseObjective(Candidate);
+}
+
+AActor* AEnemyAIController::FindBestDefenseThreatTarget() const
+{
+	const APawn* ControlledPawn = GetPawn();
+	const UWorld* World = ControlledPawn ? ControlledPawn->GetWorld() : nullptr;
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	if (IsRecentDamageThreatValid())
+	{
+		return RecentDamageThreat.Get();
+	}
+
+	AActor* BestTarget = nullptr;
+	float BestDistanceSq = TNumericLimits<float>::Max();
+	const FVector SelfLocation = ControlledPawn->GetActorLocation();
+
+	TArray<AActor*> PerceivedActors;
+	if (Perception)
+	{
+		Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), PerceivedActors);
+	}
+
+	for (AActor* Candidate : PerceivedActors)
+	{
+		if (!IsTargetValidForAcquisition(Candidate))
+		{
+			continue;
+		}
+
+		const float DistanceSq = FVector::DistSquared2D(SelfLocation, Candidate->GetActorLocation());
+		if (!BestTarget || DistanceSq < BestDistanceSq)
+		{
+			BestTarget = Candidate;
+			BestDistanceSq = DistanceSq;
+		}
+	}
+
+	return BestTarget;
+}
+
+bool AEnemyAIController::IsRecentDamageThreatValid() const
+{
+	const AActor* ThreatActor = RecentDamageThreat.Get();
+	const APawn* ControlledPawn = GetPawn();
+	const UWorld* World = ControlledPawn ? ControlledPawn->GetWorld() : nullptr;
+	if (!World
+		|| !IsValid(ThreatActor)
+		|| !IsValid(ControlledPawn)
+		|| ThreatActor == ControlledPawn
+		|| HasDeadStateTag(ThreatActor)
+		|| World->GetTimeSeconds() > RecentDamageThreatExpiryTime)
+	{
+		return false;
+	}
+
+	return GetTeamAttitudeTowards(*ThreatActor) == ETeamAttitude::Hostile;
+}
+
+void AEnemyAIController::AssignCurrentTarget(
+	AActor* NewTarget,
+	const EAeyerjiEnemyTargetSource NewSource,
+	const bool bSendTargetAcquiredEvent,
+	const bool bStopCurrentMovement)
+{
+	CurrentTarget = NewTarget;
+	CurrentTargetSource = IsValid(NewTarget) ? NewSource : EAeyerjiEnemyTargetSource::None;
+
+	if (IsValid(NewTarget))
+	{
+		SetFocus(NewTarget, EAIFocusPriority::Gameplay);
+	}
+	else
+	{
+		ClearFocus(EAIFocusPriority::Gameplay);
+	}
+
+	if (IsValid(NewTarget) && NewSource == EAeyerjiEnemyTargetSource::HostileActor)
+	{
+		RememberTargetLocation(NewTarget);
+	}
+
+	if (bStopCurrentMovement)
+	{
+		StopMovement();
+	}
+
+	if (bSendTargetAcquiredEvent && StateTreeComponent)
+	{
+		StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetAcquiredTag()));
+	}
 }
 
 void AEnemyAIController::ClearLastKnownTarget()
@@ -293,6 +592,36 @@ void AEnemyAIController::ClearLastKnownTarget()
 	LastKnownTargetLocation = FVector::ZeroVector;
 	LastKnownTargetTime = -1.0;
 	bHasLastKnownTarget = false;
+}
+
+void AEnemyAIController::ResetForPooledReuse(const FVector& NewHomeLocation)
+{
+	StopMovement();
+	ClearFocus(EAIFocusPriority::Gameplay);
+	CurrentTarget = nullptr;
+	CurrentTargetSource = EAeyerjiEnemyTargetSource::None;
+	DefenseObjectiveTarget = nullptr;
+	DefenseTargetingSettings = FAeyerjiDefenseTargetingSettings();
+	RecentDamageThreat.Reset();
+	RecentDamageThreatExpiryTime = -1.0;
+	bPermanentRiftPursuit = false;
+	HomeLocation = NewHomeLocation;
+	ClearLastKnownTarget();
+
+	if (Perception)
+	{
+		Perception->SetComponentTickEnabled(true);
+		Perception->ForgetAll();
+	}
+
+	ApplyPerceptionSettings();
+
+	if (StateTreeComponent && DefaultStateTree)
+	{
+		StateTreeComponent->StopLogic(TEXT("PooledReuse"));
+		StateTreeComponent->SetStateTree(DefaultStateTree);
+		StateTreeComponent->StartLogic();
+	}
 }
 
 void AEnemyAIController::RememberTargetLocation(AActor* Target)

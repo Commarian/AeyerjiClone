@@ -41,6 +41,10 @@ public:
     UPROPERTY(BlueprintReadWrite, EditAnywhere, FieldNotify)
     FAeyerjiAbilitySlot StoredSlotData;
 
+    /** True when this widget represents the fixed final potion slot. */
+    UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Aeyerji|Slot")
+    bool bIsPotionSlot = false;
+
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     float CooldownPercent = 0.f;
 
@@ -53,7 +57,7 @@ public:
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     int32 CooldownDisplaySeconds = 0;
 
-    UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Aeyerji|Cooldown")
+    UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     bool bIsCoolingDown = false;
 
     /* ---------- Blueprint can bind here ---------- */
