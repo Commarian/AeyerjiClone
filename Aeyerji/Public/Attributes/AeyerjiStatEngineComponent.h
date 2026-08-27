@@ -11,7 +11,7 @@ class UAeyerjiAttributeSet;
 class UGameplayEffect;
 
 /**
- * Derives secondary stats from primary attributes via a passive infinite GE.
+ * Derives secondary stats from primary attributes via a passive infinite GE and runs authoritative resource regeneration.
  * - Computes magnitudes from a DataAsset (UAeyerjiAttributeTuning)
  * - Applies a SetByCaller-powered GE (UGE_SecondaryStatsFromPrimaries)
  * - Re-applies whenever primary attributes change
@@ -52,20 +52,23 @@ private:
     void                            QueueRegenRetry();
 
 private:
+    /** Infinite effect that receives the derived-stat SetByCaller magnitudes. Defaults to the native implementation. */
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Stats")
-    TSubclassOf<UGameplayEffect> DerivedEffectClass; // Default = UGE_SecondaryStatsFromPrimaries
+    TSubclassOf<UGameplayEffect> DerivedEffectClass;
 
-    /** Optional: infinite periodic regen GE that reads HPRegen/ManaRegen via attribute-based magnitudes. */
+    /** Legacy optional periodic effect retained for existing Blueprint defaults; native regeneration uses the timer below. */
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Stats")
-    TSubclassOf<UGameplayEffect> RegenEffectClass;   // Configure in BP (infinite, Period>0, AttributeBased magnitudes)
+    TSubclassOf<UGameplayEffect> RegenEffectClass;
 
     mutable TWeakObjectPtr<UAbilitySystemComponent>    CachedASC;
     mutable TWeakObjectPtr<const UAeyerjiAttributeSet> CachedAttr;
     FActiveGameplayEffectHandle                        ActiveDerivedHandle;
     FActiveGameplayEffectHandle                        ActiveRegenHandle;
     FTimerHandle                                       RegenTickHandle;
+	FTimerHandle                                       RegenRetryHandle;
     bool                                               bRegenRetryQueued = false;
 
+    /** Server timer cadence in seconds; rates remain expressed per second. */
     UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Stats", meta=(ClampMin="0.01"))
     float                                              RegenTickInterval = 0.1f;
 };

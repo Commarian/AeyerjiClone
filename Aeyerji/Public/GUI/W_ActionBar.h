@@ -34,11 +34,19 @@ public:
 
 	void InitWithPlayerState(AAeyerjiPlayerState* PS);
 
+	/** Returns true when a valid slot input was consumed, including expected cooldown feedback. */
 	UFUNCTION(BlueprintCallable, Category="Action Bar")
 	bool ActivateSlotByIndex(int32 SlotIndex);
 
 	UFUNCTION(BlueprintPure, Category="Action Bar")
 	UW_ActionSlotNative* GetSlotWidget(int32 SlotIndex) const;
+
+	/** Closes the controller-owned ability picker without requiring a pawn Blueprint widget reference. */
+	UFUNCTION(BlueprintCallable, Category="Action Bar")
+	bool CloseAbilityPicker();
+
+	UFUNCTION(BlueprintPure, Category="Action Bar")
+	bool IsAbilityPickerOpen() const;
 
 	/** Request/clear the tooltip from any slot widget. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|UI|Tooltip")
@@ -96,6 +104,9 @@ protected:
 	UFUNCTION()
 	void HandleAbilityPicked(int32 SlotIndex, FAeyerjiAbilitySlot Pick);
 
+	UFUNCTION()
+	void HandleAbilityPickerClosed();
+
 	/** Designers implement these to spawn/dismiss their ability tooltip widget. */
 	UFUNCTION(BlueprintImplementableEvent, Category="Aeyerji|UI|Tooltip")
 	void BP_ShowAbilityTooltip(const FAeyerjiAbilityTooltipData& TooltipData, FVector2D ScreenPosition, UWidget* SourceWidget);
@@ -104,7 +115,7 @@ protected:
 	void BP_HideAbilityTooltip(const FAeyerjiAbilityTooltipData& TooltipData, UWidget* SourceWidget);
 
 	UPROPERTY()
-	UW_AbilitySelectionNative* PickerInstance = nullptr;
+	TObjectPtr<UW_AbilitySelectionNative> PickerInstance = nullptr;
 	
 	UPROPERTY()
 	AAeyerjiPlayerState* CachedPS = nullptr;

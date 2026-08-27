@@ -6,6 +6,8 @@
 #include "GameplayTagContainer.h"
 #include "AbilityAsync_WaitForAbilityFailed.generated.h"
 
+class UAbilitySystemComponent;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 	FAbilityFailedDynamic,
 	UGameplayAbility*, Ability,
@@ -16,7 +18,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
  *  Fires every time ASC.OnAbilityFailed broadcasts on this client.
  *  Optional filter by single tag (e.g. Cooldown.*).
  */
-UCLASS(BlueprintType)   // ← Make sure “BlueprintType” is here
+UCLASS(BlueprintType)
 class AEYERJI_API UAbilityAsync_WaitForAbilityFailed : public UBlueprintAsyncActionBase
 {
 	GENERATED_BODY()
@@ -38,7 +40,7 @@ public:
 private:
 	void HandleFailure(const UGameplayAbility* GA, const FGameplayTagContainer& Tags);
 
-	UAbilitySystemComponent* ASC;
+	TWeakObjectPtr<UAbilitySystemComponent> ASC;
 	FGameplayTag SingleFilter;
 	FDelegateHandle Handle;
 };

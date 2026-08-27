@@ -58,10 +58,16 @@ void UGA_EliteBurningTrail::ActivateAbility(const FGameplayAbilitySpecHandle Han
 	}
 
 	LastPatchLocation = ActorInfo->AvatarActor->GetActorLocation();
+	if (LastPatchLocation.ContainsNaN())
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/false, /*bWasCancelled=*/true);
+		return;
+	}
 
 	if (UWorld* World = GetWorld())
 	{
-		const float Interval = FMath::Max(0.05f, BurningTrailConfig->Tunables.FootstepInterval);
+		const float RawInterval = BurningTrailConfig->Tunables.FootstepInterval;
+		const float Interval = FMath::IsFinite(RawInterval) ? FMath::Max(0.05f, RawInterval) : 0.3f;
 		World->GetTimerManager().SetTimer(FootstepTimerHandle, this, &UGA_EliteBurningTrail::HandleFootstepTick, Interval, /*bLoop=*/true);
 	}
 }
@@ -134,17 +140,23 @@ bool UGA_EliteBurningTrail::CanSpawnPatch(const APawn* Pawn) const
 	}
 
 	const FVector CurrentLoc = Pawn->GetActorLocation();
+	if (CurrentLoc.ContainsNaN() || LastPatchLocation.ContainsNaN())
+	{
+		return false;
+	}
 	const FVector2D Current2D(CurrentLoc.X, CurrentLoc.Y);
 	const FVector2D Last2D(LastPatchLocation.X, LastPatchLocation.Y);
 
 	const float Dist2D = FVector2D::Distance(Current2D, Last2D);
-	if (Dist2D < BurningTrailConfig->Tunables.MinTravelDistanceForNewPatch)
+	const float RawMinimumDistance = BurningTrailConfig->Tunables.MinTravelDistanceForNewPatch;
+	const float MinimumDistance = FMath::IsFinite(RawMinimumDistance) ? FMath::Max(0.f, RawMinimumDistance) : 0.f;
+	if (Dist2D < MinimumDistance)
 	{
 		return false;
 	}
 
 	const float Speed2D = Pawn->GetVelocity().Size2D();
-	if (Speed2D < 10.f)
+	if (!FMath::IsFinite(Speed2D) || Speed2D < 10.f)
 	{
 		return false;
 	}
@@ -166,10 +178,16 @@ bool UGA_EliteBurningTrail::TrySpawnPatch(APawn* Pawn, const FGameplayAbilityAct
 	}
 
 	FVector SpawnLocation = Pawn->GetActorLocation();
+	if (SpawnLocation.ContainsNaN())
+	{
+		return false;
+	}
 	FVector GroundNormal = FVector::UpVector;
 	{
 		const FVector TraceStart = SpawnLocation + FVector::UpVector * 50.f;
-		const FVector TraceEnd = TraceStart - FVector::UpVector * (200.f + BurningTrailConfig->Tunables.PatchRadius);
+		const float RawPatchRadius = BurningTrailConfig->Tunables.PatchRadius;
+		const float PatchRadius = FMath::IsFinite(RawPatchRadius) ? FMath::Max(0.f, RawPatchRadius) : 0.f;
+		const FVector TraceEnd = TraceStart - FVector::UpVector * (200.f + PatchRadius);
 
 		FHitResult Hit;
 		FCollisionQueryParams Params(SCENE_QUERY_STAT(EliteBurningTrailGroundTrace), false, Pawn);
@@ -185,8 +203,12 @@ bool UGA_EliteBurningTrail::TrySpawnPatch(APawn* Pawn, const FGameplayAbilityAct
 		return !PatchPtr.IsValid();
 	});
 
-	const int32 MaxPatches = FMath::Max(0, BurningTrailConfig->Tunables.MaxActivePatches);
-	if (MaxPatches > 0 && ActivePatches.Num() >= MaxPatches)
+	const int32 MaxPatches = FMath::Clamp(BurningTrailConfig->Tunables.MaxActivePatches, 0, 256);
+	if (MaxPatches <= 0)
+	{
+		return false;
+	}
+	if (ActivePatches.Num() >= MaxPatches)
 	{
 		if (ActivePatches[0].IsValid())
 		{

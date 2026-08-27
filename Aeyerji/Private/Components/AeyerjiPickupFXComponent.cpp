@@ -12,6 +12,25 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Logging/AeyerjiLog.h"
 
+namespace
+{
+	constexpr int32 MaxActivePickupFX = 128;
+	constexpr int32 MaxPickupFXSlotIndex = 1000000;
+	constexpr float MaxPickupFXOffset = 1000000.f;
+	constexpr float MaxPickupFXDuration = 60.f;
+
+	bool IsFinitePickupFXVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
+	bool IsValidPickupFXSlot(const EEquipmentSlot Slot)
+	{
+		const UEnum* Enum = StaticEnum<EEquipmentSlot>();
+		return Enum && Enum->IsValidEnumValue(static_cast<int64>(Slot));
+	}
+}
+
 UAeyerjiPickupFXComponent::UAeyerjiPickupFXComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -22,6 +41,23 @@ void UAeyerjiPickupFXComponent::BeginPlay()
 {
 	Super::BeginPlay();
 	CacheOwnerComponents();
+}
+
+void UAeyerjiPickupFXComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopAllEquipFX();
+	for (FAeyerjiActiveFXEntry& Entry : ActiveFX)
+	{
+		if (UNiagaraComponent* Component = Entry.Component.Get())
+		{
+			Component->Deactivate();
+			Component->DestroyComponent();
+		}
+	}
+	ActiveFX.Reset();
+	CachedMesh.Reset();
+	CachedOutline.Reset();
+	Super::EndPlay(EndPlayReason);
 }
 
 void UAeyerjiPickupFXComponent::CacheOwnerComponents()
@@ -73,7 +109,7 @@ void UAeyerjiPickupFXComponent::CleanupStaleFX()
 
 void UAeyerjiPickupFXComponent::PlayPickupFX(const FAeyerjiPickupVisualConfig& VisualConfig)
 {
-	if (!GetOwner() || !VisualConfig.HasPickupVisuals())
+	if (!IsValid(GetOwner()) || GetNetMode() == NM_DedicatedServer || !VisualConfig.HasPickupVisuals())
 	{
 		AJ_LOG(this, TEXT("PickupFXComponent skipped - Owner=%s PickupVisuals=%d"),
 			*GetNameSafe(GetOwner()),
@@ -113,7 +149,8 @@ void UAeyerjiPickupFXComponent::PlayPickupFX(const FAeyerjiPickupVisualConfig& V
 
 void UAeyerjiPickupFXComponent::PlayEquipFX(const FAeyerjiPickupVisualConfig& VisualConfig, EEquipmentSlot Slot, int32 SlotIndex)
 {
-	if (!GetOwner() || !VisualConfig.HasEquipVisuals())
+	if (!IsValid(GetOwner()) || GetNetMode() == NM_DedicatedServer || !VisualConfig.HasEquipVisuals()
+		|| !IsValidPickupFXSlot(Slot))
 	{
 		AJ_LOG(this, TEXT("PickupFXComponent equip skipped - Owner=%s EquipVisuals=%d"),
 			*GetNameSafe(GetOwner()),
@@ -121,7 +158,7 @@ void UAeyerjiPickupFXComponent::PlayEquipFX(const FAeyerjiPickupVisualConfig& Vi
 		return;
 	}
 
-	const int32 SanitizedSlotIndex = FMath::Max(0, SlotIndex);
+	const int32 SanitizedSlotIndex = FMath::Clamp(SlotIndex, 0, MaxPickupFXSlotIndex);
 
 	CleanupStaleFX();
 	StopEquipFX(Slot, SanitizedSlotIndex);
@@ -161,7 +198,11 @@ void UAeyerjiPickupFXComponent::PlayEquipFX(const FAeyerjiPickupVisualConfig& Vi
 
 void UAeyerjiPickupFXComponent::StopEquipFX(EEquipmentSlot Slot, int32 SlotIndex)
 {
-	const int32 SanitizedSlotIndex = FMath::Max(0, SlotIndex);
+	if (!IsValidPickupFXSlot(Slot))
+	{
+		return;
+	}
+	const int32 SanitizedSlotIndex = FMath::Clamp(SlotIndex, 0, MaxPickupFXSlotIndex);
 
 	for (int32 Index = ActiveFX.Num() - 1; Index >= 0; --Index)
 	{
@@ -219,7 +260,7 @@ UNiagaraComponent* UAeyerjiPickupFXComponent::SpawnNiagara(
 	FName SocketOverride,
 	const FVector& LocalOffset)
 {
-	if (!System)
+	if (!IsValid(System) || !IsFinitePickupFXVector(LocalOffset))
 	{
 		return nullptr;
 	}
@@ -239,7 +280,7 @@ UNiagaraComponent* UAeyerjiPickupFXComponent::SpawnNiagara(
 		System,
 		AttachParent,
 		AttachSocket,
-		LocalOffset,
+		LocalOffset.BoundToBox(FVector(-MaxPickupFXOffset), FVector(MaxPickupFXOffset)),
 		FRotator::ZeroRotator,
 		EAttachLocation::KeepRelativeOffset,
 		true);
@@ -250,7 +291,12 @@ UNiagaraComponent* UAeyerjiPickupFXComponent::SpawnNiagara(
 
 		if (!VisualConfig.ColorParameter.IsNone())
 		{
-			NiagaraComp->SetVariableLinearColor(VisualConfig.ColorParameter, VisualConfig.FXColor);
+			const FLinearColor SafeColor(
+				FMath::IsFinite(VisualConfig.FXColor.R) ? VisualConfig.FXColor.R : 1.f,
+				FMath::IsFinite(VisualConfig.FXColor.G) ? VisualConfig.FXColor.G : 1.f,
+				FMath::IsFinite(VisualConfig.FXColor.B) ? VisualConfig.FXColor.B : 1.f,
+				FMath::IsFinite(VisualConfig.FXColor.A) ? VisualConfig.FXColor.A : 1.f);
+			NiagaraComp->SetVariableLinearColor(VisualConfig.ColorParameter, SafeColor);
 		}
 	}
 
@@ -259,7 +305,8 @@ UNiagaraComponent* UAeyerjiPickupFXComponent::SpawnNiagara(
 
 void UAeyerjiPickupFXComponent::ApplyOutlinePulse(const FAeyerjiPickupVisualConfig& VisualConfig)
 {
-	if (!VisualConfig.bPulseOutline || VisualConfig.OutlinePulseDuration <= 0.f)
+	if (!VisualConfig.bPulseOutline || !FMath::IsFinite(VisualConfig.OutlinePulseDuration)
+		|| VisualConfig.OutlinePulseDuration <= 0.f)
 	{
 		return;
 	}
@@ -275,9 +322,9 @@ void UAeyerjiPickupFXComponent::ApplyOutlinePulse(const FAeyerjiPickupVisualConf
 	if (CachedOutline.IsValid())
 	{
 		CachedOutline->PulseHighlight(
-			VisualConfig.OutlinePulseDuration,
-			VisualConfig.OutlinePulseFadeTime,
-			VisualConfig.OutlineStencilOverride);
+			FMath::Clamp(VisualConfig.OutlinePulseDuration, 0.f, MaxPickupFXDuration),
+			FMath::Clamp(FMath::IsFinite(VisualConfig.OutlinePulseFadeTime) ? VisualConfig.OutlinePulseFadeTime : 0.f, 0.f, MaxPickupFXDuration),
+			FMath::Clamp(VisualConfig.OutlineStencilOverride, -1, 255));
 	}
 }
 
@@ -286,6 +333,16 @@ void UAeyerjiPickupFXComponent::RegisterActiveFX(UNiagaraComponent* Component, b
 	if (!Component)
 	{
 		return;
+	}
+	CleanupStaleFX();
+	while (ActiveFX.Num() >= MaxActivePickupFX)
+	{
+		if (UNiagaraComponent* OldestComponent = ActiveFX[0].Component.Get())
+		{
+			OldestComponent->Deactivate();
+			OldestComponent->DestroyComponent();
+		}
+		ActiveFX.RemoveAt(0, 1, EAllowShrinking::No);
 	}
 
 	FAeyerjiActiveFXEntry& NewEntry = ActiveFX.Emplace_GetRef();

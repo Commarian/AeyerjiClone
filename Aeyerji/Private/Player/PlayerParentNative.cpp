@@ -25,6 +25,8 @@
 
 #include "GameFramework/PlayerState.h"
 
+#include "Frontend/AeyerjiFrontendRules.h"
+
 #include "GUI/W_ActionBar.h"
 
 #include "Engine/GameInstance.h"
@@ -390,7 +392,7 @@ void APlayerParentNative::PossessedBy(AController *NewController)
 
   {
 
-    AeyerjiPC->SetViewTarget(this);
+    AeyerjiPC->RestoreLocalCameraToPossessedPawn();
   }
 }
 
@@ -412,6 +414,15 @@ void APlayerParentNative::PawnClientRestart()
   if (IsLocallyControlled())
 
   {
+
+    if (AAeyerjiPlayerController *AeyerjiPC =
+            Cast<AAeyerjiPlayerController>(GetController()))
+
+    {
+
+      // Remote clients reach this after the server has respawned and replicated the replacement pawn.
+      AeyerjiPC->RestoreLocalCameraToPossessedPawn();
+    }
 
     FTimerHandle DelayTimer;
 
@@ -674,9 +685,11 @@ void APlayerParentNative::RetryInitAbilityActorInfo()
 
 /* ------------------  DEATH  ------------------ */
 
-void APlayerParentNative::OnDeath_Implementation()
+void APlayerParentNative::OnDeath_Implementation(AActor* Killer, const float DamageTaken)
 
 {
+	static_cast<void>(Killer);
+	static_cast<void>(DamageTaken);
   // Native death presentation is handled externally; keep the player hook logic-only.
   if (HasAuthority())
   {
@@ -687,13 +700,16 @@ void APlayerParentNative::OnDeath_Implementation()
   }
 }
 
-float APlayerParentNative::GetHealthPercent()
+float APlayerParentNative::GetHealthPercent() const
 
 {
+  const UAeyerjiAttributeSet* Attributes = GetAttrSet();
+  if (!Attributes || Attributes->GetHPMax() <= UE_KINDA_SMALL_NUMBER)
+  {
+    return 0.f;
+  }
 
-  // TODO Fix this placeholder
-
-  return 69.69f;
+  return FMath::Clamp(Attributes->GetHP() / Attributes->GetHPMax(), 0.f, 1.f);
 }
 
 void APlayerParentNative::HandleASCReady()
@@ -849,6 +865,7 @@ void APlayerParentNative::BeginResolveAndSendProfile()
 
             const AAeyerjiPlayerState* ResolvedPS = Self->GetPlayerState<AAeyerjiPlayerState>();
             const FString ExplicitSaveSlot = ResolvedPS
+                && UAeyerjiSaveManagerSubsystem::IsExplicitSaveSlotOverrideAllowed(ResolvedPS)
                 ? UCharacterStatsLibrary::SanitizeSaveSlotName(ResolvedPS->GetSaveSlotOverride())
                 : FString();
 
@@ -891,7 +908,6 @@ void APlayerParentNative::BeginResolveAndSendProfile()
             if (!ExplicitSaveSlot.IsEmpty())
             {
               Header.ExplicitSaveSlotOverride = ExplicitSaveSlot;
-              Header.OwnerKey = ExplicitSaveSlot;
             }
 
             Self->SendResolvedProfileToServer(Header, Bytes, bHadPersistedData);
@@ -957,6 +973,22 @@ void APlayerParentNative::SendResolvedProfileToServer(
     const bool bHadPersistedData)
 {
   const int32 TotalBytes = Bytes.Num();
+  if (TotalBytes > UAeyerjiSaveManagerSubsystem::MaximumProfileTransportBytes)
+  {
+    UE_LOG(LogTemp, Error,
+           TEXT("[ProfileLoad] ClientTransfer Rejected Pawn=%s Reason=PayloadTooLarge PayloadBytes=%d MaximumBytes=%d"),
+           *GetNameSafe(this),
+           TotalBytes,
+           UAeyerjiSaveManagerSubsystem::MaximumProfileTransportBytes);
+    bSaveLoadRequested = false;
+    if (AAeyerjiPlayerState* PS = GetPlayerState<AAeyerjiPlayerState>())
+    {
+      PS->SetProfileLoadState(EAeyerjiProfileLoadState::Failed);
+    }
+    Client_OnSaveLoaded(false);
+    return;
+  }
+
   if (TotalBytes > LegacyProfileRpcWarningBytes)
   {
     UE_LOG(LogTemp, Warning,
@@ -1007,16 +1039,6 @@ bool APlayerParentNative::CaptureAndPushAuthoritativeProfile(
   return PS->CommitCheckpointProfileFromPawn(Reason, SourcePawn, bBumpRevision);
 }
 
-void APlayerParentNative::Server_ApplyResolvedProfile_Implementation(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, const bool bHadPersistedData)
-
-{
-  UE_LOG(LogTemp, Warning,
-         TEXT("[ProfileLoad] Legacy single-RPC profile apply received for %s PayloadBytes=%d. Prefer chunked transfer."),
-         *GetNameSafe(this),
-         Bytes.Num());
-  ApplyResolvedProfilePayload(Header, Bytes, bHadPersistedData);
-}
-
 void APlayerParentNative::Server_BeginResolvedProfileTransfer_Implementation(
     const FAeyerjiSaveTransportHeader& Header,
     const int32 TotalBytes,
@@ -1025,7 +1047,6 @@ void APlayerParentNative::Server_BeginResolvedProfileTransfer_Implementation(
 {
   ResetPendingProfileTransfer();
 
-  const int32 SafeChunkSize = FMath::Clamp(ChunkSize, 1, ProfileTransportChunkSize);
   AAeyerjiPlayerState* PS = GetPlayerState<AAeyerjiPlayerState>();
   if (bSaveLoaded || !AbilitySystemAeyerji)
   {
@@ -1042,12 +1063,14 @@ void APlayerParentNative::Server_BeginResolvedProfileTransfer_Implementation(
     return;
   }
 
-  if (TotalBytes < 0)
+  if (ChunkSize <= 0 || ChunkSize > ProfileTransportChunkSize
+      || !IsResolvedProfileTransferAccepted(Header, TotalBytes, bHadPersistedData))
   {
     UE_LOG(LogTemp, Warning,
-           TEXT("[ProfileLoad] State=Failed Phase=BeginTransfer Pawn=%s Reason=NegativeSize Size=%d"),
+           TEXT("[ProfileLoad] State=Failed Phase=BeginTransfer Pawn=%s Reason=InvalidHeaderOrLayout Size=%d ChunkSize=%d"),
            *GetNameSafe(this),
-           TotalBytes);
+           TotalBytes,
+           ChunkSize);
     if (PS)
     {
       PS->SetProfileLoadState(EAeyerjiProfileLoadState::Failed);
@@ -1058,8 +1081,8 @@ void APlayerParentNative::Server_BeginResolvedProfileTransfer_Implementation(
 
   PendingProfileTransferHeader = Header;
   PendingProfileTransferExpectedBytes = TotalBytes;
-  PendingProfileTransferChunkSize = SafeChunkSize;
-  PendingProfileTransferExpectedChunks = TotalBytes > 0 ? FMath::DivideAndRoundUp(TotalBytes, SafeChunkSize) : 0;
+  PendingProfileTransferChunkSize = ChunkSize;
+  PendingProfileTransferExpectedChunks = TotalBytes > 0 ? FMath::DivideAndRoundUp(TotalBytes, ChunkSize) : 0;
   PendingProfileTransferReceivedChunks.Reset();
   PendingProfileTransferBytes.Reset();
   PendingProfileTransferBytes.SetNumZeroed(TotalBytes);
@@ -1220,7 +1243,9 @@ bool APlayerParentNative::ApplyResolvedProfilePayload(const FAeyerjiSaveTranspor
     return false;
   }
 
-  const FString ExplicitSaveSlot = UCharacterStatsLibrary::SanitizeSaveSlotName(Header.ExplicitSaveSlotOverride);
+  const FString ExplicitSaveSlot = UAeyerjiSaveManagerSubsystem::IsExplicitSaveSlotOverrideAllowed(PS)
+      ? UCharacterStatsLibrary::SanitizeSaveSlotName(Header.ExplicitSaveSlotOverride)
+      : FString();
   if (!ExplicitSaveSlot.IsEmpty())
   {
     PS->RequestSetSaveSlotOverride(ExplicitSaveSlot);
@@ -1295,6 +1320,42 @@ bool APlayerParentNative::ApplyResolvedProfilePayload(const FAeyerjiSaveTranspor
          Data->Revision,
          bHadPersistedData ? 1 : 0);
   return true;
+}
+
+bool APlayerParentNative::IsResolvedProfileTransferAccepted(
+    const FAeyerjiSaveTransportHeader& Header,
+    const int32 TotalBytes,
+    const bool bHadPersistedData) const
+{
+  const AAeyerjiPlayerState* PS = GetPlayerState<AAeyerjiPlayerState>();
+  const UGameInstance* GameInstance = GetGameInstance();
+  const UAeyerjiSaveManagerSubsystem* SaveManager = GameInstance
+      ? GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>()
+      : nullptr;
+  if (!PS || !SaveManager)
+  {
+    return false;
+  }
+
+  const FUniqueNetIdRepl& PlayerUniqueId = PS->GetUniqueId();
+  const TSharedPtr<const FUniqueNetId> NativeUniqueId = PlayerUniqueId.GetUniqueNetId();
+  const bool bNullIdentity = PlayerUniqueId.IsValid() && NativeUniqueId.IsValid()
+      && NativeUniqueId->GetType().IsEqual(FName(TEXT("NULL")), ENameCase::IgnoreCase);
+  const bool bOwnerAccepted = AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(
+      Header.OwnerKey,
+      SaveManager->ResolveOwnerKey(PS),
+      PS->GetFrontendProfileOwnerKey(),
+      bNullIdentity);
+  const bool bPayloadLayoutAccepted = bHadPersistedData
+      ? TotalBytes > 0 && TotalBytes <= UAeyerjiSaveManagerSubsystem::MaximumProfileTransportBytes
+      : TotalBytes == 0;
+
+  return Header.ArtifactKind == EAeyerjiSaveArtifactKind::Profile
+      && Header.SchemaVersion > 0
+      && Header.Revision >= 0
+      && Header.bHadPersistedData == bHadPersistedData
+      && bOwnerAccepted
+      && bPayloadLayoutAccepted;
 }
 
 void APlayerParentNative::ResetPendingProfileTransfer()

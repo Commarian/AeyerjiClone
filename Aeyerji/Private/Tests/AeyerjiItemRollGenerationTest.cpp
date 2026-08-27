@@ -12,6 +12,8 @@
 #include "Items/ItemInstance.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 
+#include <limits>
+
 namespace
 {
 	UItemAffixDefinition* MakeRollAffix(
@@ -275,6 +277,53 @@ bool FAeyerjiItemGenerationClampsAboveMaxLevelTest::RunTest(const FString& Param
 	}
 
 	TestEqual(TEXT("Generated item level is clamped to max gameplay level."), Item->ItemLevel, UAeyerjiDifficultySettings::GetMaxGameplayLevel());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiItemRarityTintUsesArgumentTest,
+	"Aeyerji.Items.Display.RarityTintUsesArgument",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiItemRarityTintUsesArgumentTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	UAeyerjiItemInstance* Item = NewObject<UAeyerjiItemInstance>(GetTransientPackage());
+	TestNotNull(TEXT("Item instance can be constructed."), Item);
+	if (!Item)
+	{
+		return false;
+	}
+
+	Item->Rarity = EItemRarity::Common;
+	const FLinearColor CommonTint = Item->RarityTint(EItemRarity::Common);
+	const FLinearColor LegendaryTint = Item->RarityTint(EItemRarity::Legendary);
+	TestFalse(TEXT("The requested rarity controls the tint instead of the instance field."),
+		CommonTint.Equals(LegendaryTint));
+	TestTrue(TEXT("Legendary tint matches the authored display color."),
+		LegendaryTint.Equals(FLinearColor(1.f, 0.6f, 0.2f, 1.f)));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiDifficultyFloatLevelConversionTest,
+	"Aeyerji.Difficulty.FloatLevelConversion",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiDifficultyFloatLevelConversionTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	TestEqual(TEXT("Finite fractional levels use the shared rounding rule."),
+		UAeyerjiDifficultySettings::FloatToGameplayLevel(4.6f), 5);
+	TestEqual(TEXT("NaN levels fall back to level one."),
+		UAeyerjiDifficultySettings::FloatToGameplayLevel(std::numeric_limits<float>::quiet_NaN()), 1);
+	TestEqual(TEXT("Infinite levels fall back to level one."),
+		UAeyerjiDifficultySettings::FloatToGameplayLevel(std::numeric_limits<float>::infinity()), 1);
+	TestEqual(TEXT("Levels above the authored cap clamp globally."),
+		UAeyerjiDifficultySettings::FloatToGameplayLevel(1000000.f),
+		UAeyerjiDifficultySettings::GetMaxGameplayLevel());
 	return true;
 }
 

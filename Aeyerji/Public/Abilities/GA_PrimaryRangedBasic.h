@@ -98,10 +98,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
 	FGameplayTag AilmentDurationSetByCallerTag;
 
-	/** Minimum cooldown duration when computing SetByCaller duration. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cooldown")
-	float MinCooldownDuration = 0.05f;
-
 	/** Broadcasts Event.PrimaryAttack.Completed when the shot resolves (server only). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Events")
 	bool bSendCompletionGameplayEvent = true;
@@ -171,7 +167,9 @@ private:
 	FTransform ComputeMuzzleTransform(const FGameplayAbilityActorInfo* ActorInfo) const;
 	float ResolveAttackSpeed(const FGameplayAbilityActorInfo* ActorInfo) const;
 	float ResolveProjectileSpeed(const FGameplayAbilityActorInfo* ActorInfo) const;
+	bool IsValidTargetActor(const FGameplayAbilityActorInfo* ActorInfo, AActor* Candidate, bool bRequireInRange = true) const;
 	AActor* ResolveTargetActor(const FGameplayAbilityActorInfo* ActorInfo, const FGameplayEventData* TriggerEventData) const;
+	void FinishShotWithoutProjectile(const TCHAR* Reason);
 
 	bool ShouldProcessServerLogic() const;
 	bool IsLocallyPredicting() const;

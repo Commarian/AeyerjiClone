@@ -60,7 +60,8 @@ public:
 	
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite)
 	TArray<FAeyerjiAbilitySlot> ActionBar;
-	//TODO later use this new struct to save and load XP instead of using the entire attribute thing, it looks like it doesnt serialize well.
+
+	/** Compact progression snapshot; avoids serializing transient GAS attribute objects. */
 	UPROPERTY(SaveGame) FAttrSnapshot Attributes;
 
 	UPROPERTY(SaveGame)

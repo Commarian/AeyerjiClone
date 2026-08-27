@@ -58,10 +58,6 @@ public:
 	UFUNCTION(Server, Reliable)
 	void Server_RequestLoadCharacter();
 
-	/** Client -> Server authoritative apply of the resolved local/cloud profile snapshot. */
-	UFUNCTION(Server, Reliable)
-	void Server_ApplyResolvedProfile(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, bool bHadPersistedData);
-
 	/** Begins a chunked profile snapshot upload from the owning client to the authoritative server pawn. */
 	UFUNCTION(Server, Reliable)
 	void Server_BeginResolvedProfileTransfer(const FAeyerjiSaveTransportHeader& Header, int32 TotalBytes, int32 ChunkSize, bool bHadPersistedData);
@@ -134,17 +130,14 @@ protected:
 	TObjectPtr<UWeaponEquipmentComponent> WeaponEquipmentComponent = nullptr;
 
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-	virtual void OnDeath_Implementation() override;
+	virtual void OnDeath_Implementation(AActor* Killer, float DamageTaken) override;
 
-	/* Optional: expose current health % to BP/UMG */
+	/** Returns current health as a normalized value for Blueprint and UMG presentation. */
 	UFUNCTION(BlueprintPure, Category = "GAS")
-	static float GetHealthPercent();
+	float GetHealthPercent() const;
 
 	UFUNCTION()
 	void HandleASCReady();
-
-	/* Keep track so we don't double-grant on seamless travel */
-	bool bStartupGiven = false;
 
 	UPROPERTY(EditDefaultsOnly, Category = "AI")
 	uint8 TeamId = 0; // 0 = Players by convention
@@ -155,6 +148,7 @@ private:
 	bool CaptureAndPushAuthoritativeProfile(const APawn* SourcePawn, EAeyerjiSaveCheckpointReason Reason, bool bBumpRevision);
 	void SendResolvedProfileToServer(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, bool bHadPersistedData);
 	bool ApplyResolvedProfilePayload(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes, bool bHadPersistedData);
+	bool IsResolvedProfileTransferAccepted(const FAeyerjiSaveTransportHeader& Header, int32 TotalBytes, bool bHadPersistedData) const;
 	void ResetPendingProfileTransfer();
 
 	void QueueInitAbilityActorInfoRetry();

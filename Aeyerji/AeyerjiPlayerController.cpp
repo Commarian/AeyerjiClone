@@ -37,7 +37,9 @@
 #include "Engine/LocalPlayer.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Abilities/GameplayAbilityTargetTypes.h"
+#include "Abilities/GameplayAbility.h"
 #include "Abilities/Blink/GABlink.h"
+#include "Abilities/GA_PrimaryMeleeBasic.h"
 #include "Components/CapsuleComponent.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "AeyerjiGameplayTags.h"
@@ -69,6 +71,8 @@
 #include "GUI/W_EndRunScreen.h"
 #include "GUI/W_ItemTile.h"
 #include "GUI/W_AeyerjiMissionHUD.h"
+#include "GUI/W_AeyerjiMinimap.h"
+#include "Frontend/AeyerjiFrontendSubsystem.h"
 #include "Systems/LootService.h"
 #include "Systems/LootTable.h"
 #include "Navigation/AeyerjiNavSafetyLibrary.h"
@@ -245,27 +249,151 @@ namespace
 		return true;
 	}
 
-	bool IsCursorNearActorScreenLocation(const APlayerController* PlayerController, const AActor* TargetActor, const float RadiusPx)
+	/**
+	 * Projects an actor's visible/collision bounds instead of treating its root as a point.
+	 * This keeps cursor forgiveness aligned with large meshes and child collision components.
+	 */
+	bool GetProjectedActorScreenBounds(
+		const APlayerController* PlayerController,
+		const AActor* TargetActor,
+		FVector2D& OutMinScreen,
+		FVector2D& OutMaxScreen,
+		FBox* OutWorldBounds = nullptr)
 	{
-		if (!IsValid(PlayerController) || !IsValid(TargetActor) || RadiusPx <= 0.f)
+		if (!IsValid(PlayerController) || !IsValid(TargetActor))
+		{
+			return false;
+		}
+
+		FBox WorldBounds = TargetActor->GetComponentsBoundingBox(/*bNonColliding=*/true);
+		if (!WorldBounds.IsValid)
+		{
+			const FVector ActorLocation = TargetActor->GetActorLocation();
+			WorldBounds = FBox(ActorLocation, ActorLocation);
+		}
+
+		const FVector BoundsCenter = WorldBounds.GetCenter();
+		const FVector BoundsExtent = WorldBounds.GetExtent();
+		bool bProjectedAnyCorner = false;
+		for (int32 XIndex = 0; XIndex < 2; ++XIndex)
+		{
+			for (int32 YIndex = 0; YIndex < 2; ++YIndex)
+			{
+				for (int32 ZIndex = 0; ZIndex < 2; ++ZIndex)
+				{
+					const FVector Corner(
+						BoundsCenter.X + BoundsExtent.X * (XIndex == 0 ? -1.f : 1.f),
+						BoundsCenter.Y + BoundsExtent.Y * (YIndex == 0 ? -1.f : 1.f),
+						BoundsCenter.Z + BoundsExtent.Z * (ZIndex == 0 ? -1.f : 1.f));
+
+					FVector2D CornerScreen;
+					if (!PlayerController->ProjectWorldLocationToScreen(Corner, CornerScreen))
+					{
+						continue;
+					}
+
+					if (!bProjectedAnyCorner)
+					{
+						OutMinScreen = CornerScreen;
+						OutMaxScreen = CornerScreen;
+						bProjectedAnyCorner = true;
+					}
+					else
+					{
+						OutMinScreen.X = FMath::Min(OutMinScreen.X, CornerScreen.X);
+						OutMinScreen.Y = FMath::Min(OutMinScreen.Y, CornerScreen.Y);
+						OutMaxScreen.X = FMath::Max(OutMaxScreen.X, CornerScreen.X);
+						OutMaxScreen.Y = FMath::Max(OutMaxScreen.Y, CornerScreen.Y);
+					}
+				}
+			}
+		}
+
+		if (!bProjectedAnyCorner)
+		{
+			FVector2D ActorScreen;
+			if (!PlayerController->ProjectWorldLocationToScreen(TargetActor->GetActorLocation(), ActorScreen))
+			{
+				return false;
+			}
+			OutMinScreen = ActorScreen;
+			OutMaxScreen = ActorScreen;
+		}
+
+		if (OutWorldBounds)
+		{
+			*OutWorldBounds = WorldBounds;
+		}
+		return true;
+	}
+
+	bool IsCursorNearActorScreenBounds(const APlayerController* PlayerController, const AActor* TargetActor, const float RadiusPx)
+	{
+		if (RadiusPx <= 0.f)
 		{
 			return false;
 		}
 
 		float MouseX = 0.f;
 		float MouseY = 0.f;
-		if (!PlayerController->GetMousePosition(MouseX, MouseY))
+		if (!PlayerController || !PlayerController->GetMousePosition(MouseX, MouseY))
 		{
 			return false;
 		}
 
-		FVector2D TargetScreenPos;
-		if (!PlayerController->ProjectWorldLocationToScreen(TargetActor->GetActorLocation(), TargetScreenPos))
+		FVector2D MinScreen;
+		FVector2D MaxScreen;
+		if (!GetProjectedActorScreenBounds(PlayerController, TargetActor, MinScreen, MaxScreen))
 		{
 			return false;
 		}
 
-		return FVector2D::DistSquared(TargetScreenPos, FVector2D(MouseX, MouseY)) <= FMath::Square(RadiusPx);
+		const FVector2D CursorPosition(MouseX, MouseY);
+		const FVector2D ClosestScreenPoint(
+			FMath::Clamp(CursorPosition.X, MinScreen.X, MaxScreen.X),
+			FMath::Clamp(CursorPosition.Y, MinScreen.Y, MaxScreen.Y));
+		return FVector2D::DistSquared(CursorPosition, ClosestScreenPoint) <= FMath::Square(RadiusPx);
+	}
+
+	const AEnemyParentNative* FindEnemyOwnerInCursorHierarchy(const AActor* Candidate)
+	{
+		for (const AActor* Current = Candidate; Current; Current = Current->GetOwner())
+		{
+			if (const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(Current))
+			{
+				return Enemy;
+			}
+		}
+
+		for (const AActor* Attached = Candidate ? Candidate->GetAttachParentActor() : nullptr;
+			Attached;
+			Attached = Attached->GetAttachParentActor())
+		{
+			for (const AActor* Current = Attached; Current; Current = Current->GetOwner())
+			{
+				if (const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(Current))
+				{
+					return Enemy;
+				}
+			}
+		}
+
+		return nullptr;
+	}
+
+	const AEnemyParentNative* FindEnemyOwnerInCursorHit(const FHitResult& Hit)
+	{
+		if (const AEnemyParentNative* Enemy = FindEnemyOwnerInCursorHierarchy(Hit.GetActor()))
+		{
+			return Enemy;
+		}
+
+		if (const UPrimitiveComponent* HitComponent = Hit.GetComponent())
+		{
+			return FindEnemyOwnerInCursorHierarchy(HitComponent->GetOwner());
+		}
+
+		return nullptr;
 	}
 
 	bool AbilityUsesExternalTargetEvent(const TSubclassOf<UGameplayAbility>& AbilityClass)
@@ -273,6 +401,69 @@ namespace
 		return AbilityClass
 			&& (AbilityClass->IsChildOf(UGA_AeyerjiTargetedEffectBase::StaticClass())
 				|| AbilityClass->IsChildOf(UGABlink::StaticClass()));
+	}
+
+	FGameplayTag FindRequestedAbilityTag(const FAeyerjiAbilitySlot& AbilitySlot)
+	{
+		for (const FGameplayTag& Tag : AbilitySlot.Tag)
+		{
+			if (Tag.IsValid() && Tag.ToString().StartsWith(TEXT("Ability.")))
+			{
+				return Tag;
+			}
+		}
+
+		return FGameplayTag();
+	}
+
+	bool ResolveAuthoritativeActionBarSlot(
+		const AAeyerjiPlayerController* Controller,
+		const FAeyerjiAbilitySlot& RequestedSlot,
+		FAeyerjiAbilitySlot& OutSlot)
+	{
+		OutSlot = FAeyerjiAbilitySlot();
+		const AAeyerjiPlayerState* PlayerState = Controller
+			? Controller->GetPlayerState<AAeyerjiPlayerState>()
+			: nullptr;
+		if (!PlayerState)
+		{
+			return false;
+		}
+
+		const FGameplayTag RequestedTag = FindRequestedAbilityTag(RequestedSlot);
+		for (const FAeyerjiAbilitySlot& AuthorizedSlot : PlayerState->GetActionBar())
+		{
+			const bool bMatchesTag = RequestedTag.IsValid() && AuthorizedSlot.Tag.HasTagExact(RequestedTag);
+			const bool bMatchesLegacyClass = !RequestedTag.IsValid()
+				&& RequestedSlot.Class
+				&& RequestedSlot.Class == AuthorizedSlot.Class;
+			if ((bMatchesTag || bMatchesLegacyClass) && AuthorizedSlot.Class)
+			{
+				OutSlot = AuthorizedSlot;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	bool CanControlSharedWorldState(const AAeyerjiPlayerController* Controller)
+	{
+		if (!Controller)
+		{
+			return false;
+		}
+
+		const AAeyerjiGameState* GameState = Controller->GetWorld()
+			? Controller->GetWorld()->GetGameState<AAeyerjiGameState>()
+			: nullptr;
+		const AAeyerjiPlayerState* PlayerState = Controller->GetPlayerState<AAeyerjiPlayerState>();
+		if (!GameState || !PlayerState)
+		{
+			return Controller->GetNetMode() == NM_Standalone;
+		}
+
+		return GameState->IsRunControlRequesterAuthorized(PlayerState);
 	}
 
 	bool TryActivateAbilitySlotDirectly(UAbilitySystemComponent* ASC, const FAeyerjiAbilitySlot& AbilitySlot, const UObject* LogContext, const TCHAR* ContextLabel)
@@ -471,6 +662,9 @@ void AAeyerjiPlayerController::Tick(float DeltaSeconds)
 
 void AAeyerjiPlayerController::OnPossess(APawn* InPawn)
 {
+	// Blueprint class defaults are applied after the native constructor. Disable this before the
+	// engine possession path so APlayerController cannot replace our explicitly restored view target.
+	DisableAutomaticCameraTargetManagement();
 	UnbindMouseCommandRecoveryDelegates();
 	Super::OnPossess(InPawn);
 
@@ -494,6 +688,14 @@ void AAeyerjiPlayerController::OnPossess(APawn* InPawn)
 	BindGoldDelegate();
 	RefreshZoneRuntimeReferences();
 	RebindInventoryWidgetsToCurrentPawn();
+	if (IsLocalController())
+	{
+		if (UAeyerjiFrontendSubsystem* Frontend = GetGameInstance() ? GetGameInstance()->GetSubsystem<UAeyerjiFrontendSubsystem>() : nullptr)
+		{
+			Frontend->NotifyLocalPlayerStateReady(GetPlayerState<AAeyerjiPlayerState>());
+		}
+		EnsureMinimap();
+	}
 	if (const AAeyerjiGameState* GameState = BoundWorldFlowGameState.Get())
 	{
 		if (GameState->GetWorldFlowPhase() == EAeyerjiWorldFlowPhase::Gameplay)
@@ -505,10 +707,45 @@ void AAeyerjiPlayerController::OnPossess(APawn* InPawn)
 	{
 		ApplyGameplayMouseInputMode(/*bFlushInput=*/true);
 	}
+
+	RestoreLocalCameraToPossessedPawn();
+	if (IsLocalController())
+	{
+		// Pawn camera components can finish initializing after possession on a client.
+		// Reassert once next tick in case component initialization changes the view target.
+		GetWorldTimerManager().SetTimerForNextTick(this, &AAeyerjiPlayerController::RestoreLocalCameraToPossessedPawn);
+	}
+}
+
+void AAeyerjiPlayerController::DisableAutomaticCameraTargetManagement()
+{
+	if (!bAutoManageActiveCameraTarget)
+	{
+		return;
+	}
+
+	bAutoManageActiveCameraTarget = false;
+	AJ_LOG(this, TEXT("[Camera] Disabled automatic camera-target management to preserve the controller-owned player view."));
+}
+
+void AAeyerjiPlayerController::AutoManageActiveCameraTarget(AActor* /*SuggestedTarget*/)
+{
+	// APlayerController calls this after ClientRestart and after server possession when the
+	// Blueprint default is true. This controller restores the possessed player pawn explicitly,
+	// so accepting an automatic target here can replace that camera during a respawn handoff.
+	DisableAutomaticCameraTargetManagement();
 }
 
 void AAeyerjiPlayerController::OnUnPossess()
 {
+	APawn* PreviousPawn = GetPawn();
+	if (IsLocalController())
+	{
+		AJ_LOG(this, TEXT("[Camera] Beginning pawn unpossession. PreviousPawn=%s ViewTarget=%s"),
+			*GetNameSafe(PreviousPawn),
+			*GetNameSafe(GetViewTarget()));
+	}
+
 	UnbindMouseCommandRecoveryDelegates();
 	CancelMouseCommandRecovery(/*bSuppressCurrentCommandUntilRelease=*/false);
 	AbortMovement_Both();
@@ -537,8 +774,42 @@ void AAeyerjiPlayerController::OnUnPossess()
 
 	Super::OnUnPossess();
 
+	if (IsLocalController())
+	{
+		AJ_LOG(this, TEXT("[Camera] Completed pawn unpossession. PreviousPawn=%s CurrentPawn=%s ViewTarget=%s"),
+			*GetNameSafe(PreviousPawn),
+			*GetNameSafe(GetPawn()),
+			*GetNameSafe(GetViewTarget()));
+	}
+
 	UpdatePathFollowingForPawnState();
 	RebindInventoryWidgetsToCurrentPawn();
+}
+
+void AAeyerjiPlayerController::RestoreLocalCameraToPossessedPawn()
+{
+	DisableAutomaticCameraTargetManagement();
+
+	if (!IsLocalController())
+	{
+		return;
+	}
+
+	APlayerParentNative* PlayerPawn = Cast<APlayerParentNative>(GetPawn());
+	if (!IsValid(PlayerPawn))
+	{
+		return;
+	}
+
+	AActor* PreviousViewTarget = GetViewTarget();
+	const bool bWasAlreadyViewingPlayerPawn = PreviousViewTarget == PlayerPawn;
+	SetViewTarget(PlayerPawn);
+	if (!bWasAlreadyViewingPlayerPawn)
+	{
+		AJ_LOG(this, TEXT("[Camera] Restored local view target after player possession. Pawn=%s PreviousViewTarget=%s"),
+			*GetNameSafe(PlayerPawn),
+			*GetNameSafe(PreviousViewTarget));
+	}
 }
 
 void AAeyerjiPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -574,6 +845,7 @@ void AAeyerjiPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		MissionHUDWidget->RemoveFromParent();
 	}
+	HideMinimap();
 
 	if (EndRunScreenWidget)
 	{
@@ -590,6 +862,9 @@ void AAeyerjiPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AAeyerjiPlayerController::OnRep_Pawn()
 {
+	// Clients can receive a respawn through OnRep_Pawn without OnPossess. Apply the same policy
+	// before Super::OnRep_Pawn, whose client-restart path otherwise auto-selects a camera target.
+	DisableAutomaticCameraTargetManagement();
 	UnbindMouseCommandRecoveryDelegates();
 	Super::OnRep_Pawn();
 
@@ -629,6 +904,14 @@ void AAeyerjiPlayerController::OnRep_Pawn()
 	{
 		ApplyGameplayMouseInputMode(/*bFlushInput=*/true);
 	}
+
+	RestoreLocalCameraToPossessedPawn();
+	if (IsLocalController())
+	{
+		// OnRep_Pawn is the remote-client respawn path when the server replaces the dead pawn.
+		GetWorldTimerManager().SetTimerForNextTick(this, &AAeyerjiPlayerController::RestoreLocalCameraToPossessedPawn);
+		EnsureMinimap();
+	}
 }
 
 void AAeyerjiPlayerController::OnRep_PlayerState()
@@ -637,6 +920,13 @@ void AAeyerjiPlayerController::OnRep_PlayerState()
 
 	BindGoldDelegate();
 	ApplyCurrentGoldStateToMissionHUD();
+	if (IsLocalController())
+	{
+		if (UAeyerjiFrontendSubsystem* Frontend = GetGameInstance() ? GetGameInstance()->GetSubsystem<UAeyerjiFrontendSubsystem>() : nullptr)
+		{
+			Frontend->NotifyLocalPlayerStateReady(GetPlayerState<AAeyerjiPlayerState>());
+		}
+	}
 }
 
 void AAeyerjiPlayerController::RebindInventoryWidgetsToCurrentPawn()
@@ -755,9 +1045,11 @@ void AAeyerjiPlayerController::HandleZoneGameplayReady(const FName ZoneId, const
 
 	ResetExtractionCountdownState();
 	HideEndRunScreen(/*bRestoreGameplayInput=*/false);
+	HideMainMenuWidget();
 	RefreshZoneRuntimeReferences();
 	ApplyGameplayMouseInputMode(/*bFlushInput=*/true);
 	EnsureMissionHUD();
+	EnsureMinimap();
 	ApplyCurrentObjectiveStateFromGameState();
 	ApplyCurrentSurvivalRoundStateFromGameState();
 	ApplyCurrentSurvivalUpgradeOfferFromGameState();
@@ -788,6 +1080,7 @@ void AAeyerjiPlayerController::HandleWorldFlowPhaseChanged(const EAeyerjiWorldFl
 		{
 			MissionHUDWidget->RemoveFromParent();
 		}
+		HideMinimap();
 		if (NewPhase == EAeyerjiWorldFlowPhase::Menu)
 		{
 			if (OldPhase != NewPhase)
@@ -805,6 +1098,7 @@ void AAeyerjiPlayerController::HandleWorldFlowPhaseChanged(const EAeyerjiWorldFl
 
 	HideMainMenuWidget();
 	EnsureMissionHUD();
+	EnsureMinimap();
 	ApplyCurrentObjectiveStateFromGameState();
 	ApplyCurrentSurvivalRoundStateFromGameState();
 	ApplyCurrentSurvivalUpgradeOfferFromGameState();
@@ -834,6 +1128,7 @@ void AAeyerjiPlayerController::HandleRunStateChanged(const EAeyerjiRunState NewS
 		{
 			MissionHUDWidget->RemoveFromParent();
 		}
+		HideMinimap();
 		return;
 	}
 
@@ -845,6 +1140,7 @@ void AAeyerjiPlayerController::HandleRunStateChanged(const EAeyerjiRunState NewS
 		{
 			MissionHUDWidget->RemoveFromParent();
 		}
+		HideMinimap();
 		return;
 	}
 
@@ -854,6 +1150,10 @@ void AAeyerjiPlayerController::HandleRunStateChanged(const EAeyerjiRunState NewS
 		const AAeyerjiGameState* GameState = BoundWorldFlowGameState.Get();
 		const bool bRestoreGameplayInput = IsValid(GameState) && GameState->GetWorldFlowPhase() == EAeyerjiWorldFlowPhase::Gameplay;
 		HideEndRunScreen(bRestoreGameplayInput);
+		if (bRestoreGameplayInput)
+		{
+			EnsureMinimap();
+		}
 	}
 }
 
@@ -955,6 +1255,54 @@ void AAeyerjiPlayerController::EnsureMissionHUD()
 	}
 
 	ApplyCurrentGoldStateToMissionHUD();
+}
+
+void AAeyerjiPlayerController::EnsureMinimap()
+{
+	if (!IsLocalController() || !bEnableMinimap || GetNetMode() == NM_DedicatedServer)
+	{
+		HideMinimap();
+		return;
+	}
+
+	AAeyerjiGameState* GameState = BoundWorldFlowGameState.Get();
+	if (!IsValid(GameState))
+	{
+		if (UWorld* World = GetWorld())
+		{
+			GameState = World->GetGameState<AAeyerjiGameState>();
+		}
+	}
+
+	if (IsValid(GameState) && GameState->GetWorldFlowPhase() != EAeyerjiWorldFlowPhase::Gameplay)
+	{
+		HideMinimap();
+		return;
+	}
+
+	if (!MinimapWidget)
+	{
+		TSubclassOf<UW_AeyerjiMinimap> WidgetClass = MinimapWidgetClass;
+		if (!WidgetClass)
+		{
+			WidgetClass = UW_AeyerjiMinimap::StaticClass();
+		}
+		MinimapWidget = CreateWidget<UW_AeyerjiMinimap>(this, WidgetClass);
+	}
+
+	if (MinimapWidget && !MinimapWidget->IsInViewport())
+	{
+		MinimapWidget->AddToViewport(MinimapZOrder);
+		MinimapWidget->RefreshMarkers();
+	}
+}
+
+void AAeyerjiPlayerController::HideMinimap()
+{
+	if (MinimapWidget)
+	{
+		MinimapWidget->RemoveFromParent();
+	}
 }
 
 void AAeyerjiPlayerController::ApplyCurrentObjectiveStateFromGameState()
@@ -1198,6 +1546,7 @@ void AAeyerjiPlayerController::ShowEndRunScreen(const FAeyerjiRunResults& Result
 	{
 		MissionHUDWidget->RemoveFromParent();
 	}
+	HideMinimap();
 	EndRunScreenWidget->ApplyRunResults(Results);
 	if (!EndRunScreenWidget->IsInViewport())
 	{
@@ -1228,8 +1577,9 @@ void AAeyerjiPlayerController::HideEndRunScreen(const bool bRestoreGameplayInput
 
 void AAeyerjiPlayerController::EnsureMainMenuWidget(const bool bAllowCreate)
 {
-	if (!IsLocalController() || !MainMenuWidgetClass)
+	if (!IsLocalController() || !MainMenuWidgetClass || !ShouldPresentMainMenu())
 	{
+		HideMainMenuWidget();
 		return;
 	}
 
@@ -1262,6 +1612,14 @@ void AAeyerjiPlayerController::EnsureMainMenuWidget(const bool bAllowCreate)
 	{
 		MainMenuWidget->AddToViewport(MainMenuWidgetZOrder);
 	}
+	// NativeConstruct may synchronously receive an InGameplay snapshot and remove the shell.
+	// Re-check before applying UI-only input so gameplay never inherits menu focus/capture.
+	if (!ShouldPresentMainMenu() || !MainMenuWidget->IsInViewport())
+	{
+		HideMainMenuWidget();
+		ApplyGameplayMouseInputMode(/*bFlushInput=*/true);
+		return;
+	}
 
 	UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(
 		this,
@@ -1271,12 +1629,51 @@ void AAeyerjiPlayerController::EnsureMainMenuWidget(const bool bAllowCreate)
 	bShowMouseCursor = true;
 }
 
+bool AAeyerjiPlayerController::ShouldPresentMainMenu() const
+{
+	if (!IsLocalController())
+	{
+		return false;
+	}
+
+	const UWorld* World = GetWorld();
+	const AAeyerjiGameState* GameState = World ? World->GetGameState<AAeyerjiGameState>() : nullptr;
+	return GameState
+		&& GameState->GetWorldFlowPhase() == EAeyerjiWorldFlowPhase::Menu
+		&& GameState->GetLobbySnapshot().Phase != EAeyerjiLobbyPhase::InGameplay;
+}
+
 void AAeyerjiPlayerController::HideMainMenuWidget()
 {
+	if (!IsLocalController())
+	{
+		return;
+	}
+
+	// Seamless travel can preserve a menu that was created by the Blueprint controller after
+	// the native controller attempted to adopt it. Remove every live instance so cleanup does
+	// not depend on MainMenuWidget having captured that Blueprint-created widget first.
+	TArray<UUserWidget*> ExistingWidgets;
+	if (MainMenuWidgetClass)
+	{
+		UWidgetBlueprintLibrary::GetAllWidgetsOfClass(this, ExistingWidgets, MainMenuWidgetClass, false);
+	}
+
 	if (MainMenuWidget)
 	{
+		MainMenuWidget->SetVisibility(ESlateVisibility::Collapsed);
 		MainMenuWidget->RemoveFromParent();
 	}
+
+	for (UUserWidget* ExistingWidget : ExistingWidgets)
+	{
+		if (IsValid(ExistingWidget) && ExistingWidget != MainMenuWidget)
+		{
+			ExistingWidget->SetVisibility(ESlateVisibility::Collapsed);
+			ExistingWidget->RemoveFromParent();
+		}
+	}
+	MainMenuWidget = nullptr;
 }
 
 void AAeyerjiPlayerController::ResetMainMenuWidgetInstance()
@@ -1646,6 +2043,38 @@ void AAeyerjiPlayerController::ReportMouseNavContextToServer(EMouseNavResult Res
 
 void AAeyerjiPlayerController::Server_SetMouseNavContext_Implementation(EMouseNavResult Result, FVector NavLocation, FVector CursorLocation, APawn* ClickedPawn)
 {
+	if (NavLocation.ContainsNaN() || CursorLocation.ContainsNaN())
+	{
+		MouseNavServerCache.Invalidate();
+		return;
+	}
+
+	if (Result != EMouseNavResult::None
+		&& Result != EMouseNavResult::NavLocation
+		&& Result != EMouseNavResult::ClickedPawn)
+	{
+		MouseNavServerCache.Invalidate();
+		return;
+	}
+
+	if (Result == EMouseNavResult::ClickedPawn)
+	{
+		const bool bReportablePawn = IsValid(ClickedPawn)
+			&& ClickedPawn->GetWorld() == GetWorld()
+			&& ClickedPawn->GetIsReplicated()
+			&& !ClickedPawn->IsPlayerControlled()
+			&& !ClickedPawn->IsA<ASpectatorPawn>();
+		if (!bReportablePawn)
+		{
+			MouseNavServerCache.Invalidate();
+			return;
+		}
+	}
+	else
+	{
+		ClickedPawn = nullptr;
+	}
+
 	SetMouseNavContextInternal(Result, NavLocation, CursorLocation, ClickedPawn);
 }
 
@@ -1817,10 +2246,33 @@ bool AAeyerjiPlayerController::HasActivePrimaryMeleePhaseTag(const UAbilitySyste
 		return false;
 	}
 
-	return ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_PrimaryMelee_WindUp)
+	const bool bHasPrimaryMeleePhaseTag = ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_PrimaryMelee_WindUp)
 		|| ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_PrimaryMelee_HitWindow)
 		|| ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_PrimaryMelee_Recovery)
 		|| ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_PrimaryMelee_BlockMovement);
+	if (!bHasPrimaryMeleePhaseTag)
+	{
+		return false;
+	}
+
+	// Loose phase tags can survive a cancelled prediction or ability teardown for a frame (or,
+	// after an interrupted transition, longer). They are only allowed to own locomotion while
+	// the corresponding primary-melee spec is genuinely active.
+	for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
+	{
+		const UGameplayAbility* AbilityCDO = Spec.Ability;
+		if (!Spec.IsActive() || !AbilityCDO)
+		{
+			continue;
+		}
+
+		if (AbilityCDO->GetAssetTags().HasTagExact(AeyerjiTags::Ability_Primary_Melee_Basic))
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 void AAeyerjiPlayerController::PushPrimaryMeleeRotationLockMode()
@@ -1990,16 +2442,16 @@ void AAeyerjiPlayerController::UpdatePrimaryMeleeRotationLock()
 		return;
 	}
 
-	const bool bHasMeleePhase = HasActivePrimaryMeleePhaseTag(GetControlledAbilitySystem());
+	const bool bHasActivePrimaryMeleePhase = HasActivePrimaryMeleePhaseTag(GetControlledAbilitySystem());
 	const double Now = World->GetTimeSeconds();
 
-	if (bHasMeleePhase)
+	if (bHasActivePrimaryMeleePhase)
 	{
 		PrimaryMeleeRotationLockReleaseTime = Now + FMath::Max(0.f, PrimaryMeleeRotationLockGraceSeconds);
 	}
 
 	const bool bWithinGrace = PrimaryMeleeRotationLockReleaseTime >= 0.0 && Now < PrimaryMeleeRotationLockReleaseTime;
-	const bool bShouldLock = bHasMeleePhase || bWithinGrace;
+	const bool bShouldLock = bHasActivePrimaryMeleePhase || bWithinGrace;
 	const bool bWasMovementBlocked = bPrimaryMeleeMovementBlockActive;
 	bPrimaryMeleeMovementBlockActive = bShouldLock;
 
@@ -2453,6 +2905,12 @@ void AAeyerjiPlayerController::Server_SelectSurvivalUpgrade_Implementation(const
 
 void AAeyerjiPlayerController::Server_SetDifficultySlider_Implementation(const float NewDifficultySlider)
 {
+	if (!CanControlSharedWorldState(this))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("PlayerController::Server_SetDifficultySlider rejected non-leader Controller=%s"), *GetNameSafe(this));
+		return;
+	}
+
 	if (UWorld* World = GetWorld())
 	{
 		if (UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(World->GetGameInstance()))
@@ -2468,6 +2926,12 @@ void AAeyerjiPlayerController::Server_SetDifficultySlider_Implementation(const f
 
 void AAeyerjiPlayerController::Server_SetWorldTier_Implementation(const int32 NewWorldTier)
 {
+	if (!CanControlSharedWorldState(this))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("PlayerController::Server_SetWorldTier rejected non-leader Controller=%s"), *GetNameSafe(this));
+		return;
+	}
+
 	if (UWorld* World = GetWorld())
 	{
 		if (UAeyerjiGameInstance* GI = Cast<UAeyerjiGameInstance>(World->GetGameInstance()))
@@ -2483,6 +2947,15 @@ void AAeyerjiPlayerController::Server_SetWorldTier_Implementation(const int32 Ne
 
 void AAeyerjiPlayerController::Server_RequestZoneTransition_Implementation(const FName TargetZoneId)
 {
+	if (!CanControlSharedWorldState(this))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("PlayerController::Server_RequestZoneTransition rejected non-leader Controller=%s ZoneId=%s"),
+			*GetNameSafe(this),
+			*TargetZoneId.ToString());
+		return;
+	}
+
 	if (TargetZoneId.IsNone())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("PlayerController::Server_RequestZoneTransition rejected None ZoneId."));
@@ -2916,6 +3389,9 @@ void AAeyerjiPlayerController::ApplyGameplayMouseInputMode(bool bFlushInput)
 
 void AAeyerjiPlayerController::BeginPlay()
 {
+	// A Blueprint child currently overrides this native default. Enforce it at runtime after all
+	// class defaults are available, before the controller begins any camera or possession work.
+	DisableAutomaticCameraTargetManagement();
     Super::BeginPlay();
 	EnableCheats();
 	AddCheats(true);
@@ -2937,6 +3413,7 @@ void AAeyerjiPlayerController::BeginPlay()
             }
         }
         EnsureShowLootBinding();
+		EnsureMinimap();
     }
 
     // Apply profile if assigned (server authoritative, but run for local settings too)
@@ -3067,7 +3544,20 @@ bool AAeyerjiPlayerController::OnPreClickPawnHit_Implementation(AActor* Actor, c
 // --------------- Server notify handler --------------------
 void AAeyerjiPlayerController::Server_NotifyPawnClicked_Implementation(AActor* Actor)
 {
-	// Only meaningful on the server; broadcast for server-side BP listeners.
+	const APawn* ClickedPawn = Cast<APawn>(Actor);
+	if (!IsValid(ClickedPawn)
+		|| ClickedPawn->GetWorld() != GetWorld()
+		|| !ClickedPawn->GetIsReplicated()
+		|| ClickedPawn->IsPlayerControlled()
+		|| ClickedPawn->IsA<ASpectatorPawn>())
+	{
+		UE_LOG(LogAeyerji, Warning, TEXT("[Input] Server pawn-click notify rejected Actor=%s Controller=%s"),
+			*GetNameSafe(Actor),
+			*GetNameSafe(this));
+		return;
+	}
+
+	// This delegate is informational; authoritative gameplay must still validate any action it starts.
 	OnServerPawnClicked.Broadcast(Actor);
 }
 
@@ -3088,6 +3578,21 @@ void AAeyerjiPlayerController::ClearMouseCommandData()
 
 void AAeyerjiPlayerController::CancelMouseOwnedMovement()
 {
+	const bool bCommitFinalCursorGoal = IsLocalController() && !HasAuthority() && bCursorFollowHasSmoothedGoal;
+	const FVector FinalCursorGoal = CursorFollowSmoothedGoal;
+	if (IsLocalController() && !HasAuthority())
+	{
+		const uint32 UpdateId = ++NextCursorFollowUpdateId;
+		if (bCommitFinalCursorGoal)
+		{
+			Server_EndCursorFollow(FinalCursorGoal, UpdateId);
+		}
+		else
+		{
+			Server_ResetCursorFollowTurnRate(UpdateId);
+		}
+	}
+
 	PendingMoveTarget = nullptr;
 	MouseCommand.IssuedMoveTarget = nullptr;
 	bCursorFollowHasSmoothedGoal = false;
@@ -3097,12 +3602,11 @@ void AAeyerjiPlayerController::CancelMouseOwnedMovement()
 	LastCursorFollowRepathGoal = FVector::ZeroVector;
 	LastCursorFollowClientDiagTime = -1.0;
 	LastCursorFollowServerDiagTime = -1.0;
+	LastCursorFollowNetworkSendTime = -1.0;
+	LastCursorFollowNetworkGoal = FVector::ZeroVector;
+	bHasCursorFollowNetworkGoal = false;
 	ResetCursorFollowHold();
 	ResetCursorFollowTurnRate();
-	if (IsLocalController() && !HasAuthority())
-	{
-		Server_ResetCursorFollowTurnRate();
-	}
 }
 
 void AAeyerjiPlayerController::CancelMouseOwnedCombat()
@@ -3152,7 +3656,7 @@ bool AAeyerjiPlayerController::TryResolveDirectHostileUnderCursor(FHitResult& Ou
 		if (HitActor)
 		{
 			OutTarget = HitActor;
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Hostile resolved from PawnCustom trace. Target=%s HitActor=%s Component=%s Impact=%s"),
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Hostile resolved from PawnCustom trace. Target=%s HitActor=%s Component=%s Impact=%s"),
 				*GetNameSafe(OutTarget),
 				*GetNameSafe(OutHit.GetActor()),
 				*GetNameSafe(OutHit.GetComponent()),
@@ -3168,7 +3672,7 @@ bool AAeyerjiPlayerController::TryResolveDirectHostileUnderCursor(FHitResult& Ou
 		{
 			OutHit = GroundHit;
 			OutTarget = GroundTarget;
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Hostile resolved from Ground trace fallback. Target=%s HitActor=%s Component=%s Impact=%s"),
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Hostile resolved from Ground trace fallback. Target=%s HitActor=%s Component=%s Impact=%s"),
 				*GetNameSafe(OutTarget),
 				*GetNameSafe(GroundHit.GetActor()),
 				*GetNameSafe(GroundHit.GetComponent()),
@@ -3184,7 +3688,7 @@ bool AAeyerjiPlayerController::TryResolveDirectHostileUnderCursor(FHitResult& Ou
 		{
 			OutHit = VisibilityHit;
 			OutTarget = VisibilityTarget;
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Hostile resolved from Visibility trace fallback. Target=%s HitActor=%s Component=%s Impact=%s"),
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Hostile resolved from Visibility trace fallback. Target=%s HitActor=%s Component=%s Impact=%s"),
 				*GetNameSafe(OutTarget),
 				*GetNameSafe(VisibilityHit.GetActor()),
 				*GetNameSafe(VisibilityHit.GetComponent()),
@@ -3200,7 +3704,7 @@ bool AAeyerjiPlayerController::TryResolveDirectHostileUnderCursor(FHitResult& Ou
 		{
 			OutHit = ForgivingHit;
 			OutTarget = ForgivingTarget;
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Hostile resolved from hover/snap fallback. Target=%s HitActor=%s Component=%s Impact=%s"),
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Hostile resolved from hover/snap fallback. Target=%s HitActor=%s Component=%s Impact=%s"),
 				*GetNameSafe(OutTarget),
 				*GetNameSafe(ForgivingHit.GetActor()),
 				*GetNameSafe(ForgivingHit.GetComponent()),
@@ -3209,7 +3713,7 @@ bool AAeyerjiPlayerController::TryResolveDirectHostileUnderCursor(FHitResult& Ou
 		}
 	}
 
-	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] No hostile resolved under cursor. GroundHit=%s GroundActor=%s GroundComponent=%s"),
+	UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] No hostile resolved under cursor. GroundHit=%s GroundActor=%s GroundComponent=%s"),
 		BoolText(GroundHit.bBlockingHit),
 		*GetNameSafe(GroundHit.GetActor()),
 		*GetNameSafe(GroundHit.GetComponent()));
@@ -3275,6 +3779,54 @@ bool AAeyerjiPlayerController::IsMouseCommandTargetInBasicAttackRange(AActor* Ta
 	const float AttackRange = UCharacterStatsLibrary::GetAttackRangeFromActorASC(ControlledPawn, 150.f);
 	const float StopRange = FMath::Max(0.f, AttackRange * PrimaryAttackMoveStopAtPercentOfRange + PrimaryAttackMoveStopExtraBufferCm);
 	return FVector::DistSquared2D(ControlledPawn->GetActorLocation(), TargetActor->GetActorLocation()) <= FMath::Square(StopRange);
+}
+
+void AAeyerjiPlayerController::CancelPrimaryAttackForRetarget(AActor* NewTarget)
+{
+	if (!IsAttackableActor(NewTarget))
+	{
+		return;
+	}
+
+	AActor* PreviousTarget = LastPrimaryAttackTarget.Get();
+	if (!IsAttackableActor(PreviousTarget) || PreviousTarget == NewTarget)
+	{
+		LastPrimaryAttackTarget = NewTarget;
+		return;
+	}
+
+	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
+	const FGameplayAbilitySpecHandle AbilityHandle = FindPrimaryAttackAbilityHandle(ASC);
+	const FGameplayAbilitySpec* ActiveSpec = ASC && AbilityHandle.IsValid()
+		? ASC->FindAbilitySpecFromHandle(AbilityHandle)
+		: nullptr;
+	const bool bLocalPrimaryWasActive = ActiveSpec && ActiveSpec->IsActive();
+
+	if (bLocalPrimaryWasActive)
+	{
+		if (UGA_PrimaryMeleeBasic* MeleeAbility = Cast<UGA_PrimaryMeleeBasic>(ActiveSpec->GetPrimaryInstance()))
+		{
+			// A committed stage may no longer be cancellable, but it must not use
+			// this click as a combo request against the previously captured target.
+			MeleeAbility->NotifyExternalRetarget(NewTarget);
+		}
+
+		// CancelAbilityHandle observes the ability's CanBeCanceled state. A committed hit
+		// window stays intact, while a wind-up can be cleanly replaced by this new target.
+		ASC->CancelAbilityHandle(AbilityHandle);
+	}
+
+	if (!HasAuthority())
+	{
+		Server_CancelPrimaryAttackForRetarget(NewTarget);
+	}
+	LastPrimaryAttackTarget = NewTarget;
+
+	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Retarget requested. Previous=%s New=%s LocalPrimaryActive=%s Authority=%s"),
+		*GetNameSafe(PreviousTarget),
+		*GetNameSafe(NewTarget),
+		BoolText(bLocalPrimaryWasActive),
+		BoolText(HasAuthority()));
 }
 
 void AAeyerjiPlayerController::EnsureMouseActorChase(AActor* TargetActor)
@@ -3387,6 +3939,11 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 	const bool bTargetChanged = OldTarget != NewTarget;
 	const bool bIntentChanged = OldIntent != NewIntent;
 
+	if (NewIntent == EAeyerjiMouseIntent::BasicAttack && bTargetChanged)
+	{
+		CancelPrimaryAttackForRetarget(NewTarget);
+	}
+
 	if (bIntentChanged || bTargetChanged)
 	{
 		if (OldIntent == EAeyerjiMouseIntent::BasicAttack)
@@ -3406,6 +3963,13 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 	if (bIntentChanged || bTargetChanged)
 	{
 		MouseCommand.bAttackCommitted = false;
+		// A response for the previous explicit target must never block this replacement.
+		// Use a new serial so delayed server confirmations are ignored after a retarget.
+		MouseCommand.bAwaitingServerAttackResult = false;
+		if (NewIntent == EAeyerjiMouseIntent::BasicAttack)
+		{
+			MouseCommand.CommandSerial = NextMouseCommandSerial++;
+		}
 		MouseCommand.LastAttackAttemptTime = -1.0;
 	}
 
@@ -3538,6 +4102,28 @@ void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Butto
 			return;
 		}
 
+		// Combat targets take precedence over incidental pickups under the same cursor.
+		// This keeps gold and loot from consuming an attack click when their interaction
+		// volume overlaps an enemy, while preserving explicit teleporter interactions.
+		FHitResult HostileHit;
+		AActor* HostileTarget = nullptr;
+		if (TryResolveDirectHostileUnderCursor(HostileHit, HostileTarget))
+		{
+			// Retarget before BP can consume the click, so BP-owned move commands cannot
+			// leave a cancellable primary swing locked to the previous enemy.
+			CancelPrimaryAttackForRetarget(HostileTarget);
+
+			if (TryConsumePawnHit(HostileHit))
+			{
+				MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
+				return;
+			}
+
+			TransitionMouseIntent(EAeyerjiMouseIntent::BasicAttack, HostileTarget, FVector::ZeroVector, /*bSpawnMoveFx=*/false);
+			UpdateMouseCommand(0.f);
+			return;
+		}
+
 		FHitResult InteractableHit;
 		AActor* InteractableActor = nullptr;
 		if (TryGetInteractableHit(InteractableHit, InteractableActor))
@@ -3552,21 +4138,6 @@ void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Butto
 			HandleInteractableUnderCursor(InteractableActor, InteractableHit);
 			return;
 		}
-	}
-
-	FHitResult HostileHit;
-	AActor* HostileTarget = nullptr;
-	if (Button == EAeyerjiMouseButton::Left && TryResolveDirectHostileUnderCursor(HostileHit, HostileTarget))
-	{
-		if (TryConsumePawnHit(HostileHit))
-		{
-			MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
-			return;
-		}
-
-		TransitionMouseIntent(EAeyerjiMouseIntent::BasicAttack, HostileTarget, FVector::ZeroVector, /*bSpawnMoveFx=*/false);
-		UpdateMouseCommand(0.f);
-		return;
 	}
 
 	FHitResult GroundHit;
@@ -3694,8 +4265,10 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 		{
 			TransitionMouseIntent(EAeyerjiMouseIntent::BasicAttack, HostileTarget, FVector::ZeroVector, /*bSpawnMoveFx=*/false);
 		}
-		else
+		else if (MouseCommand.Owner != EAeyerjiMouseButton::Left || MouseCommand.Intent != EAeyerjiMouseIntent::BasicAttack)
 		{
+			// An empty initial left-click is still a ground-move command. Once left-click has
+			// committed to combat, however, a single trace miss must not abandon its target.
 			FHitResult GroundHit;
 			if (TryGetGroundHit(GroundHit))
 			{
@@ -3721,13 +4294,16 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 	AActor* TargetActor = MouseCommand.TargetActor.Get();
 	if (!IsAttackableActor(TargetActor))
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Target invalidated. Owner=%d Phase=%d Held=%s Target=%s"),
-			static_cast<int32>(MouseCommand.Owner),
-			static_cast<int32>(MouseCommand.Phase),
-			BoolText(MouseCommand.Phase == EAeyerjiMousePhase::Held),
-			*GetNameSafe(TargetActor));
+		if (TargetActor)
+		{
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Target invalidated. Owner=%d Phase=%d Held=%s Target=%s"),
+				static_cast<int32>(MouseCommand.Owner),
+				static_cast<int32>(MouseCommand.Phase),
+				BoolText(MouseCommand.Phase == EAeyerjiMousePhase::Held),
+				*GetNameSafe(TargetActor));
+		}
 
-		if (MouseCommand.Phase == EAeyerjiMousePhase::Held)
+		if (MouseCommand.Phase == EAeyerjiMousePhase::Held && MouseCommand.Owner == EAeyerjiMouseButton::Left)
 		{
 			FHitResult HostileHit;
 			AActor* NewTarget = nullptr;
@@ -3737,6 +4313,22 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 				return;
 			}
 
+			// Stay in combat intent while held. The next tick can acquire a living enemy
+			// under the cursor; falling back to ground movement here drops that handoff.
+			if (TargetActor)
+			{
+				CancelMouseOwnedMovement();
+			}
+			MouseCommand.TargetActor.Reset();
+			MouseCommand.IssuedMoveTarget.Reset();
+			MouseCommand.bAttackCommitted = false;
+			MouseCommand.bAwaitingServerAttackResult = false;
+			MouseCommand.LastAttackAttemptTime = -1.0;
+			return;
+		}
+
+		if (MouseCommand.Phase == EAeyerjiMousePhase::Held)
+		{
 			FHitResult GroundHit;
 			if (TryGetGroundHit(GroundHit))
 			{
@@ -3746,6 +4338,11 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 		}
 
 		ClearMouseCommandData();
+		return;
+	}
+
+	if (MouseCommand.bAwaitingServerAttackResult)
+	{
 		return;
 	}
 
@@ -3805,7 +4402,19 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 	}
 
 	MouseCommand.LastAttackAttemptTime = Now;
-	if (ActivatePrimaryAttackAbility(TargetActor))
+	const bool bLocallyActivated = ActivatePrimaryAttackAbility(TargetActor);
+	if (!HasAuthority() && MouseCommand.bAwaitingServerAttackResult)
+	{
+		UE_LOG(LogAeyerji, Log,
+			TEXT("[MouseAttack] Waiting for server activation result. Target=%s Serial=%u LocalActivated=%s Phase=%d"),
+			*GetNameSafe(TargetActor),
+			MouseCommand.CommandSerial,
+			BoolText(bLocallyActivated),
+			static_cast<int32>(MouseCommand.Phase));
+		return;
+	}
+
+	if (bLocallyActivated)
 	{
 		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] ActivatePrimaryAttackAbility returned true. Target=%s Phase=%d Held=%s"),
 			*GetNameSafe(TargetActor),
@@ -3868,6 +4477,28 @@ void AAeyerjiPlayerController::UnbindMouseCommandRecoveryDelegates()
 
 void AAeyerjiPlayerController::HandleObservedAbilityEnded(const FAbilityEndedData& EndedData)
 {
+	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
+	const FGameplayAbilitySpecHandle PrimaryAttackHandle = FindPrimaryAttackAbilityHandle(ASC);
+	const bool bHeldPrimaryAttackEnded =
+		!EndedData.bWasCancelled
+		&& PrimaryAttackHandle.IsValid()
+		&& EndedData.AbilitySpecHandle == PrimaryAttackHandle
+		&& MouseCommand.Owner == EAeyerjiMouseButton::Left
+		&& MouseCommand.Phase == EAeyerjiMousePhase::Held
+		&& MouseCommand.Intent == EAeyerjiMouseIntent::BasicAttack
+		&& IsMouseButtonPhysicallyDown(EAeyerjiMouseButton::Left)
+		&& IsAttackableActor(MouseCommand.TargetActor.Get());
+	if (bHeldPrimaryAttackEnded)
+	{
+		// A normal swing completion is the handoff point for continuous held melee.
+		// The next controller tick revalidates the cursor target and submits the next hit.
+		MouseCommand.bAttackCommitted = false;
+		MouseCommand.IssuedMoveTarget.Reset();
+		MouseCommand.LastAttackAttemptTime = -1.0;
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Held primary ended; rearmed. Target=%s Serial=%u"),
+			*GetNameSafe(MouseCommand.TargetActor.Get()), MouseCommand.CommandSerial);
+	}
+
 	if (!bMouseCommandPausedByAbilityCast && !bMouseCommandRecoveryPending)
 	{
 		return;
@@ -4166,8 +4797,24 @@ bool AAeyerjiPlayerController::ActivatePrimaryAttackAbility(AActor* ExplicitTarg
 		*GetNameSafe(ASC));
 	if (!HasAuthority())
 	{
-		Server_ActivatePrimaryAttackOnActor(ExplicitTarget);
-		return true;
+		// Keep the click command alive until authority confirms that it accepted the
+		// target. This prevents a prediction miss from consuming a one-shot chase.
+		const uint32 CommandSerial =
+			MouseCommand.Intent == EAeyerjiMouseIntent::BasicAttack
+				? MouseCommand.CommandSerial
+				: 0;
+		if (CommandSerial != 0)
+		{
+			MouseCommand.bAwaitingServerAttackResult = true;
+		}
+		LastPrimaryAttackTarget = ExplicitTarget;
+		Server_ActivatePrimaryAttackOnActor(ExplicitTarget, CommandSerial);
+		return bLocalTriggered;
+	}
+
+	if (bLocalTriggered)
+	{
+		LastPrimaryAttackTarget = ExplicitTarget;
 	}
 
 	return bLocalTriggered;
@@ -4234,12 +4881,13 @@ bool AAeyerjiPlayerController::TriggerPrimaryAttackAbility(UAbilitySystemCompone
 	return bTriggered;
 }
 
-void AAeyerjiPlayerController::Server_ActivatePrimaryAttackOnActor_Implementation(AActor* TargetActor)
+void AAeyerjiPlayerController::Server_ActivatePrimaryAttackOnActor_Implementation(AActor* TargetActor, const uint32 CommandSerial)
 {
 	if (!IsAttackableActor(TargetActor))
 	{
 		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server activate ignored: target not attackable. Target=%s"),
 			*GetNameSafe(TargetActor));
+		Client_PrimaryAttackActivationResult(TargetActor, CommandSerial, false);
 		return;
 	}
 
@@ -4249,14 +4897,113 @@ void AAeyerjiPlayerController::Server_ActivatePrimaryAttackOnActor_Implementatio
 		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server activate ignored: no ASC. Target=%s Pawn=%s"),
 			*GetNameSafe(TargetActor),
 			*GetNameSafe(GetPawn()));
+		Client_PrimaryAttackActivationResult(TargetActor, CommandSerial, false);
 		return;
 	}
 
 	const bool bTriggered = TriggerPrimaryAttackAbility(ASC, TargetActor);
+	if (bTriggered)
+	{
+		LastPrimaryAttackTarget = TargetActor;
+	}
 	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server activate explicit target result=%s Target=%s ASC=%s"),
 		BoolText(bTriggered),
 		*GetNameSafe(TargetActor),
 		*GetNameSafe(ASC));
+	Client_PrimaryAttackActivationResult(TargetActor, CommandSerial, bTriggered);
+}
+
+void AAeyerjiPlayerController::Client_PrimaryAttackActivationResult_Implementation(
+	AActor* TargetActor,
+	const uint32 CommandSerial,
+	const bool bActivated)
+{
+	if (CommandSerial == 0
+		|| MouseCommand.CommandSerial != CommandSerial
+		|| MouseCommand.Intent != EAeyerjiMouseIntent::BasicAttack
+		|| MouseCommand.TargetActor.Get() != TargetActor)
+	{
+		return;
+	}
+
+	MouseCommand.bAwaitingServerAttackResult = false;
+	if (bActivated)
+	{
+		UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
+		const FGameplayAbilitySpecHandle PrimaryAttackHandle = FindPrimaryAttackAbilityHandle(ASC);
+		const FGameplayAbilitySpec* PrimaryAttackSpec = ASC && PrimaryAttackHandle.IsValid()
+			? ASC->FindAbilitySpecFromHandle(PrimaryAttackHandle)
+			: nullptr;
+		const bool bPrimaryAttackStillActive = PrimaryAttackSpec && PrimaryAttackSpec->IsActive();
+
+		// The local swing can finish before its server acknowledgement reaches us.
+		// In that case do not re-lock the held command after HandleObservedAbilityEnded
+		// has already rearmed it.
+		MouseCommand.bAttackCommitted = bPrimaryAttackStillActive;
+		if (!bPrimaryAttackStillActive && MouseCommand.Phase == EAeyerjiMousePhase::Held)
+		{
+			MouseCommand.IssuedMoveTarget.Reset();
+			MouseCommand.LastAttackAttemptTime = -1.0;
+		}
+		UE_LOG(LogAeyerji, Log,
+			TEXT("[MouseAttack] Server confirmed activation. Target=%s Serial=%u Phase=%d PrimaryStillActive=%s"),
+			*GetNameSafe(TargetActor),
+			CommandSerial,
+			static_cast<int32>(MouseCommand.Phase),
+			BoolText(bPrimaryAttackStillActive));
+
+		if (MouseCommand.Phase == EAeyerjiMousePhase::ReleasedPendingAttack)
+		{
+			ClearMouseCommandData();
+		}
+		return;
+	}
+
+	// The target may have crossed the range boundary while the request was in flight.
+	// Re-arm this exact click so the normal update loop resumes chasing and retries.
+	MouseCommand.bAttackCommitted = false;
+	MouseCommand.IssuedMoveTarget.Reset();
+	UE_LOG(LogAeyerji, Log,
+		TEXT("[MouseAttack] Server deferred activation; retaining click command. Target=%s Serial=%u InRangeNow=%s"),
+		*GetNameSafe(TargetActor),
+		CommandSerial,
+		BoolText(IsMouseCommandTargetInBasicAttackRange(TargetActor)));
+}
+
+void AAeyerjiPlayerController::Server_CancelPrimaryAttackForRetarget_Implementation(AActor* NewTarget)
+{
+	if (!IsAttackableActor(NewTarget))
+	{
+		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server retarget cancellation ignored: new target not attackable. Target=%s"),
+			*GetNameSafe(NewTarget));
+		return;
+	}
+
+	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
+	const FGameplayAbilitySpecHandle AbilityHandle = FindPrimaryAttackAbilityHandle(ASC);
+	const FGameplayAbilitySpec* ActiveSpec = ASC && AbilityHandle.IsValid()
+		? ASC->FindAbilitySpecFromHandle(AbilityHandle)
+		: nullptr;
+	if (!ActiveSpec || !ActiveSpec->IsActive())
+	{
+		LastPrimaryAttackTarget = NewTarget;
+		return;
+	}
+
+	if (UGA_PrimaryMeleeBasic* MeleeAbility = Cast<UGA_PrimaryMeleeBasic>(ActiveSpec->GetPrimaryInstance()))
+	{
+		MeleeAbility->NotifyExternalRetarget(NewTarget);
+	}
+
+	ASC->CancelAbilityHandle(AbilityHandle);
+	const FGameplayAbilitySpec* UpdatedSpec = ASC->FindAbilitySpecFromHandle(AbilityHandle);
+	const bool bCancelled = UpdatedSpec && !UpdatedSpec->IsActive();
+	LastPrimaryAttackTarget = NewTarget;
+
+	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server retarget cancellation. NewTarget=%s Handle=%s Cancelled=%s"),
+		*GetNameSafe(NewTarget),
+		*AbilityHandle.ToString(),
+		BoolText(bCancelled));
 }
 
 bool AAeyerjiPlayerController::BuildPrimaryAttackTagSearch(UAbilitySystemComponent* ASC, FGameplayTagContainer& OutTags) const
@@ -4637,6 +5384,9 @@ void AAeyerjiPlayerController::ResetForClick()
 	LastCursorFollowRepathGoal = FVector::ZeroVector;
 	LastCursorFollowClientDiagTime = -1.0;
 	LastCursorFollowServerDiagTime = -1.0;
+	LastCursorFollowNetworkSendTime = -1.0;
+	LastCursorFollowNetworkGoal = FVector::ZeroVector;
+	bHasCursorFollowNetworkGoal = false;
 	ResetCursorFollowHold();
 }
 
@@ -4659,6 +5409,9 @@ void AAeyerjiPlayerController::ResetForMoveOnly()
 	LastCursorFollowRepathGoal = FVector::ZeroVector;
 	LastCursorFollowClientDiagTime = -1.0;
 	LastCursorFollowServerDiagTime = -1.0;
+	LastCursorFollowNetworkSendTime = -1.0;
+	LastCursorFollowNetworkGoal = FVector::ZeroVector;
+	bHasCursorFollowNetworkGoal = false;
 	ResetCursorFollowHold();
 }
 
@@ -4700,9 +5453,7 @@ bool AAeyerjiPlayerController::HandleMovementBlockedByAbilities()
 		return false;
 	}
 
-	const bool bHadMovementLock = ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_PrimaryMelee_BlockMovement);
-	const bool bHadActiveMelee = HasActivePrimaryMeleePhaseTag(ASC);
-	if (!bHadMovementLock && !bHadActiveMelee)
+	if (!HasActivePrimaryMeleePhaseTag(ASC))
 	{
 		return false;
 	}
@@ -4789,7 +5540,7 @@ bool AAeyerjiPlayerController::TraceCursor(ECollisionChannel Channel, FHitResult
 	{
 		if (ShouldLogGroundTraceWarn(WorldForTime))
 		{
-			UE_LOG(LogAeyerji, Warning, TEXT("[Move] TraceCursor failed: DeprojectMousePositionToWorld."));
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Move] TraceCursor skipped: DeprojectMousePositionToWorld failed."));
 		}
 		return false;
 	}
@@ -4799,7 +5550,7 @@ bool AAeyerjiPlayerController::TraceCursor(ECollisionChannel Channel, FHitResult
 	{
 		if (ShouldLogGroundTraceWarn(World))
 		{
-			UE_LOG(LogAeyerji, Warning, TEXT("[Move] TraceCursor failed: no world."));
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Move] TraceCursor skipped: no world."));
 		}
 		return false;
 	}
@@ -4820,7 +5571,7 @@ bool AAeyerjiPlayerController::TraceCursor(ECollisionChannel Channel, FHitResult
 		{
 			if (ShouldLogGroundTraceWarn(World))
 			{
-				UE_LOG(LogAeyerji, Warning, TEXT("[Move] TraceCursor failed: no hit (channel=%d)."), static_cast<int32>(Channel));
+				UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Move] TraceCursor found no hit (channel=%d)."), static_cast<int32>(Channel));
 			}
 			return false;
 		}
@@ -4888,35 +5639,57 @@ bool AAeyerjiPlayerController::TryGetGroundHit(FHitResult& OutHit) const
 
 bool AAeyerjiPlayerController::ResolveDirectAttackTargetUnderCursor(FHitResult& OutHit) const
 {
-	const bool bHit = TraceCursor(ECC_GameTraceChannel3, OutHit, /*bTraceComplex=*/false);
-	if (bHit)
+	FVector WorldOrigin;
+	FVector WorldDirection;
+	UWorld* World = GetWorld();
+	if (!World || !DeprojectMousePositionToWorld(WorldOrigin, WorldDirection))
 	{
-		const APawn* MyPawn = GetPawn();
-		if (MyPawn && OutHit.GetActor() == MyPawn)
-		{
-			// We hit ourselves first; do a second trace that ignores our pawn so we can target through it.
-			FVector WorldOrigin, WorldDir;
-			if (DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
-			{
-				if (UWorld* World = GetWorld())
-				{
-					FCollisionQueryParams Params(SCENE_QUERY_STAT(CursorPawnSkipSelf), /*bTraceComplex=*/false);
-					Params.AddIgnoredActor(MyPawn);
+		return false;
+	}
 
-					FHitResult AltHit;
-					const FVector TraceStart = WorldOrigin;
-					const FVector TraceEnd   = TraceStart + WorldDir * 100000.f;
-					if (World->LineTraceSingleByChannel(AltHit, TraceStart, TraceEnd, ECC_GameTraceChannel3, Params))
-					{
-						OutHit = AltHit;
-					}
-				}
-			}
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CursorAttackTrace), /*bTraceComplex=*/false);
+	if (const APawn* MyPawn = GetPawn())
+	{
+		Params.AddIgnoredActor(MyPawn);
+	}
+
+	const FVector TraceStart = WorldOrigin;
+	const FVector TraceEnd = TraceStart + WorldDirection * 100000.f;
+	constexpr int32 MaxCursorAttackTracePasses = 8;
+	for (int32 Pass = 0; Pass < MaxCursorAttackTracePasses; ++Pass)
+	{
+		FHitResult Hit;
+		if (!World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_GameTraceChannel3, Params))
+		{
+			return false;
 		}
 
-		if (IsAttackableActor(OutHit.GetActor()))
+		if (AActor* AttackableTarget = ResolveAttackableActorFromCursorHit(Hit))
 		{
-			return true;
+			// Normalize child collision to the hostile owner so every caller, including
+			// Blueprint interception and hover, observes the same enemy actor.
+			return BuildSyntheticCursorHit(AttackableTarget, Hit.ImpactPoint, OutHit);
+		}
+
+		const AActor* HitActor = Hit.GetActor();
+		const AEnemyParentNative* EnemyOwner = FindEnemyOwnerInCursorHit(Hit);
+		if (!HitActor || (!ShouldIgnoreCursorActor(HitActor) && !EnemyOwner))
+		{
+			// Do not click through world geometry or unrelated interactive actors.
+			return false;
+		}
+
+		Params.AddIgnoredActor(HitActor);
+		if (const UPrimitiveComponent* HitComponent = Hit.GetComponent())
+		{
+			if (const AActor* ComponentOwner = HitComponent->GetOwner())
+			{
+				Params.AddIgnoredActor(ComponentOwner);
+			}
+		}
+		if (EnemyOwner)
+		{
+			Params.AddIgnoredActor(EnemyOwner);
 		}
 	}
 
@@ -4933,7 +5706,7 @@ bool AAeyerjiPlayerController::ResolveAttackTargetUnderCursor(FHitResult& OutHit
 	const float HoverFallbackRadiusPx = TargetSnapScreenRadiusPx;
 	if (HoveredEnemy.IsValid()
 		&& IsAttackableActor(HoveredEnemy.Get())
-		&& IsCursorNearActorScreenLocation(this, HoveredEnemy.Get(), HoverFallbackRadiusPx))
+		&& IsCursorNearActorScreenBounds(this, HoveredEnemy.Get(), HoverFallbackRadiusPx))
 	{
 		return BuildSyntheticCursorHit(HoveredEnemy.Get(), HoveredEnemy->GetActorLocation(), OutHit);
 	}
@@ -5013,13 +5786,18 @@ bool AAeyerjiPlayerController::ResolveAttackTargetUnderCursor(FHitResult& OutHit
 			continue;
 		}
 
-		FVector2D ScreenPos;
-		if (!ProjectWorldLocationToScreen(Enemy->GetActorLocation(), ScreenPos))
+		FVector2D MinScreen;
+		FVector2D MaxScreen;
+		FBox EnemyWorldBounds;
+		if (!GetProjectedActorScreenBounds(this, Enemy, MinScreen, MaxScreen, &EnemyWorldBounds))
 		{
 			continue;
 		}
 
-		const float ScreenDistSq = FVector2D::DistSquared(ScreenPos, CursorPos);
+		const FVector2D ClosestScreenPoint(
+			FMath::Clamp(CursorPos.X, MinScreen.X, MaxScreen.X),
+			FMath::Clamp(CursorPos.Y, MinScreen.Y, MaxScreen.Y));
+		const float ScreenDistSq = FVector2D::DistSquared(ClosestScreenPoint, CursorPos);
 		if (ScreenDistSq > SnapRadiusPxSq)
 		{
 			continue;
@@ -5028,7 +5806,11 @@ bool AAeyerjiPlayerController::ResolveAttackTargetUnderCursor(FHitResult& OutHit
 		float WorldDistSq = 0.f;
 		if (bHasWorldRef)
 		{
-			WorldDistSq = FVector::DistSquared2D(Enemy->GetActorLocation(), WorldRef);
+			const FVector ClosestWorldPoint(
+				FMath::Clamp(WorldRef.X, EnemyWorldBounds.Min.X, EnemyWorldBounds.Max.X),
+				FMath::Clamp(WorldRef.Y, EnemyWorldBounds.Min.Y, EnemyWorldBounds.Max.Y),
+				WorldRef.Z);
+			WorldDistSq = FVector::DistSquared2D(ClosestWorldPoint, WorldRef);
 			if (WorldDistSq > WorldRadiusSq)
 			{
 				continue;
@@ -5480,7 +6262,19 @@ void AAeyerjiPlayerController::UpdateContinuousMoveGoal(const FVector& Goal)
 
 	if (!HasAuthority())
 	{
-		Server_UpdateCursorFollowGoal(SmoothedGoal);
+		const bool bNetworkGoalMoved = !bHasCursorFollowNetworkGoal
+			|| FVector::DistSquared2D(SmoothedGoal, LastCursorFollowNetworkGoal) >= FMath::Square(CursorFollowNetworkGoalDistance);
+		const bool bHeartbeatDue = LastCursorFollowNetworkSendTime < 0.0
+			|| (Now - LastCursorFollowNetworkSendTime) >= CursorFollowNetworkHeartbeatInterval;
+		const bool bSendIntervalElapsed = LastCursorFollowNetworkSendTime < 0.0
+			|| (Now - LastCursorFollowNetworkSendTime) >= CursorFollowNetworkUpdateInterval;
+		if ((bNetworkGoalMoved || bHeartbeatDue) && bSendIntervalElapsed)
+		{
+			Server_UpdateCursorFollowGoal(FVector_NetQuantize10(SmoothedGoal), ++NextCursorFollowUpdateId);
+			LastCursorFollowNetworkSendTime = Now;
+			LastCursorFollowNetworkGoal = SmoothedGoal;
+			bHasCursorFollowNetworkGoal = true;
+		}
 	}
 }
 
@@ -5759,6 +6553,15 @@ void AAeyerjiPlayerController::PollHoverUnderCursor()
 		}
 	}
 
+	// Only present one contextual hover when volumes overlap. Attackable enemies are
+	// the primary left-click target; loot becomes selectable again as soon as the
+	// cursor no longer resolves an enemy.
+	if (NewEnemy)
+	{
+		NewLoot = nullptr;
+		LootComponent = nullptr;
+	}
+
 	if (HoveredLoot.Get() != NewLoot)
 	{
 		AJ_LOG(this, TEXT("[Hover:Loot] %s -> %s (Component=%s)"),
@@ -6010,8 +6813,15 @@ void AAeyerjiPlayerController::ServerMoveToActor_Implementation(AActor* Target, 
 		*DescribePathFollowing(FindComponentByClass<UPathFollowingComponent>()));
 }
 
-void AAeyerjiPlayerController::Server_UpdateCursorFollowGoal_Implementation(const FVector& Goal)
+void AAeyerjiPlayerController::Server_UpdateCursorFollowGoal_Implementation(const FVector_NetQuantize10 Goal, const uint32 UpdateId)
 {
+	if (bHasReceivedCursorFollowUpdateId && UpdateId <= LastReceivedCursorFollowUpdateId)
+	{
+		return;
+	}
+	LastReceivedCursorFollowUpdateId = UpdateId;
+	bHasReceivedCursorFollowUpdateId = true;
+
 	if (!GetPawn() || IsControlledPawnDead())
 	{
 		return;
@@ -6097,8 +6907,24 @@ void AAeyerjiPlayerController::Server_UpdateCursorFollowGoal_Implementation(cons
 	}
 }
 
-void AAeyerjiPlayerController::Server_ResetCursorFollowTurnRate_Implementation()
+void AAeyerjiPlayerController::Server_EndCursorFollow_Implementation(const FVector_NetQuantize10 FinalGoal, const uint32 UpdateId)
 {
+	Server_UpdateCursorFollowGoal_Implementation(FinalGoal, UpdateId);
+	ResetCursorFollowTurnRate();
+	bCursorFollowActive = false;
+	bCursorFollowHasSmoothedGoal = false;
+	LastCursorFollowRepathTime = -1.0;
+	LastCursorFollowRepathGoal = FVector::ZeroVector;
+}
+
+void AAeyerjiPlayerController::Server_ResetCursorFollowTurnRate_Implementation(const uint32 UpdateId)
+{
+	if (bHasReceivedCursorFollowUpdateId && UpdateId <= LastReceivedCursorFollowUpdateId)
+	{
+		return;
+	}
+	LastReceivedCursorFollowUpdateId = UpdateId;
+	bHasReceivedCursorFollowUpdateId = true;
 	ResetCursorFollowTurnRate();
 	bCursorFollowActive = false;
 	bCursorFollowHasSmoothedGoal = false;
@@ -6117,79 +6943,99 @@ void AAeyerjiPlayerController::Server_ActivateAbilityAtLocation_Implementation(c
 {
 	APawn* P = GetPawn();
 	if (!P) { AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: no pawn")); return; }
-	IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(P); if (!ASI) { AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: pawn lacks ASI")); return; }
-	UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent(); if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: no ASC")); return; }
+	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
+	if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: no ASC")); return; }
+	FAeyerjiAbilitySlot AuthorizedSlot;
+	if (!ResolveAuthoritativeActionBarSlot(this, AbilitySlot, AuthorizedSlot))
+	{
+		UE_LOG(LogAeyerji, Warning, TEXT("Server_ActivateAbilityAtLocation rejected ability outside authoritative action bar. Tags=%s Class=%s"),
+			*AbilitySlot.Tag.ToString(), *GetNameSafe(AbilitySlot.Class));
+		return;
+	}
 	AbortMovement_Local();
 
-	if (AbilityUsesExternalTargetEvent(AbilitySlot.Class))
+	if (AbilityUsesExternalTargetEvent(AuthorizedSlot.Class))
 	{
 		FGameplayAbilityTargetingLocationInfo SrcLoc; SrcLoc.LocationType = EGameplayAbilityTargetingLocationType::ActorTransform; SrcLoc.SourceActor = P;
 		FGameplayAbilityTargetingLocationInfo DstLoc; DstLoc.LocationType = EGameplayAbilityTargetingLocationType::LiteralTransform; DstLoc.LiteralTransform.SetLocation(Target);
 		FGameplayAbilityTargetDataHandle TDH = UAbilitySystemBlueprintLibrary::AbilityTargetDataFromLocations(SrcLoc, DstLoc);
 
-		FGameplayEventData Ev; Ev.EventTag = AeyerjiTags::Event_External_Target; Ev.Instigator = P; Ev.InstigatorTags = AbilitySlot.Tag; Ev.TargetData = TDH;
+		FGameplayEventData Ev; Ev.EventTag = AeyerjiTags::Event_External_Target; Ev.Instigator = P; Ev.InstigatorTags = AuthorizedSlot.Tag; Ev.TargetData = TDH;
 		UAbilitySystemBlueprintLibrary::SendGameplayEventToActor(P, Ev.EventTag, Ev);
 		AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: sent Event.External.Target (Tag=%s Target=%s Class=%s)"),
-			*AbilitySlot.Tag.ToString(),
+			*AuthorizedSlot.Tag.ToString(),
 			*Target.ToString(),
-			*GetNameSafe(AbilitySlot.Class));
+			*GetNameSafe(AuthorizedSlot.Class));
 		return;
 	}
 
-	TryActivateAbilitySlotDirectly(ASC, AbilitySlot, this, TEXT("Server_ActivateAbilityAtLocation"));
+	TryActivateAbilitySlotDirectly(ASC, AuthorizedSlot, this, TEXT("Server_ActivateAbilityAtLocation"));
 }
 
 void AAeyerjiPlayerController::Server_ActivateAbilityOnActor_Implementation(const FAeyerjiAbilitySlot& AbilitySlot, AActor* TargetActor)
 {
 	APawn* P = GetPawn();
 	if (!P) { AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: no pawn")); return; }
-	IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(P); if (!ASI) { AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: pawn lacks ASI")); return; }
-	UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent(); if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: no ASC")); return; }
-	AbortMovement_Local();
-
-	if (!TargetActor)
+	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
+	if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: no ASC")); return; }
+	FAeyerjiAbilitySlot AuthorizedSlot;
+	if (!ResolveAuthoritativeActionBarSlot(this, AbilitySlot, AuthorizedSlot))
+	{
+		UE_LOG(LogAeyerji, Warning, TEXT("Server_ActivateAbilityOnActor rejected ability outside authoritative action bar. Tags=%s Class=%s"),
+			*AbilitySlot.Tag.ToString(), *GetNameSafe(AbilitySlot.Class));
+		return;
+	}
+	if (!IsValid(TargetActor))
 	{
 		return;
 	}
+	AbortMovement_Local();
 
-	if (AbilityUsesExternalTargetEvent(AbilitySlot.Class))
+	if (AbilityUsesExternalTargetEvent(AuthorizedSlot.Class))
 	{
 		FGameplayAbilityTargetDataHandle TDH = UAbilitySystemBlueprintLibrary::AbilityTargetDataFromActor(TargetActor);
 
-		FGameplayEventData Ev; Ev.EventTag = AeyerjiTags::Event_External_Target; Ev.Instigator = P; Ev.InstigatorTags = AbilitySlot.Tag; Ev.TargetData = TDH;
+		FGameplayEventData Ev; Ev.EventTag = AeyerjiTags::Event_External_Target; Ev.Instigator = P; Ev.InstigatorTags = AuthorizedSlot.Tag; Ev.TargetData = TDH;
 		UAbilitySystemBlueprintLibrary::SendGameplayEventToActor(P, Ev.EventTag, Ev);
 		AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: sent Event.External.Target (Tag=%s Target=%s Class=%s)"),
-			*AbilitySlot.Tag.ToString(),
+			*AuthorizedSlot.Tag.ToString(),
 			*GetNameSafe(TargetActor),
-			*GetNameSafe(AbilitySlot.Class));
+			*GetNameSafe(AuthorizedSlot.Class));
 		return;
 	}
 
-	TryActivateAbilitySlotDirectly(ASC, AbilitySlot, this, TEXT("Server_ActivateAbilityOnActor"));
+	TryActivateAbilitySlotDirectly(ASC, AuthorizedSlot, this, TEXT("Server_ActivateAbilityOnActor"));
 }
 
 void AAeyerjiPlayerController::Server_ActivateAbilityInstant_Implementation(const FAeyerjiAbilitySlot& AbilitySlot)
 {
 	APawn* P = GetPawn();
 	if (!P) { AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: no pawn")); return; }
-	IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(P); if (!ASI) { AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: pawn lacks ASI")); return; }
-	UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent(); if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: no ASC")); return; }
+	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
+	if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: no ASC")); return; }
+	FAeyerjiAbilitySlot AuthorizedSlot;
+	if (!ResolveAuthoritativeActionBarSlot(this, AbilitySlot, AuthorizedSlot))
+	{
+		UE_LOG(LogAeyerji, Warning, TEXT("Server_ActivateAbilityInstant rejected ability outside authoritative action bar. Tags=%s Class=%s"),
+			*AbilitySlot.Tag.ToString(), *GetNameSafe(AbilitySlot.Class));
+		return;
+	}
 	AbortMovement_Local();
 
-	if (AbilityUsesExternalTargetEvent(AbilitySlot.Class))
+	if (AbilityUsesExternalTargetEvent(AuthorizedSlot.Class))
 	{
 		FGameplayEventData Ev;
 		Ev.EventTag = AeyerjiTags::Event_External_Target;
 		Ev.Instigator = P;
-		Ev.InstigatorTags = AbilitySlot.Tag;
+		Ev.InstigatorTags = AuthorizedSlot.Tag;
 		UAbilitySystemBlueprintLibrary::SendGameplayEventToActor(P, Ev.EventTag, Ev);
 		AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: sent Event.External.Target (Tag=%s Class=%s)"),
-		       *AbilitySlot.Tag.ToString(),
-		       *GetNameSafe(AbilitySlot.Class));
+		       *AuthorizedSlot.Tag.ToString(),
+		       *GetNameSafe(AuthorizedSlot.Class));
 		return;
 	}
 
-	TryActivateAbilitySlotDirectly(ASC, AbilitySlot, this, TEXT("Server_ActivateAbilityInstant"));
+	TryActivateAbilitySlotDirectly(ASC, AuthorizedSlot, this, TEXT("Server_ActivateAbilityInstant"));
 }
 
 void AAeyerjiPlayerController::Server_CancelActiveAbilityCast_Implementation()
@@ -6200,8 +7046,7 @@ void AAeyerjiPlayerController::Server_CancelActiveAbilityCast_Implementation()
 		return;
 	}
 
-	IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(P);
-	UAbilitySystemComponent* ASC = ASI ? ASI->GetAbilitySystemComponent() : nullptr;
+	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
 	if (!ASC || !ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_Casting))
 	{
 		return;
@@ -6289,8 +7134,10 @@ void AAeyerjiPlayerController::TickFaceLoop()
 	if (AbsDelta <= FaceAcceptAngleDeg)
 	{
 		SetControlRotation(FRotator(0.f, Desired.Yaw, 0.f));
+		// Restore before notifying Blueprint. A listener may immediately begin another face
+		// request, which must start from locomotion rather than be cancelled by this request.
+		CancelFaceActor();
 		OnFacingReady.Broadcast(Tgt);
-		CancelFaceActor(); // restores flags
 		return;
 	}
 
@@ -6298,8 +7145,8 @@ void AAeyerjiPlayerController::TickFaceLoop()
 	const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
 	if (bFaceFireOnTimeout && Now >= FaceDeadline)
 	{
-		OnFacingReady.Broadcast(Tgt);
 		CancelFaceActor();
+		OnFacingReady.Broadcast(Tgt);
 		return;
 	}
 
@@ -6350,12 +7197,17 @@ void AAeyerjiPlayerController::PushFacingRotationMode(float DesiredYawRateDegPer
 	UCharacterMovementComponent* CMC = C->GetCharacterMovement();
 	if (!CMC) { return; }
 
-	// Save current
-	SavedFacingMode.bValid                        = true;
-	SavedFacingMode.bUseControllerRotationYaw     = C->bUseControllerRotationYaw;
-	SavedFacingMode.bOrientRotationToMovement     = CMC->bOrientRotationToMovement;
-	SavedFacingMode.bUseControllerDesiredRotation = CMC->bUseControllerDesiredRotation;
-	SavedFacingMode.SavedRotationRateYaw          = CMC->RotationRate.Yaw;
+	// Keep the original locomotion snapshot until the complete face operation ends. A
+	// repeated request often just updates the target; overwriting this with the temporary
+	// controller-facing settings would permanently restore the pawn into face mode.
+	if (!SavedFacingMode.bValid)
+	{
+		SavedFacingMode.bValid                        = true;
+		SavedFacingMode.bUseControllerRotationYaw     = C->bUseControllerRotationYaw;
+		SavedFacingMode.bOrientRotationToMovement     = CMC->bOrientRotationToMovement;
+		SavedFacingMode.bUseControllerDesiredRotation = CMC->bUseControllerDesiredRotation;
+		SavedFacingMode.SavedRotationRateYaw          = CMC->RotationRate.Yaw;
+	}
 
 	// Force controller-driven yaw while facing
 	C->bUseControllerRotationYaw      = true;
@@ -6801,17 +7653,23 @@ void AAeyerjiPlayerController::AJ_OpenConsole()
 
 void AAeyerjiPlayerController::ServerAJ_SetDamage_Implementation(const float DamageValue)
 {
+#if !UE_BUILD_SHIPPING
 	ApplyCheatAttackDamage(DamageValue);
+#endif
 }
 
 void AAeyerjiPlayerController::ServerAJ_SetHP_Implementation(const float HPValue)
 {
+#if !UE_BUILD_SHIPPING
 	ApplyCheatHP(HPValue);
+#endif
 }
 
 void AAeyerjiPlayerController::ServerRefreshLootScalingDebug_Implementation()
 {
+#if !UE_BUILD_SHIPPING
 	RefreshLootScalingDebug_Internal();
+#endif
 }
 
 void AAeyerjiPlayerController::RefreshLootScalingDebug_Internal()

@@ -1,7 +1,6 @@
 #include "Abilities/Stomp/GA_Stomp.h"
 
 #include "GameplayTagContainer.h"
-#include "NativeGameplayTags.h"
 
 namespace AeyerjiStompTags
 {

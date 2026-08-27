@@ -27,6 +27,25 @@ UAeyerjiFloatingStatusBarComponent::UAeyerjiFloatingStatusBarComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
 
+    // Floating health chunks communicate combat rank, not raw HP scale. Hierarchical
+    // matching means an owned tag such as Enemy.Role.Elite.Melee.Grunt matches the
+    // configured Enemy.Role.Elite parent tag.
+    static const FName DefaultHealthChunkEligibilityTagNames[] =
+    {
+        TEXT("Enemy.Elite.Standard"),
+        TEXT("Enemy.Role.Elite"),
+        TEXT("Enemy.Role.MiniBoss"),
+        TEXT("Enemy.Role.Boss")
+    };
+    for (const FName TagName : DefaultHealthChunkEligibilityTagNames)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(TagName, /*ErrorIfNotFound=*/false);
+        if (Tag.IsValid())
+        {
+            HealthChunkEligibilityTags.AddTag(Tag);
+        }
+    }
+
     // Defaults that designers can override in BP
     HealthAttr    = UAeyerjiAttributeSet::GetHPAttribute();
     MaxHealthAttr = UAeyerjiAttributeSet::GetHPMaxAttribute();
@@ -154,9 +173,88 @@ UUserWidget* UAeyerjiFloatingStatusBarComponent::GetStatusBarWidget() const
     return nullptr;
 }
 
+void UAeyerjiFloatingStatusBarComponent::SetStatusBarPresentationVisible(const bool bVisible)
+{
+    if (bStatusBarPresentationVisible == bVisible)
+    {
+        return;
+    }
+
+    bStatusBarPresentationVisible = bVisible;
+    UWorld* World = GetWorld();
+    if (!bVisible)
+    {
+        if (World)
+        {
+            World->GetTimerManager().ClearTimer(RetryTimer);
+            World->GetTimerManager().ClearTimer(DeferredBindTimer);
+        }
+
+        if (HUDWidget)
+        {
+            HUDWidget->SetVisibility(ESlateVisibility::Hidden);
+        }
+        if (WidgetComp)
+        {
+            WidgetComp->SetVisibility(false);
+            WidgetComp->SetHiddenInGame(true);
+        }
+        CleanupOverlay();
+        SetComponentTickEnabled(false);
+        return;
+    }
+
+    switch (Mode)
+    {
+    case EStatusBarMode::HUD:
+        if (HUDWidget)
+        {
+            HUDWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
+        }
+        else
+        {
+            InitializeStatusBarPresentation();
+        }
+        break;
+
+    case EStatusBarMode::World:
+        if (WidgetComp)
+        {
+            WidgetComp->SetVisibility(true);
+            WidgetComp->SetHiddenInGame(false);
+            RebindLiveWidget();
+        }
+        else
+        {
+            InitializeStatusBarPresentation();
+        }
+        break;
+
+    case EStatusBarMode::Overlay:
+        RegisterWithOverlay();
+        break;
+    }
+
+    SetComponentTickEnabled(
+        bStatusBarInitialized && Mode == EStatusBarMode::World && bFaceCamera);
+}
+
 void UAeyerjiFloatingStatusBarComponent::BindWidget(UW_AeyerjiStatusBar* WB)
 {
     if (!WB) return;
+
+    WB->ConfigureHealthChunkDivisions(
+        ShouldShowHealthChunkDivisions(),
+        ShouldRequireAnyHealthChunkEligibilityTag(),
+        GetHealthChunkEligibilityTags(),
+        GetTargetHealthChunkCount(),
+        GetMinPreferredHealthChunkCount(),
+        GetMaxPreferredHealthChunkCount(),
+        GetMaxHealthChunkCount(),
+        GetHealthChunkSeparatorThickness(),
+        GetHealthChunkSeparatorVerticalInset(),
+        GetHealthChunkSeparatorColor());
+
     if (UAbilitySystemComponent* ASC = FindASC())
     {
         if (XPAttr.IsValid() && XPMaxAttr.IsValid() && LevelAttr.IsValid())
@@ -185,7 +283,8 @@ void UAeyerjiFloatingStatusBarComponent::BindWidget(UW_AeyerjiStatusBar* WB)
 
 void UAeyerjiFloatingStatusBarComponent::CreateWorldWidget()
 {
-    if (GetWorld()->IsNetMode(NM_DedicatedServer)) return;
+    UWorld* World = GetWorld();
+    if (!World || World->IsNetMode(NM_DedicatedServer)) return;
 
     if (!StatusBarWidgetClass)
     {
@@ -227,7 +326,8 @@ void UAeyerjiFloatingStatusBarComponent::CreateWorldWidget()
 
 void UAeyerjiFloatingStatusBarComponent::CreateHUDWidget()
 {
-    if (GetWorld()->IsNetMode(NM_DedicatedServer)) return;
+    UWorld* World = GetWorld();
+    if (!World || World->IsNetMode(NM_DedicatedServer)) return;
     if (!StatusBarWidgetClass)
     {
         LogMissingWidget(); return;
@@ -235,7 +335,7 @@ void UAeyerjiFloatingStatusBarComponent::CreateHUDWidget()
 
     APlayerController* PC = nullptr;
     if (const APawn* AsPawn = Cast<APawn>(GetOwner())) { PC = Cast<APlayerController>(AsPawn->GetController()); }
-    if (!PC) { PC = UGameplayStatics::GetPlayerController(GetWorld(), 0); }
+    if (!PC) { PC = UGameplayStatics::GetPlayerController(World, 0); }
     if (!PC) { AJ_LOG(this, TEXT("No PlayerController for HUD mode.")); return; }
 
     HUDWidget = CreateWidget<UW_AeyerjiStatusBar>(PC, StatusBarWidgetClass);
@@ -250,16 +350,17 @@ void UAeyerjiFloatingStatusBarComponent::CreateHUDWidget()
 
 void UAeyerjiFloatingStatusBarComponent::RegisterWithOverlay()
 {
-    if (GetWorld()->IsNetMode(NM_DedicatedServer)) return;
+    UWorld* World = GetWorld();
+    if (!bStatusBarPresentationVisible || !World || World->IsNetMode(NM_DedicatedServer)) return;
     if (!StatusBarWidgetClass) { LogMissingWidget(); /* allow manager's DefaultWidgetClass if set */ }
 
-    APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
+    APlayerController* PC = UGameplayStatics::GetPlayerController(World, 0);
     if (!PC)
     {
         // PlayerController not ready yet (PIE network client timing) - retry next tick.
         if (!RetryTimer.IsValid())
         {
-            GetWorld()->GetTimerManager().SetTimer(
+            World->GetTimerManager().SetTimer(
                 RetryTimer, this, &UAeyerjiFloatingStatusBarComponent::RegisterWithOverlay, 0.02f, false);
         }
         return;
@@ -357,7 +458,7 @@ void UAeyerjiFloatingStatusBarComponent::HandleOwnerAbilitySystemReady()
 void UAeyerjiFloatingStatusBarComponent::AttemptDeferredRebind()
 {
     UWorld* World = GetWorld();
-    if (!World || World->IsNetMode(NM_DedicatedServer))
+    if (!bStatusBarPresentationVisible || !World || World->IsNetMode(NM_DedicatedServer))
     {
         return;
     }

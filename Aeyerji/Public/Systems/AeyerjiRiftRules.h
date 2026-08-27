@@ -34,6 +34,12 @@ namespace AeyerjiRiftRules
 	/** Stable largest-remainder allocation; input order is the final tie-breaker. */
 	AEYERJI_API TArray<int32> AllocateLargestRemainder(const TArray<float>& Weights, int32 TotalBudget);
 
+	/** A monotonic Rift frontier accepts equal-index lateral regions but rejects anything behind it. */
+	AEYERJI_API bool CanStageProgressionIndex(int32 CandidateIndex, int32 HighestOpenedIndex);
+
+	/** Evenly transfers skipped finite population to stable forward-region order. */
+	AEYERJI_API TArray<int32> AllocateTransferredPopulation(int32 Population, int32 ForwardRegionCount);
+
 	/** Selects the closest viable, unconsumed region; stable input order resolves equal distances. */
 	AEYERJI_API int32 SelectClosestUnusedRegion(
 		const TArray<float>& DistanceSquaredByRegion,

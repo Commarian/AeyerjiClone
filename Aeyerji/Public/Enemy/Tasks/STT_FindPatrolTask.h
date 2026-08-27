@@ -5,7 +5,6 @@
 #include "UObject/Object.h"
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "STT_FindPatrolTask.generated.h"
-#pragma once
 
 
 /**

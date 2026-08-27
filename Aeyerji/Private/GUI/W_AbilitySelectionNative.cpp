@@ -2,19 +2,32 @@
 
 #include "GUI/W_AbilitySelectionNative.h"
 
+#include "Aeyerji/AeyerjiPlayerController.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
 #include "Abilities/AeyerjiAbilityTuning.h"
+#include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Blueprint/WidgetTree.h"
 #include "AbilitySystemComponent.h"
+#include "Components/Button.h"
 #include "Components/SizeBox.h"
 #include "Components/UniformGridPanel.h"
 #include "Components/UniformGridSlot.h"
 #include "Engine/GameInstance.h"
+#include "GameFramework/PlayerController.h"
 #include "GUI/W_AbilityIconNative.h"
+#include "InputCoreTypes.h"
+#include "Kismet/GameplayStatics.h"
 
 void UW_AbilitySelectionNative::NativeConstruct()
 {
 	Super::NativeConstruct();
+	SetIsFocusable(true);
+
+	if (SaveBtn)
+	{
+		SaveBtn->OnClicked.RemoveDynamic(this, &UW_AbilitySelectionNative::HandleSaveClicked);
+		SaveBtn->OnClicked.AddDynamic(this, &UW_AbilitySelectionNative::HandleSaveClicked);
+	}
 
 	if (AAeyerjiPlayerState* PlayerState = ResolveOwningPlayerState())
 	{
@@ -34,7 +47,6 @@ void UW_AbilitySelectionNative::NativeConstruct()
 	{
 		if (UUniformGridPanel* GridPanel = GridPanelPtr.Get())
 		{
-			NormalizeUniformGridChildren(*GridPanel);
 			UpdateUniformGridSizing(*GridPanel);
 		}
 	}
@@ -42,6 +54,17 @@ void UW_AbilitySelectionNative::NativeConstruct()
 
 void UW_AbilitySelectionNative::NativeDestruct()
 {
+	if (SaveBtn)
+	{
+		SaveBtn->OnClicked.RemoveDynamic(this, &UW_AbilitySelectionNative::HandleSaveClicked);
+	}
+
+	if (bPickerOpen || bRequestedStandalonePause)
+	{
+		bPickerOpen = false;
+		LeavePickerInteraction();
+	}
+
 	if (AAeyerjiPlayerState* PlayerState = BoundPlayerState.Get())
 	{
 		PlayerState->OnAbilityProgressionChanged.RemoveDynamic(this, &UW_AbilitySelectionNative::HandleAbilityProgressionChanged);
@@ -58,6 +81,13 @@ void UW_AbilitySelectionNative::NativeTick(const FGeometry& MyGeometry, float In
 	if (ManagedUniformGrids.Num() == 0)
 	{
 		RefreshManagedUniformGrids();
+		for (const TWeakObjectPtr<UUniformGridPanel>& GridPanelPtr : ManagedUniformGrids)
+		{
+			if (UUniformGridPanel* GridPanel = GridPanelPtr.Get())
+			{
+				NormalizeUniformGridChildren(*GridPanel);
+			}
+		}
 	}
 
 	for (const TWeakObjectPtr<UUniformGridPanel>& GridPanelPtr : ManagedUniformGrids)
@@ -68,6 +98,131 @@ void UW_AbilitySelectionNative::NativeTick(const FGeometry& MyGeometry, float In
 			UpdateUniformGridSizing(*GridPanel);
 		}
 	}
+}
+
+FReply UW_AbilitySelectionNative::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (InKeyEvent.GetKey() == EKeys::Escape)
+	{
+		Close();
+		return FReply::Handled();
+	}
+
+	return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
+}
+
+void UW_AbilitySelectionNative::ConfigureForSlot(const int32 InEditingSlotIndex, const bool bInEditingPotionSlot,
+	const EAeyerjiAbilityPickerMode InPickerMode, UAbilitySystemComponent* InAbilitySystem)
+{
+	EditingSlotIndex = InEditingSlotIndex;
+	bEditingPotionSlot = bInEditingPotionSlot;
+	PickerMode = InPickerMode;
+	AbilitySystemForTooltip = InAbilitySystem;
+
+	if (IsInViewport())
+	{
+		RebuildAbilityGrid();
+	}
+}
+
+void UW_AbilitySelectionNative::Open()
+{
+	if (!IsInViewport())
+	{
+		AddToViewport(100);
+	}
+
+	SetVisibility(ESlateVisibility::Visible);
+	if (!bPickerOpen)
+	{
+		bPickerOpen = true;
+		EnterPickerInteraction();
+	}
+	SetFocus();
+}
+
+void UW_AbilitySelectionNative::Close()
+{
+	const bool bWasPresented = bPickerOpen || IsInViewport();
+	if (!bWasPresented)
+	{
+		return;
+	}
+
+	if (ActiveTooltipSource.IsValid())
+	{
+		BP_HideAbilityTooltip(LastTooltipData, ActiveTooltipSource.Get());
+		ActiveTooltipSource.Reset();
+		LastTooltipData = FAeyerjiAbilityTooltipData();
+	}
+
+	bPickerOpen = false;
+	LeavePickerInteraction();
+	RemoveFromParent();
+	OnAbilityPickerClosed.Broadcast();
+}
+
+void UW_AbilitySelectionNative::HandleSaveClicked()
+{
+	// Assignments are committed as individual server-validated slot edits when picked.
+	// The existing Designer save button is therefore a close/confirm affordance only.
+	Close();
+}
+
+void UW_AbilitySelectionNative::EnterPickerInteraction()
+{
+	UWorld* World = GetWorld();
+	APlayerController* PlayerController = GetOwningPlayer();
+	if (!World || !PlayerController || !PlayerController->IsLocalController())
+	{
+		return;
+	}
+
+	if (AAeyerjiPlayerController* AeyerjiController = Cast<AAeyerjiPlayerController>(PlayerController))
+	{
+		AeyerjiController->AbortMovement_Both();
+		AeyerjiController->StopPendingTeleporter();
+		AeyerjiController->StopPendingInteraction();
+	}
+
+	// A networked client never pauses the authoritative world or writes loose tags to other ASCs.
+	if (bPauseStandaloneGameWhileOpen && World->GetNetMode() == NM_Standalone && !UGameplayStatics::IsGamePaused(World))
+	{
+		bRequestedStandalonePause = UGameplayStatics::SetGamePaused(World, true);
+	}
+
+	UWidgetBlueprintLibrary::SetInputMode_UIOnlyEx(
+		PlayerController,
+		this,
+		EMouseLockMode::DoNotLock,
+		/*bFlushInput=*/true);
+	PlayerController->bShowMouseCursor = true;
+}
+
+void UW_AbilitySelectionNative::LeavePickerInteraction()
+{
+	UWorld* World = GetWorld();
+	APlayerController* PlayerController = GetOwningPlayer();
+
+	if (bRequestedStandalonePause && World)
+	{
+		UGameplayStatics::SetGamePaused(World, false);
+	}
+	bRequestedStandalonePause = false;
+
+	if (!World || !PlayerController || !PlayerController->IsLocalController())
+	{
+		return;
+	}
+
+	UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx(
+		PlayerController,
+		nullptr,
+		EMouseLockMode::LockOnCapture,
+		/*bHideCursorDuringCapture=*/false,
+		/*bFlushInput=*/true);
+	UWidgetBlueprintLibrary::SetFocusToGameViewport();
+	PlayerController->bShowMouseCursor = true;
 }
 
 void UW_AbilitySelectionNative::SetAbilitySystemForTooltip(UAbilitySystemComponent* InAbilitySystem)
@@ -91,15 +246,26 @@ void UW_AbilitySelectionNative::SetPickerMode(const EAeyerjiAbilityPickerMode In
 	RebuildAbilityGrid();
 }
 
+bool UW_AbilitySelectionNative::SelectAbility(const FAeyerjiAbilitySlot& SlotData)
+{
+	if (PickerMode != EAeyerjiAbilityPickerMode::Assign || EditingSlotIndex == INDEX_NONE || SlotData.Tag.IsEmpty())
+	{
+		return false;
+	}
+
+	OnAbilityPicked.Broadcast(EditingSlotIndex, SlotData);
+	return true;
+}
+
 void UW_AbilitySelectionNative::RebuildAbilityGrid()
 {
-	UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: RebuildAbilityGrid called. Grid=%s IconClass=%s"),
+	UE_LOG(LogTemp, VeryVerbose, TEXT("AbilitySelection: RebuildAbilityGrid called. Grid=%s IconClass=%s"),
 		*GetNameSafe(UniformGridPanel_Abilities),
 		*GetNameSafe(AbilityIconWidgetClass));
 
 	if (!UniformGridPanel_Abilities || !AbilityIconWidgetClass)
 	{
-		UE_LOG(LogTemp, Error, TEXT("AbilitySelection: Missing grid or icon widget class."));
+		UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: Missing grid or icon widget class."));
 		return;
 	}
 
@@ -118,7 +284,7 @@ void UW_AbilitySelectionNative::RebuildAbilityGrid()
 	TArray<FAeyerjiAbilitySlot> AbilitySlots;
 	TuningSubsystem->GetAllAbilitySlotsSorted(AbilitySlots);
 
-	UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: AbilitySlots.Num = %d"), AbilitySlots.Num());
+	UE_LOG(LogTemp, VeryVerbose, TEXT("AbilitySelection: AbilitySlots.Num = %d"), AbilitySlots.Num());
 
 	UniformGridPanel_Abilities->ClearChildren();
 
@@ -132,7 +298,7 @@ void UW_AbilitySelectionNative::RebuildAbilityGrid()
 			continue;
 		}
 
-		UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: Creating icon %d Tag=%s Class=%s"),
+		UE_LOG(LogTemp, VeryVerbose, TEXT("AbilitySelection: Creating icon %d Tag=%s Class=%s"),
 			Index,
 			*AbilitySlots[Index].Tag.ToString(),
 			*GetNameSafe(AbilitySlots[Index].Class));
@@ -158,7 +324,7 @@ void UW_AbilitySelectionNative::RebuildAbilityGrid()
 		UniformGridPanel_Abilities->AddChildToUniformGrid(IconWidget, Row, Column);
 		++VisibleIndex;
 
-		UE_LOG(LogTemp, Warning, TEXT("AbilitySelection: Grid child count = %d"),
+		UE_LOG(LogTemp, VeryVerbose, TEXT("AbilitySelection: Grid child count = %d"),
 			UniformGridPanel_Abilities->GetChildrenCount());
 	}
 
@@ -302,6 +468,7 @@ void UW_AbilitySelectionNative::HandleAbilityProgressionChanged(const TArray<FAe
 void UW_AbilitySelectionNative::RefreshManagedUniformGrids()
 {
 	ManagedUniformGrids.Reset();
+	LastAppliedGridSquareSizes.Reset();
 
 	if (!WidgetTree)
 	{
@@ -391,6 +558,15 @@ void UW_AbilitySelectionNative::UpdateUniformGridSizing(UUniformGridPanel& GridP
 	const float CellWidth = LocalSize.X / static_cast<float>(ColumnCount);
 	const float CellHeight = LocalSize.Y / static_cast<float>(RowCount);
 	const float SquareSize = FMath::Max(1.f, FMath::Min(CellWidth, CellHeight));
+	const TWeakObjectPtr<UUniformGridPanel> GridKey(&GridPanel);
+	if (const float* LastSquareSize = LastAppliedGridSquareSizes.Find(GridKey))
+	{
+		if (FMath::IsNearlyEqual(*LastSquareSize, SquareSize, 0.25f))
+		{
+			return;
+		}
+	}
+	LastAppliedGridSquareSizes.Add(GridKey, SquareSize);
 
 	for (int32 ChildIndex = 0; ChildIndex < GridPanel.GetChildrenCount(); ++ChildIndex)
 	{

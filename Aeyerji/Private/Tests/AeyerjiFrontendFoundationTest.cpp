@@ -4,9 +4,12 @@
 
 #include "Aeyerji/AeyerjiSaveGame.h"
 #include "Engine/CurveTable.h"
+#include "Engine/DataTable.h"
 #include "Frontend/AeyerjiFrontendRules.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/PackageName.h"
 #include "Progression/AeyerjiProgressionLibrary.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAeyerjiFrontendSnapshotAndProgressionTest,
@@ -62,6 +65,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 bool FAeyerjiFrontendLobbyRulesTest::RunTest(const FString& Parameters)
 {
 	(void)Parameters;
+	const UDataTable* TierTable = UAeyerjiDifficultySettings::GetRiftTierTable();
+	TestNotNull(TEXT("Configured Rift tier table loads for authoritative launch validation."), TierTable);
+	if (TierTable)
+	{
+		TestNotNull(TEXT("The default Excursion tier is defined."),
+			TierTable->FindRow<FAeyerjiRiftTierRow>(TEXT("Tier_1"), TEXT("Frontend automation tier lookup"), false));
+	}
+	TestTrue(TEXT("The built-in persistent gameplay-map fallback exists."),
+		FPackageName::DoesPackageExist(TEXT("/Game/Levels/L_PersistentRoot")));
+	TestTrue(TEXT("The built-in Neon gameplay zone exists."),
+		FPackageName::DoesPackageExist(TEXT("/Game/Levels/NeonMap")));
+
 	TestEqual(TEXT("Lowest stable PlayerId is leader."),
 		AeyerjiFrontendRules::ResolveLeaderPlayerId({ 42, 7, 19 }), 7);
 	TestEqual(TEXT("Empty roster has no leader."),
@@ -128,6 +143,23 @@ bool FAeyerjiFrontendTransportAndLaunchRequestTest::RunTest(const FString& Param
 		AeyerjiFrontendRules::IsProfileTransferLayoutValid(MaxBytes + 1, MaxChunk, MaxBytes, MaxChunk));
 	TestFalse(TEXT("Oversized RPC chunks are rejected."),
 		AeyerjiFrontendRules::IsProfileTransferLayoutValid(128 * 1024, MaxChunk + 1, MaxBytes, MaxChunk));
+
+	TestTrue(TEXT("Authenticated profile owner must match exactly."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(TEXT("SteamOwner"), TEXT("SteamOwner"), FString(), false));
+	TestFalse(TEXT("Authenticated profile owner mismatch is rejected."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(TEXT("OtherOwner"), TEXT("SteamOwner"), FString(), false));
+	TestFalse(TEXT("A stale authenticated binding cannot override the current platform owner."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(TEXT("OldOwner"), TEXT("SteamOwner"), TEXT("OldOwner"), false));
+	TestTrue(TEXT("A matching authenticated binding remains valid."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(TEXT("SteamOwner"), TEXT("SteamOwner"), TEXT("SteamOwner"), false));
+	TestTrue(TEXT("NULL identity can establish its first bounded local owner."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(TEXT("LocalDevOwner"), TEXT("GeneratedNullName"), FString(), true));
+	TestFalse(TEXT("An established NULL owner cannot be changed."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(TEXT("OtherOwner"), TEXT("GeneratedNullName"), TEXT("LocalDevOwner"), true));
+	TestFalse(TEXT("Empty profile owners are never accepted."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(FString(), FString(), FString(), true));
+	TestFalse(TEXT("Unbounded profile owners are rejected before binding."),
+		AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(FString::ChrN(129, TEXT('A')), FString(), FString(), true));
 
 	FAeyerjiPendingRunLaunchRequest Request;
 	Request.RequestId = 31;

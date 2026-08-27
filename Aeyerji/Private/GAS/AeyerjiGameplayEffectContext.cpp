@@ -28,9 +28,10 @@ bool FAeyerjiGameplayEffectContext::NetSerialize(FArchive& Ar, UPackageMap* Map,
 	Ar << DamageResult.LifeStealFraction;
 	Ar << DamageResult.StaggerDamage;
 
-	bool bTagSuccess = true;
-	DamageResult.DamageType.NetSerialize(Ar, Map, bTagSuccess);
-	DamageResult.RuleTags.NetSerialize(Ar, Map, bTagSuccess);
+	bool bDamageTypeSuccess = true;
+	DamageResult.DamageType.NetSerialize(Ar, Map, bDamageTypeSuccess);
+	bool bRuleTagsSuccess = true;
+	DamageResult.RuleTags.NetSerialize(Ar, Map, bRuleTagsSuccess);
 
 	uint8 ResultFlags = 0;
 	if (Ar.IsSaving())
@@ -47,16 +48,28 @@ bool FAeyerjiGameplayEffectContext::NetSerialize(FArchive& Ar, UPackageMap* Map,
 		DamageResult.bWasDodged = (ResultFlags & (1 << 1)) != 0;
 		DamageResult.bWasFatal = (ResultFlags & (1 << 2)) != 0;
 		DamageResult.bTriggeredStagger = (ResultFlags & (1 << 3)) != 0;
+
+		auto SanitizeNonNegative = [](float& Value)
+		{
+			Value = FMath::IsFinite(Value) ? FMath::Max(0.f, Value) : 0.f;
+		};
+		SanitizeNonNegative(DamageResult.BaseDamage);
+		SanitizeNonNegative(DamageResult.PreMitigationDamage);
+		SanitizeNonNegative(DamageResult.FinalDamage);
+		SanitizeNonNegative(DamageResult.MitigatedDamage);
+		SanitizeNonNegative(DamageResult.LifeStealFraction);
+		SanitizeNonNegative(DamageResult.StaggerDamage);
 	}
 
-	bOutSuccess = bParentSuccess && bTagSuccess;
+	bOutSuccess = bParentSuccess && bDamageTypeSuccess && bRuleTagsSuccess && !Ar.IsError();
 	return true;
 }
 
 FAeyerjiGameplayEffectContext* FAeyerjiGameplayEffectContext::ExtractMutable(FGameplayEffectContextHandle& Handle)
 {
 	FGameplayEffectContext* Context = Handle.Get();
-	return Context && Context->GetScriptStruct()->IsChildOf(StaticStruct())
+	const UScriptStruct* ContextStruct = Context ? Context->GetScriptStruct() : nullptr;
+	return ContextStruct && ContextStruct->IsChildOf(StaticStruct())
 		? static_cast<FAeyerjiGameplayEffectContext*>(Context)
 		: nullptr;
 }
@@ -64,7 +77,8 @@ FAeyerjiGameplayEffectContext* FAeyerjiGameplayEffectContext::ExtractMutable(FGa
 const FAeyerjiGameplayEffectContext* FAeyerjiGameplayEffectContext::Extract(const FGameplayEffectContextHandle& Handle)
 {
 	const FGameplayEffectContext* Context = Handle.Get();
-	return Context && Context->GetScriptStruct()->IsChildOf(StaticStruct())
+	const UScriptStruct* ContextStruct = Context ? Context->GetScriptStruct() : nullptr;
+	return ContextStruct && ContextStruct->IsChildOf(StaticStruct())
 		? static_cast<const FAeyerjiGameplayEffectContext*>(Context)
 		: nullptr;
 }

@@ -502,7 +502,7 @@ static UAbilitySystemComponent *FindASCChecked(const AAeyerjiPlayerState *PS)
 		return nullptr;
 	}
 
-	/* 1ï¸âƒ£  Does the PlayerState already own a pawn? */
+	/* First prefer the pawn already owned by the PlayerState. */
 
 	APawn *Pawn = PS->GetPawn();
 
@@ -519,7 +519,7 @@ static UAbilitySystemComponent *FindASCChecked(const AAeyerjiPlayerState *PS)
 		return nullptr;
 	}
 
-	/* 2ï¸âƒ£  Does that pawn actually expose an ASC? */
+	/* Confirm that the resolved pawn exposes an ability-system component. */
 
 	const bool bImplementsASI = Pawn->GetClass()->ImplementsInterface(UAbilitySystemInterface::StaticClass());
 
@@ -536,7 +536,7 @@ static UAbilitySystemComponent *FindASCChecked(const AAeyerjiPlayerState *PS)
 		return nullptr;
 	}
 
-	/* 3ï¸âƒ£  Is the component pointer valid? */
+	/* Reject stale component pointers before returning the ASC. */
 
 	if (const IAbilitySystemInterface *ASI = Cast<IAbilitySystemInterface>(Pawn))
 
@@ -563,7 +563,8 @@ static UAbilitySystemComponent *FindASCChecked(const AAeyerjiPlayerState *PS)
 
 static int32 MakeDifficultyKey(const float DifficultySlider)
 {
-	return FMath::Clamp(FMath::RoundToInt(DifficultySlider), 0, 1000);
+	const float SafeSlider = FMath::IsFinite(DifficultySlider) ? DifficultySlider : GetDefaultDifficultySlider();
+	return FMath::RoundToInt(FMath::Clamp(SafeSlider, 0.f, UAeyerjiDifficultySettings::DifficultySliderMax));
 }
 
 static float ApplyRunBestTimeToSaveData(UAeyerjiSaveGame* Data, const FAeyerjiRunResults& Results)
@@ -578,7 +579,8 @@ static float ApplyRunBestTimeToSaveData(UAeyerjiSaveGame* Data, const FAeyerjiRu
 	const float ExistingBest = Data->BestRunTimeSecondsByDifficulty.FindRef(DifficultyKey);
 	float BestTime = (bHasExisting && ExistingBest > 0.f) ? ExistingBest : 0.f;
 
-	if (Results.Resolution == EAeyerjiRunResolution::Victory && Results.RunTimeSeconds > 0.f)
+	if (Results.Resolution == EAeyerjiRunResolution::Victory
+		&& FMath::IsFinite(Results.RunTimeSeconds) && Results.RunTimeSeconds > 0.f)
 	{
 		if (BestTime <= 0.f || Results.RunTimeSeconds < BestTime)
 		{
@@ -600,11 +602,13 @@ static void AppendRecentRunRecord(UAeyerjiSaveGame* Data, const FAeyerjiRunResul
 	FAeyerjiCompletedRunRecord NewRecord;
 	NewRecord.CompletedAtUtc = FDateTime::UtcNow();
 	NewRecord.Resolution = Results.Resolution;
-	NewRecord.RunTimeSeconds = Results.RunTimeSeconds;
+	NewRecord.RunTimeSeconds = FMath::IsFinite(Results.RunTimeSeconds) ? FMath::Max(0.f, Results.RunTimeSeconds) : 0.f;
 	NewRecord.UnitsKilled = Results.UnitsKilled;
 	NewRecord.UnitsKillTarget = Results.UnitsKillTarget;
-	NewRecord.DifficultySlider = Results.DifficultySlider;
-	NewRecord.SpeedBonusPercent = Results.SpeedBonusPercent;
+	NewRecord.DifficultySlider = static_cast<float>(MakeDifficultyKey(Results.DifficultySlider));
+	NewRecord.SpeedBonusPercent = FMath::IsFinite(Results.SpeedBonusPercent)
+		? FMath::Clamp(Results.SpeedBonusPercent, 0.f, 1000000.f)
+		: 0.f;
 	NewRecord.CompletedZoneId = Results.CompletedZoneId;
 	NewRecord.SelectedRiftTier = Results.SelectedRiftTier;
 	NewRecord.ProgressPoints = Results.ProgressPoints;
@@ -730,8 +734,8 @@ static bool GatherAeyerjiCharSaveData(
 					if (UAeyerjiAttributeSet* AeyerjiSet = Cast<UAeyerjiAttributeSet>(Set))
 					{
 						UE_LOG(LogTemp, Log, TEXT("SaveAeyerjiChar: Found Attribute XP found '%f'"), AeyerjiSet->GetXP());
-						Data->Attributes.XP = AeyerjiSet->GetXP();
-						Data->Attributes.Level = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(AeyerjiSet->GetLevel()));
+						Data->Attributes.XP = FMath::IsFinite(AeyerjiSet->GetXP()) ? FMath::Max(0.f, AeyerjiSet->GetXP()) : 0.f;
+						Data->Attributes.Level = UAeyerjiDifficultySettings::FloatToGameplayLevel(AeyerjiSet->GetLevel());
 					}
 				}
 			}
@@ -845,17 +849,10 @@ FString UCharacterStatsLibrary::MakeStableOwnerKey(const APlayerState* PS)
 		return TEXT("UNKNOWN");
 	}
 
-	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PS))
-	{
-		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
-		if (!OverrideSlot.IsEmpty())
-		{
-			return OverrideSlot;
-		}
-	}
-
+	// Authenticated platform identity is the account boundary. A Blueprint character-slot
+	// override must not make two Steam users share profile or character-scoped world state.
 	const FUniqueNetIdRepl& NetId = PS->GetUniqueId();
-	if (NetId.IsValid())
+	if (NetId.IsValid() && NetId.GetUniqueNetId().IsValid())
 	{
 		const FUniqueNetId& Raw = *NetId.GetUniqueNetId();
 		if (!Raw.GetType().IsEqual(FName("NULL"), ENameCase::IgnoreCase))
@@ -865,6 +862,21 @@ FString UCharacterStatsLibrary::MakeStableOwnerKey(const APlayerState* PS)
 			{
 				return SafeNetId;
 			}
+		}
+	}
+
+	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PS))
+	{
+		const FString SafeFrontendOwner = SanitizeSaveSlotName(AeyerjiPS->GetFrontendProfileOwnerKey());
+		if (!SafeFrontendOwner.IsEmpty())
+		{
+			return SafeFrontendOwner;
+		}
+
+		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
+		if (UAeyerjiSaveManagerSubsystem::IsExplicitSaveSlotOverrideAllowed(PS) && !OverrideSlot.IsEmpty())
+		{
+			return OverrideSlot;
 		}
 	}
 
@@ -895,7 +907,7 @@ FString UCharacterStatsLibrary::MakeStableCharSlotName(const APlayerState *PS)
 	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PS))
 	{
 		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
-		if (!OverrideSlot.IsEmpty())
+		if (UAeyerjiSaveManagerSubsystem::IsExplicitSaveSlotOverrideAllowed(PS) && !OverrideSlot.IsEmpty())
 		{
 			return OverrideSlot;
 		}
@@ -1017,8 +1029,6 @@ void UCharacterStatsLibrary::LoadAeyerjiChar(
 	UAbilitySystemComponent *ASC)
 
 {
-
-	// TODO add somewhere here a function that can look at previous day's saves if this one doesn't exist yet.
 
 	if (!Data)
 
@@ -2133,17 +2143,19 @@ bool UCharacterStatsLibrary::GetSavedWorldTier(const UObject* WorldContextObject
 
 bool UCharacterStatsLibrary::RecordBestRunTimeSecondsForDifficulty(const AAeyerjiPlayerState* PS, float RunTimeSeconds, float DifficultySlider)
 {
-	if (!PS || !PS->GetWorld() || PS->GetWorld()->GetNetMode() == NM_Client)
+	UWorld* World = PS ? PS->GetWorld() : nullptr;
+	UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	if (!PS || !World || !GameInstance || World->GetNetMode() == NM_Client)
 	{
 		return false;
 	}
 
-	if (RunTimeSeconds <= 0.f)
+	if (!FMath::IsFinite(RunTimeSeconds) || RunTimeSeconds <= 0.f)
 	{
 		return false;
 	}
 
-	UAeyerjiSaveManagerSubsystem* SaveManager = PS->GetWorld()->GetGameInstance()->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
+	UAeyerjiSaveManagerSubsystem* SaveManager = GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
 	if (!SaveManager)
 	{
 		return false;
@@ -2175,12 +2187,14 @@ bool UCharacterStatsLibrary::RecordBestRunTimeSecondsForDifficulty(const AAeyerj
 
 bool UCharacterStatsLibrary::RecordCompletedRunAndSaveCharacter(const AAeyerjiPlayerState* PS, const FAeyerjiRunResults& Results)
 {
-	if (!PS || !PS->GetWorld() || PS->GetWorld()->GetNetMode() == NM_Client)
+	UWorld* World = PS ? PS->GetWorld() : nullptr;
+	UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
+	if (!PS || !World || !GameInstance || World->GetNetMode() == NM_Client)
 	{
 		return false;
 	}
 
-	UAeyerjiSaveManagerSubsystem* SaveManager = PS->GetWorld()->GetGameInstance()->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
+	UAeyerjiSaveManagerSubsystem* SaveManager = GameInstance->GetSubsystem<UAeyerjiSaveManagerSubsystem>();
 	if (!SaveManager)
 	{
 		return false;

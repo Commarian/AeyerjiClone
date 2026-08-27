@@ -8,7 +8,7 @@
 
 class UProgressBar;
 
-/* ───────── Delegate sent to ActionBar when a slot is right-clicked ───────── */
+/** Delegate sent to the action bar when a slot is right-clicked. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
     FOnActionSlotRightClicked,
     int32, SlotIndex
@@ -19,7 +19,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
     class UW_ActionSlotNative*, SlotWidget
 );
 
-/* ───────────────────────────── Widget class ─────────────────────────────── */
+/** Native action-bar slot presentation and mouse interaction bridge. */
 UCLASS()
 class AEYERJI_API UW_ActionSlotNative : public UUserWidget
 {
@@ -27,17 +27,19 @@ class AEYERJI_API UW_ActionSlotNative : public UUserWidget
 
 public:
 
-    /* ---------- Exposed in UMG designer ---------- */
+    /** Required UMG image named Icon that displays the assigned action icon. */
     UPROPERTY(meta = (BindWidget))
     UImage* Icon = nullptr;
 
+    /** Optional UMG progress bar used to display the active cooldown fraction. */
     UPROPERTY(meta = (BindWidgetOptional))
     UProgressBar* CooldownProgress = nullptr;
 
-    /* ---------- State cached by ActionBar ---------- */
+    /** Zero-based action-bar slot assigned by the owning action-bar widget. */
     UPROPERTY(BlueprintReadWrite, EditAnywhere, FieldNotify)
     int32               StoredSlotIndex = INDEX_NONE;
 
+    /** Ability-slot definition currently presented by this widget. */
     UPROPERTY(BlueprintReadWrite, EditAnywhere, FieldNotify)
     FAeyerjiAbilitySlot StoredSlotData;
 
@@ -45,33 +47,37 @@ public:
     UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Aeyerji|Slot")
     bool bIsPotionSlot = false;
 
+    /** Normalized 0..1 cooldown fraction used by the progress-bar presentation. */
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     float CooldownPercent = 0.f;
 
+    /** Remaining finite cooldown duration in seconds. */
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     float CooldownTimeRemaining = 0.f;
 
+    /** Total finite cooldown duration in seconds. */
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     float CooldownTotalTime = 0.f;
 
+    /** Whole seconds shown by Blueprint cooldown text. */
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     int32 CooldownDisplaySeconds = 0;
 
+    /** True while a valid positive cooldown is being presented. */
     UPROPERTY(BlueprintReadOnly, EditAnywhere, FieldNotify, Category = "Aeyerji|Cooldown")
     bool bIsCoolingDown = false;
 
-    /* ---------- Blueprint can bind here ---------- */
+    /** Broadcasts a local right-click so the action bar can clear or edit the slot. */
     UPROPERTY(BlueprintAssignable, Category = "Aeyerji|Events")
     FOnActionSlotRightClicked OnSlotRightClicked;
 
-    /* ---------- Blueprint can bind here ---------- */
+    /** Broadcasts a local left-click so the action bar can activate the slot. */
     UPROPERTY(BlueprintAssignable, Category = "Aeyerji|Events")
     FOnActionSlotLeftClicked OnSlotLeftClicked;
 
-    /* ---------- Constructor ---------- */
     UW_ActionSlotNative(const FObjectInitializer& ObjectInitializer);
 
-    /* ---------- API ---------- */
+    /** Applies an icon or restores the placeholder when the texture is invalid. */
     UFUNCTION(BlueprintCallable)
     void SetIcon(UTexture2D* InTex) const
     {
@@ -83,10 +89,16 @@ public:
             return;
         }
 
-        UE_LOG(LogTemp, Log, TEXT("SetIcon: %s"), *InTex->GetName());
-        Icon->SetBrushFromTexture(InTex, /*bMatchSize=*/false);
+		if (!IsValid(InTex))
+		{
+			SetPlaceholderIcon();
+			return;
+		}
+
+		Icon->SetBrushFromTexture(InTex, /*bMatchSize=*/false);
     }
 
+    /** Restores the cached placeholder texture when the bound image is available. */
     UFUNCTION(BlueprintCallable)
     void SetPlaceholderIcon() const
     {
@@ -96,9 +108,11 @@ public:
         }
     }
 
+    /** Sanitizes and presents a cooldown snapshot supplied by the owning action bar. */
     UFUNCTION(BlueprintCallable, Category = "Aeyerji|Cooldown")
     void UpdateCooldownDisplay(float TimeRemaining, float TotalDuration);
 
+    /** Clears all native cooldown presentation state. */
     UFUNCTION(BlueprintCallable, Category = "Aeyerji|Cooldown")
     void ClearCooldownDisplay();
 

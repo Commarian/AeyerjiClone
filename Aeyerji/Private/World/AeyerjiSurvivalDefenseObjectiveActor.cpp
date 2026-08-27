@@ -13,6 +13,12 @@
 #include "EngineUtils.h"
 #include "Net/UnrealNetwork.h"
 
+namespace
+{
+	constexpr float MaxObjectiveAttributeValue = 1000000000.f;
+	constexpr float MaxObjectiveInteractionRadius = 1000000.f;
+}
+
 AAeyerjiSurvivalDefenseObjectiveActor::AAeyerjiSurvivalDefenseObjectiveActor()
 {
 	bReplicates = true;
@@ -46,7 +52,7 @@ AAeyerjiSurvivalDefenseObjectiveActor::AAeyerjiSurvivalDefenseObjectiveActor()
 
 	AbilitySystem = CreateDefaultSubobject<UAbilitySystemComponent>(TEXT("AbilitySystem"));
 	AbilitySystem->SetIsReplicated(true);
-	AbilitySystem->SetReplicationMode(EGameplayEffectReplicationMode::Full);
+	AbilitySystem->SetReplicationMode(EGameplayEffectReplicationMode::Minimal);
 
 	AttributeSet = CreateDefaultSubobject<UAeyerjiAttributeSet>(TEXT("AttributeSet"));
 }
@@ -62,7 +68,10 @@ void AAeyerjiSurvivalDefenseObjectiveActor::BeginPlay()
 
 	if (RepairInteractionSphere)
 	{
-		RepairInteractionSphere->SetSphereRadius(RepairInteractionRadius);
+		const float SafeInteractionRadius = FMath::IsFinite(RepairInteractionRadius)
+			? FMath::Clamp(RepairInteractionRadius, 1.f, MaxObjectiveInteractionRadius)
+			: 350.f;
+		RepairInteractionSphere->SetSphereRadius(SafeInteractionRadius);
 		RepairInteractionSphere->SetCollisionEnabled(bEnableRepairInteraction ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
 	}
 
@@ -77,11 +86,22 @@ void AAeyerjiSurvivalDefenseObjectiveActor::BeginPlay()
 	}
 }
 
+void AAeyerjiSurvivalDefenseObjectiveActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (AttributeSet)
+	{
+		AttributeSet->OnOutOfHealth.RemoveDynamic(this, &AAeyerjiSurvivalDefenseObjectiveActor::HandleObjectiveOutOfHealth);
+	}
+	Super::EndPlay(EndPlayReason);
+}
+
 bool AAeyerjiSurvivalDefenseObjectiveActor::CanInteract_Implementation(AAeyerjiPlayerController* Controller)
 {
 	return bEnableRepairInteraction
 		&& IsValid(Controller)
+		&& Controller->GetWorld() == GetWorld()
 		&& !bObjectiveDestroyed
+		&& FMath::IsFinite(GetObjectiveHealth())
 		&& GetObjectiveHealth() > 0.f;
 }
 
@@ -92,12 +112,17 @@ FVector AAeyerjiSurvivalDefenseObjectiveActor::GetInteractionLocation_Implementa
 
 float AAeyerjiSurvivalDefenseObjectiveActor::GetInteractionRadius_Implementation()
 {
-	return bEnableRepairInteraction ? RepairInteractionRadius : 0.f;
+	return bEnableRepairInteraction && FMath::IsFinite(RepairInteractionRadius)
+		? FMath::Clamp(RepairInteractionRadius, 1.f, MaxObjectiveInteractionRadius)
+		: 0.f;
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::Interact_Implementation(AAeyerjiPlayerController* Controller)
 {
-	if (!HasAuthority() || !bEnableRepairInteraction || !IsValid(Controller))
+	if (!HasAuthority()
+		|| !bEnableRepairInteraction
+		|| !IsValid(Controller)
+		|| Controller->GetWorld() != GetWorld())
 	{
 		return;
 	}
@@ -153,12 +178,14 @@ void AAeyerjiSurvivalDefenseObjectiveActor::SetGenericTeamId(const FGenericTeamI
 
 float AAeyerjiSurvivalDefenseObjectiveActor::GetObjectiveHealth() const
 {
-	return AbilitySystem ? AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()) : 0.f;
+	const float Health = AbilitySystem ? AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()) : 0.f;
+	return FMath::IsFinite(Health) ? FMath::Max(0.f, Health) : 0.f;
 }
 
 float AAeyerjiSurvivalDefenseObjectiveActor::GetObjectiveMaxHealth() const
 {
-	return AbilitySystem ? AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute()) : 0.f;
+	const float MaxObjectiveHealth = AbilitySystem ? AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute()) : 0.f;
+	return FMath::IsFinite(MaxObjectiveHealth) ? FMath::Max(0.f, MaxObjectiveHealth) : 0.f;
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::HandleObjectiveOutOfHealth(AActor* VictimActor, AActor* InstigatorActor, const float DamageTaken)
@@ -175,14 +202,22 @@ void AAeyerjiSurvivalDefenseObjectiveActor::HandleObjectiveOutOfHealth(AActor* V
 	}
 
 	ApplyDestroyedPresentation();
-	OnObjectiveOutOfHealth.Broadcast(this, InstigatorActor, DamageTaken);
-	BP_OnObjectiveDestroyed(InstigatorActor, DamageTaken);
+	const float SafeDamageTaken = FMath::IsFinite(DamageTaken) ? FMath::Max(0.f, DamageTaken) : 0.f;
+	OnObjectiveOutOfHealth.Broadcast(this, InstigatorActor, SafeDamageTaken);
+	BP_OnObjectiveDestroyed(InstigatorActor, SafeDamageTaken);
 	ForceNetUpdate();
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::OnRep_ObjectiveDestroyed()
 {
-	ApplyDestroyedPresentation();
+	if (bObjectiveDestroyed)
+	{
+		ApplyDestroyedPresentation();
+	}
+	else
+	{
+		ApplyActivePresentation();
+	}
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::InitializeObjectiveAttributes()
@@ -192,10 +227,15 @@ void AAeyerjiSurvivalDefenseObjectiveActor::InitializeObjectiveAttributes()
 		return;
 	}
 
-	const float ClampedMaxHealth = FMath::Max(1.f, MaxHealth);
+	const float ClampedMaxHealth = FMath::IsFinite(MaxHealth)
+		? FMath::Clamp(MaxHealth, 1.f, MaxObjectiveAttributeValue)
+		: 1000.f;
 	AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPMaxAttribute(), ClampedMaxHealth);
 	AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(), ClampedMaxHealth);
-	AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetArmorAttribute(), FMath::Max(0.f, Armor));
+	const float SafeArmor = FMath::IsFinite(Armor)
+		? FMath::Clamp(Armor, 0.f, MaxObjectiveAttributeValue)
+		: 0.f;
+	AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetArmorAttribute(), SafeArmor);
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::ApplyDestroyedPresentation()
@@ -223,25 +263,53 @@ void AAeyerjiSurvivalDefenseObjectiveActor::ApplyDestroyedPresentation()
 	}
 }
 
-void AAeyerjiSurvivalDefenseObjectiveActor::AddTreeReflectFraction(float Amount)
+void AAeyerjiSurvivalDefenseObjectiveActor::ApplyActivePresentation()
 {
-	if (!HasAuthority() || Amount <= 0.f)
+	if (bObjectiveDestroyed)
 	{
 		return;
 	}
 
-	UpgradeReflectFraction += Amount;
+	if (TargetCollision)
+	{
+		TargetCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		TargetCollision->SetGenerateOverlapEvents(true);
+	}
+	if (RepairInteractionSphere)
+	{
+		RepairInteractionSphere->SetCollisionEnabled(
+			bEnableRepairInteraction ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
+		RepairInteractionSphere->SetGenerateOverlapEvents(bEnableRepairInteraction);
+	}
+	if (StaticMesh && bHideWhenDestroyed)
+	{
+		StaticMesh->SetHiddenInGame(false);
+	}
+	BP_OnObjectiveReset();
+}
+
+void AAeyerjiSurvivalDefenseObjectiveActor::AddTreeReflectFraction(float Amount)
+{
+	if (!HasAuthority() || !FMath::IsFinite(Amount) || Amount <= 0.f)
+	{
+		return;
+	}
+
+	UpgradeReflectFraction = FMath::Clamp(UpgradeReflectFraction + Amount, 0.f, 100.f);
 	ForceNetUpdate();
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::AddTreeRegenPerSecond(float Amount)
 {
-	if (!HasAuthority() || Amount <= 0.f)
+	if (!HasAuthority() || !FMath::IsFinite(Amount) || Amount <= 0.f)
 	{
 		return;
 	}
 
-	UpgradeRegenPerSecond += Amount;
+	UpgradeRegenPerSecond = FMath::Clamp(
+		UpgradeRegenPerSecond + Amount,
+		0.f,
+		MaxObjectiveAttributeValue);
 	ForceNetUpdate();
 }
 
@@ -249,30 +317,46 @@ void AAeyerjiSurvivalDefenseObjectiveActor::ApplyTreeMaxHealthUpgrade(float Delt
 {
 	// GAS hygiene note: direct base attribute mutation for permanent per-run upgrade.
 	// For full modifier support a GameplayEffect could be used, but this keeps it simple and immediate.
-	if (!HasAuthority() || DeltaHP <= 0.f || !AbilitySystem)
+	if (!HasAuthority() || !FMath::IsFinite(DeltaHP) || DeltaHP <= 0.f || !AbilitySystem)
 	{
 		return;
 	}
 
-	const float CurrentMax = AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
-	const float CurrentHP = AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
-	const float NewMax = FMath::Max(1.f, CurrentMax + DeltaHP);
+	const float CurrentMax = GetObjectiveMaxHealth();
+	const float CurrentHP = GetObjectiveHealth();
+	const double NewMaxValue = FMath::Clamp(
+		static_cast<double>(CurrentMax) + FMath::Clamp(DeltaHP, 0.f, MaxObjectiveAttributeValue),
+		1.0,
+		static_cast<double>(MaxObjectiveAttributeValue));
+	const float NewMax = static_cast<float>(NewMaxValue);
 	AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPMaxAttribute(), NewMax);
 	// Grant the delta to current HP as well (clamped)
-	AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(), FMath::Clamp(CurrentHP + DeltaHP, 0.f, NewMax));
+	AbilitySystem->SetNumericAttributeBase(
+		UAeyerjiAttributeSet::GetHPAttribute(),
+		static_cast<float>(FMath::Clamp(
+			static_cast<double>(CurrentHP) + FMath::Clamp(DeltaHP, 0.f, MaxObjectiveAttributeValue),
+			0.0,
+			NewMaxValue)));
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::ApplyRegenTick()
 {
 	// Simple per-second additive regen. Called by LevelDirector's timer for now.
 	// Could be moved to a periodic GE on the objective in future for full GAS integration.
-	if (!HasAuthority() || UpgradeRegenPerSecond <= 0.f || !AbilitySystem)
+	if (!HasAuthority()
+		|| !FMath::IsFinite(UpgradeRegenPerSecond)
+		|| UpgradeRegenPerSecond <= 0.f
+		|| !AbilitySystem)
 	{
 		return;
 	}
 
-	const float CurrentHP = AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
-	const float MaxHP = AbilitySystem->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+	const float CurrentHP = GetObjectiveHealth();
+	const float MaxHP = GetObjectiveMaxHealth();
+	if (MaxHP <= UE_SMALL_NUMBER)
+	{
+		return;
+	}
 	if (CurrentHP >= MaxHP - KINDA_SMALL_NUMBER)
 	{
 		return;
@@ -280,7 +364,10 @@ void AAeyerjiSurvivalDefenseObjectiveActor::ApplyRegenTick()
 
 	AbilitySystem->SetNumericAttributeBase(
 		UAeyerjiAttributeSet::GetHPAttribute(),
-		FMath::Clamp(CurrentHP + UpgradeRegenPerSecond, 0.f, MaxHP));
+		static_cast<float>(FMath::Clamp(
+			static_cast<double>(CurrentHP) + UpgradeRegenPerSecond,
+			0.0,
+			static_cast<double>(MaxHP))));
 }
 
 void AAeyerjiSurvivalDefenseObjectiveActor::ResetSurvivalUpgrades()
@@ -292,5 +379,31 @@ void AAeyerjiSurvivalDefenseObjectiveActor::ResetSurvivalUpgrades()
 
 	UpgradeReflectFraction = 0.f;
 	UpgradeRegenPerSecond = 0.f;
+	if (AbilitySystem)
+	{
+		const float AuthoredMaxHealth = FMath::IsFinite(MaxHealth)
+			? FMath::Clamp(MaxHealth, 1.f, MaxObjectiveAttributeValue)
+			: 1000.f;
+		const float CurrentHP = GetObjectiveHealth();
+		AbilitySystem->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPMaxAttribute(), AuthoredMaxHealth);
+		AbilitySystem->SetNumericAttributeBase(
+			UAeyerjiAttributeSet::GetHPAttribute(),
+			FMath::Clamp(CurrentHP, 0.f, AuthoredMaxHealth));
+	}
+	ForceNetUpdate();
+}
+
+void AAeyerjiSurvivalDefenseObjectiveActor::ResetObjectiveForNewRun()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	ResetSurvivalUpgrades();
+	bObjectiveDestroyed = false;
+	Tags.Remove(AeyerjiTags::State_Dead.GetTag().GetTagName());
+	InitializeObjectiveAttributes();
+	ApplyActivePresentation();
 	ForceNetUpdate();
 }

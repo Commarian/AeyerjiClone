@@ -20,23 +20,23 @@ void FAeyerjiDamageRuleConfig::ApplyToSpec(FGameplayEffectSpec& Spec) const
 	AddRule(bCanTriggerOnHit, AeyerjiTags::DamageRule_CanTriggerOnHit);
 	AddRule(bCanStagger, AeyerjiTags::DamageRule_CanStagger);
 
-	if (bUseVariance && VarianceOverride >= 0.f)
+	if (bUseVariance && FMath::IsFinite(VarianceOverride) && VarianceOverride >= 0.f)
 	{
-		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_Variance, VarianceOverride);
+		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_Variance, FMath::Clamp(VarianceOverride, 0.f, 0.95f));
 	}
-	if (bCanCrit && CriticalMultiplierOverride > 0.f)
+	if (bCanCrit && FMath::IsFinite(CriticalMultiplierOverride) && CriticalMultiplierOverride > 0.f)
 	{
 		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_CriticalMultiplier, CriticalMultiplierOverride);
 	}
-	if (ArmorShred > 0.f)
+	if (FMath::IsFinite(ArmorShred) && ArmorShred > 0.f)
 	{
 		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_ArmorShred, ArmorShred);
 	}
-	if (ArmorPenetration > 0.f)
+	if (FMath::IsFinite(ArmorPenetration) && ArmorPenetration > 0.f)
 	{
-		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_ArmorPenetration, ArmorPenetration);
+		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_ArmorPenetration, FMath::Clamp(ArmorPenetration, 0.f, 1.f));
 	}
-	if (bCanStagger && !FMath::IsNearlyEqual(StaggerMultiplier, 1.f))
+	if (bCanStagger && FMath::IsFinite(StaggerMultiplier) && !FMath::IsNearlyEqual(StaggerMultiplier, 1.f))
 	{
 		Spec.SetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_StaggerMultiplier, FMath::Max(0.f, StaggerMultiplier));
 	}

@@ -14,13 +14,34 @@
 
 namespace
 {
+	float AttributeFiniteOrDefault(const float Value, const float DefaultValue = 0.f)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
+
+	float AttributeMaximum(const float Value, const float Minimum)
+	{
+		return FMath::Max(Minimum, AttributeFiniteOrDefault(Value, Minimum));
+	}
+
     FAeyerjiCombatLimitsTuning ResolveCombatLimits()
     {
+		FAeyerjiCombatLimitsTuning Result;
         if (const UAeyerjiAttributeTuning* Tuning = UAeyerjiStatSettings::Get())
         {
-            return Tuning->CombatLimits;
+			Result = Tuning->CombatLimits;
         }
-        return FAeyerjiCombatLimitsTuning();
+
+		Result.MaxCritChance = FMath::Clamp(AttributeFiniteOrDefault(Result.MaxCritChance, 1.f), 0.f, 1.f);
+		Result.MaxDodgeChance = Result.GetSafeMaxDodgeChance();
+		Result.MaxCriticalDamageMultiplier = FMath::Max(1.f, AttributeFiniteOrDefault(Result.MaxCriticalDamageMultiplier, 5.f));
+		Result.MaxArmorPenetration = FMath::Clamp(AttributeFiniteOrDefault(Result.MaxArmorPenetration, 0.75f), 0.f, 1.f);
+		Result.MaxLifeSteal = FMath::Clamp(AttributeFiniteOrDefault(Result.MaxLifeSteal, 0.25f), 0.f, 1.f);
+		Result.MaxStaggerResistance = FMath::Clamp(AttributeFiniteOrDefault(Result.MaxStaggerResistance, 0.9f), 0.f, 1.f);
+		Result.StaggerDuration = FMath::Max(0.01f, AttributeFiniteOrDefault(Result.StaggerDuration, 0.35f));
+		Result.PoiseRecoveryDelay = FMath::Max(0.01f, AttributeFiniteOrDefault(Result.PoiseRecoveryDelay, 1.5f));
+		Result.PoiseRecoveryPerSecond = FMath::Max(0.f, AttributeFiniteOrDefault(Result.PoiseRecoveryPerSecond, 35.f));
+		return Result;
     }
 }
 
@@ -144,12 +165,13 @@ void UAeyerjiAttributeSet::AdjustAttributeForMaxChange(FGameplayAttributeData& A
                                      const FGameplayAttribute& AffectedAttributeProperty)
 {
     UAbilitySystemComponent* ASC = GetOwningAbilitySystemComponent();
-    const float CurrentMax = MaxAttribute.GetCurrentValue();
+	NewMaxValue = AttributeFiniteOrDefault(NewMaxValue);
+    const float CurrentMax = AttributeFiniteOrDefault(MaxAttribute.GetCurrentValue());
     if (!ASC || FMath::IsNearlyEqual(CurrentMax, NewMaxValue))
     {
         return;
     }
-    const float CurrentValue = AffectedAttribute.GetCurrentValue();
+	const float CurrentValue = AttributeFiniteOrDefault(AffectedAttribute.GetCurrentValue());
     float NewDelta = 0.f;
     if (CurrentMax > 0.f)
     {
@@ -160,7 +182,21 @@ void UAeyerjiAttributeSet::AdjustAttributeForMaxChange(FGameplayAttributeData& A
     {
         NewDelta = NewMaxValue;
     }
-    ASC->ApplyModToAttributeUnsafe(AffectedAttributeProperty, EGameplayModOp::Additive, NewDelta);
+	if (FMath::IsFinite(NewDelta))
+	{
+		ASC->ApplyModToAttributeUnsafe(AffectedAttributeProperty, EGameplayModOp::Additive, NewDelta);
+	}
+}
+
+void UAeyerjiAttributeSet::PreAttributeBaseChange(const FGameplayAttribute& Attribute, float& NewValue) const
+{
+	Super::PreAttributeBaseChange(Attribute, NewValue);
+
+	// Base-value writes use a distinct GAS callback, so item and effect modifiers cannot bypass the combat dodge cap.
+	if (Attribute == GetDodgeChanceAttribute())
+	{
+		NewValue = FMath::Clamp(AttributeFiniteOrDefault(NewValue), 0.f, ResolveCombatLimits().GetSafeMaxDodgeChance());
+	}
 }
 
 /* Clamp or derive stats here if you wish */
@@ -168,22 +204,29 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
 {
     Super::PreAttributeChange(Attribute, NewValue);
 
+	// A single NaN in a persistent aggregator poisons downstream combat math and replication.
+	if (!FMath::IsFinite(NewValue))
+	{
+		const float CurrentValue = Attribute.GetNumericValue(this);
+		NewValue = AttributeFiniteOrDefault(CurrentValue);
+	}
+
     if (Attribute == GetHPAttribute())
     {
-        NewValue = FMath::Clamp(NewValue, 0.f, HPMax.GetCurrentValue());
+        NewValue = FMath::Clamp(NewValue, 0.f, AttributeMaximum(HPMax.GetCurrentValue(), 1.f));
     }
     else if (Attribute == GetManaAttribute())
     {
-        NewValue = FMath::Clamp(NewValue, 0.f, ManaMax.GetCurrentValue());
+        NewValue = FMath::Clamp(NewValue, 0.f, AttributeMaximum(ManaMax.GetCurrentValue(), 0.f));
     }
     else if (Attribute == GetPoiseAttribute())
     {
-        NewValue = FMath::Clamp(NewValue, 0.f, PoiseMax.GetCurrentValue());
+        NewValue = FMath::Clamp(NewValue, 0.f, AttributeMaximum(PoiseMax.GetCurrentValue(), 1.f));
     }
     else if (Attribute == GetXPAttribute())
     {
         // XP is 0..XPMax (the manager will roll over & raise Level)
-        NewValue = FMath::Clamp(NewValue, 0.f, XPMax.GetCurrentValue());
+        NewValue = FMath::Clamp(NewValue, 0.f, AttributeMaximum(XPMax.GetCurrentValue(), 1.f));
     }
     else if (Attribute == GetXPMaxAttribute())
     {
@@ -207,7 +250,10 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     else if (Attribute == GetLevelAttribute())
     {
         // Keep a sane, non-zero level for scalable float lookups.
-        NewValue = static_cast<float>(UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(NewValue)));
+		NewValue = static_cast<float>(FMath::RoundToInt(FMath::Clamp(
+			NewValue,
+			1.f,
+			static_cast<float>(UAeyerjiDifficultySettings::GetMaxGameplayLevel()))));
     }
 
     // Core attributes are non-negative
@@ -252,6 +298,18 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     {
         NewValue = FMath::Max(0.f, NewValue);
     }
+	else if (Attribute == GetArmorAttribute()
+		|| Attribute == GetAttackDamageAttribute()
+		|| Attribute == GetAttackRangeAttribute()
+		|| Attribute == GetPatrolRadiusAttribute()
+		|| Attribute == GetProjectilePredictionAmountAttribute())
+	{
+		NewValue = FMath::Max(0.f, NewValue);
+	}
+	else if (Attribute == GetAttackAngleAttribute())
+	{
+		NewValue = FMath::Clamp(NewValue, 0.f, 180.f);
+	}
 
     // Derived clamps
     else if (Attribute == GetCritChanceAttribute())
@@ -268,7 +326,7 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
     }
     else if (Attribute == GetDodgeChanceAttribute())
     {
-        NewValue = FMath::Clamp(NewValue, 0.f, 1.f);
+        NewValue = FMath::Clamp(NewValue, 0.f, ResolveCombatLimits().GetSafeMaxDodgeChance());
     }
     else if (Attribute == GetSpellPowerAttribute())
     {
@@ -332,7 +390,7 @@ void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCal
     if (Data.EvaluatedData.Attribute == GetAttackSpeedAttribute()
         || Data.EvaluatedData.Attribute == GetAttackCooldownAttribute())
     {
-        const float CurrentAS = FMath::Clamp(GetAttackSpeed(), 0.01f, 1000.f);
+		const float CurrentAS = FMath::Clamp(AttributeFiniteOrDefault(GetAttackSpeed(), 100.f), 0.01f, 1000.f);
         const float DerivedCooldown = FMath::Clamp(100.f / CurrentAS, 0.01f, 5.f);
         if (!FMath::IsNearlyEqual(GetAttackCooldown(), DerivedCooldown))
         {
@@ -355,7 +413,8 @@ void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCal
     else if (Data.EvaluatedData.Attribute == GetHPAttribute())
     {
         // Final clamp in case the incoming GE pushed us below zero.
-        SetHP(FMath::Clamp(GetHP(), 0.f, GetHPMax()));
+		const float SafeHPMax = AttributeMaximum(GetHPMax(), 1.f);
+		SetHP(FMath::Clamp(AttributeFiniteOrDefault(GetHP()), 0.f, SafeHPMax));
 
         if (!bIsDead && GetHP() <= 0.f)
         {
@@ -365,31 +424,54 @@ void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCal
     }
     else if (Data.EvaluatedData.Attribute == GetManaAttribute())
     {
-        SetMana(FMath::Clamp(GetMana(), 0.f, GetManaMax()));
+		const float SafeManaMax = AttributeMaximum(GetManaMax(), 0.f);
+		SetMana(FMath::Clamp(AttributeFiniteOrDefault(GetMana()), 0.f, SafeManaMax));
     }
     else if (Data.EvaluatedData.Attribute == GetXPAttribute())
     {
-        SetXP(FMath::Clamp(GetXP(), 0.f, GetXPMax()));
+		const float SafeXPMax = AttributeMaximum(GetXPMax(), 1.f);
+		SetXP(FMath::Clamp(AttributeFiniteOrDefault(GetXP()), 0.f, SafeXPMax));
     }
 
 }
 
 void UAeyerjiAttributeSet::HandleIncomingDamage(const FGameplayEffectModCallbackData& Data)
 {
-    const float PendingDamage = FMath::Max(0.f, GetIncomingDamage());
+	AActor* TargetActor = GetOwningActor();
+	if (!TargetActor || !TargetActor->HasAuthority())
+	{
+		SetIncomingDamage(0.f);
+		return;
+	}
+
+	const float PendingDamage = FMath::Max(0.f, AttributeFiniteOrDefault(GetIncomingDamage()));
     SetIncomingDamage(0.f);
     if (PendingDamage <= KINDA_SMALL_NUMBER)
     {
         return;
     }
 
-    const float HPBeforeDamage = GetHP();
-    const float ActualDamage = FMath::Min(PendingDamage, FMath::Max(0.f, HPBeforeDamage));
-    SetHP(FMath::Clamp(HPBeforeDamage - PendingDamage, 0.f, GetHPMax()));
+	FGameplayEffectContextHandle ContextHandle = Data.EffectSpec.GetContext();
+	FAeyerjiGameplayEffectContext* AeyerjiContext = FAeyerjiGameplayEffectContext::ExtractMutable(ContextHandle);
+	FAeyerjiDamageResult* Result = AeyerjiContext ? &AeyerjiContext->GetMutableDamageResult() : nullptr;
 
-    FGameplayEffectContextHandle ContextHandle = Data.EffectSpec.GetContext();
-    FAeyerjiGameplayEffectContext* AeyerjiContext = FAeyerjiGameplayEffectContext::ExtractMutable(ContextHandle);
-    FAeyerjiDamageResult* Result = AeyerjiContext ? &AeyerjiContext->GetMutableDamageResult() : nullptr;
+	const float HPBeforeDamage = FMath::Max(0.f, AttributeFiniteOrDefault(GetHP()));
+	if (bIsDead || HPBeforeDamage <= KINDA_SMALL_NUMBER)
+	{
+		if (Result)
+		{
+			Result->FinalDamage = 0.f;
+			Result->bWasFatal = false;
+			Result->StaggerDamage = 0.f;
+			Result->bTriggeredStagger = false;
+		}
+		return;
+	}
+
+    const float ActualDamage = FMath::Min(PendingDamage, FMath::Max(0.f, HPBeforeDamage));
+	const float SafeHPMax = AttributeMaximum(GetHPMax(), 1.f);
+    SetHP(FMath::Clamp(HPBeforeDamage - PendingDamage, 0.f, SafeHPMax));
+
     if (Result)
     {
         Result->FinalDamage = ActualDamage;
@@ -404,20 +486,15 @@ void UAeyerjiAttributeSet::HandleIncomingDamage(const FGameplayEffectModCallback
     UAbilitySystemComponent* TargetASC = GetOwningAbilitySystemComponent();
     UAbilitySystemComponent* SourceASC = ContextHandle.GetOriginalInstigatorAbilitySystemComponent();
     AActor* SourceActor = ContextHandle.GetOriginalInstigator();
-    AActor* TargetActor = GetOwningActor();
-
-    if (ActualDamage > KINDA_SMALL_NUMBER)
-    {
-        OnDamageTaken.Broadcast(TargetActor, SourceActor, ActualDamage, Result ? Result->DamageType : FGameplayTag());
-    }
+	OnDamageTaken.Broadcast(TargetActor, SourceActor, ActualDamage, Result ? Result->DamageType : FGameplayTag());
     
 
     const bool bCanLifeSteal = Result && Result->RuleTags.HasTagExact(AeyerjiTags::DamageRule_CanLifeSteal);
     if (bCanLifeSteal && SourceASC && SourceASC != TargetASC && ActualDamage > KINDA_SMALL_NUMBER)
     {
         const float LifeStealFraction = FMath::Clamp(Result->LifeStealFraction, 0.f, ResolveCombatLimits().MaxLifeSteal);
-        const float SourceHP = SourceASC->GetNumericAttribute(GetHPAttribute());
-        const float SourceHPMax = SourceASC->GetNumericAttribute(GetHPMaxAttribute());
+		const float SourceHP = AttributeFiniteOrDefault(SourceASC->GetNumericAttribute(GetHPAttribute()));
+		const float SourceHPMax = FMath::Max(0.f, AttributeFiniteOrDefault(SourceASC->GetNumericAttribute(GetHPMaxAttribute())));
         const float Healing = UExecCalc_DamagePhysical::ResolveLifeSteal(
             ActualDamage,
             LifeStealFraction,
@@ -469,6 +546,11 @@ void UAeyerjiAttributeSet::HandleIncomingDamage(const FGameplayEffectModCallback
 void UAeyerjiAttributeSet::HandleIncomingDodge(const FGameplayEffectModCallbackData& Data)
 {
     SetIncomingDodge(0.f);
+	AActor* TargetActor = GetOwningActor();
+	if (!TargetActor || !TargetActor->HasAuthority() || AttributeFiniteOrDefault(GetHP()) <= 0.f || bIsDead)
+	{
+		return;
+	}
 
     FGameplayEffectContextHandle ContextHandle = Data.EffectSpec.GetContext();
     if (UAbilitySystemComponent* TargetASC = GetOwningAbilitySystemComponent())
@@ -479,9 +561,15 @@ void UAeyerjiAttributeSet::HandleIncomingDodge(const FGameplayEffectModCallbackD
 
 void UAeyerjiAttributeSet::HandleIncomingStagger(const FGameplayEffectModCallbackData& Data)
 {
-    const float PendingStagger = FMath::Max(0.f, GetIncomingStagger());
+	AActor* TargetActor = GetOwningActor();
+	const float PendingStagger = FMath::Max(0.f, AttributeFiniteOrDefault(GetIncomingStagger()));
     SetIncomingStagger(0.f);
-    if (PendingStagger <= KINDA_SMALL_NUMBER || GetPoiseMax() <= KINDA_SMALL_NUMBER || GetHP() <= 0.f)
+	const float SafePoiseMax = AttributeMaximum(GetPoiseMax(), 1.f);
+	const float SafeHP = AttributeFiniteOrDefault(GetHP());
+	if (!TargetActor || !TargetActor->HasAuthority()
+		|| PendingStagger <= KINDA_SMALL_NUMBER
+		|| SafeHP <= 0.f
+		|| bIsDead)
     {
         return;
     }
@@ -492,8 +580,8 @@ void UAeyerjiAttributeSet::HandleIncomingStagger(const FGameplayEffectModCallbac
     const bool bFatalDamageAlreadyResolved = Result && Result->bWasFatal;
     const bool bThisHitWillKillBeforeDamageCallback = Result
         && Result->FinalDamage > KINDA_SMALL_NUMBER
-        && GetHP() > 0.f
-        && Result->FinalDamage >= GetHP() - KINDA_SMALL_NUMBER;
+		&& SafeHP > 0.f
+		&& AttributeFiniteOrDefault(Result->FinalDamage) >= SafeHP - KINDA_SMALL_NUMBER;
     if (bFatalDamageAlreadyResolved || bThisHitWillKillBeforeDamageCallback)
     {
         if (Result)
@@ -504,7 +592,7 @@ void UAeyerjiAttributeSet::HandleIncomingStagger(const FGameplayEffectModCallbac
         return;
     }
 
-    const float NewPoise = FMath::Max(0.f, GetPoise() - PendingStagger);
+	const float NewPoise = FMath::Max(0.f, AttributeFiniteOrDefault(GetPoise()) - PendingStagger);
     if (NewPoise > KINDA_SMALL_NUMBER)
     {
         SetPoise(NewPoise);
@@ -512,7 +600,7 @@ void UAeyerjiAttributeSet::HandleIncomingStagger(const FGameplayEffectModCallbac
         return;
     }
 
-    SetPoise(GetPoiseMax());
+    SetPoise(SafePoiseMax);
     if (UWorld* World = GetWorld())
     {
         World->GetTimerManager().ClearTimer(PoiseRecoveryDelayHandle);
@@ -559,7 +647,11 @@ void UAeyerjiAttributeSet::SchedulePoiseRecovery()
 void UAeyerjiAttributeSet::TickPoiseRecovery()
 {
     UWorld* World = GetWorld();
-    if (!World || GetPoise() >= GetPoiseMax() || GetHP() <= 0.f)
+	AActor* OwnerActor = GetOwningActor();
+	const float SafePoiseMax = AttributeMaximum(GetPoiseMax(), 1.f);
+	const float SafePoise = FMath::Clamp(AttributeFiniteOrDefault(GetPoise()), 0.f, SafePoiseMax);
+	if (!World || !OwnerActor || !OwnerActor->HasAuthority()
+		|| SafePoise >= SafePoiseMax || AttributeFiniteOrDefault(GetHP()) <= 0.f)
     {
         if (World)
         {
@@ -569,8 +661,10 @@ void UAeyerjiAttributeSet::TickPoiseRecovery()
     }
 
     constexpr float RecoveryInterval = 0.1f;
-    SetPoise(FMath::Min(GetPoiseMax(), GetPoise() + ResolveCombatLimits().PoiseRecoveryPerSecond * RecoveryInterval));
-    if (GetPoise() < GetPoiseMax() && !World->GetTimerManager().IsTimerActive(PoiseRecoveryTickHandle))
+	SetPoise(FMath::Min(
+		SafePoiseMax,
+		SafePoise + ResolveCombatLimits().PoiseRecoveryPerSecond * RecoveryInterval));
+	if (GetPoise() < SafePoiseMax && !World->GetTimerManager().IsTimerActive(PoiseRecoveryTickHandle))
     {
         World->GetTimerManager().SetTimer(PoiseRecoveryTickHandle, this, &UAeyerjiAttributeSet::TickPoiseRecovery, RecoveryInterval, true);
     }
@@ -578,6 +672,12 @@ void UAeyerjiAttributeSet::TickPoiseRecovery()
 
 void UAeyerjiAttributeSet::ResetDeathStateForReuse()
 {
+	AActor* OwnerActor = GetOwningActor();
+	if (!OwnerActor || !OwnerActor->HasAuthority())
+	{
+		return;
+	}
+
     bIsDead = false;
     SetIncomingDamage(0.f);
     SetIncomingDodge(0.f);
@@ -597,7 +697,8 @@ void UAeyerjiAttributeSet::ResetDeathStateForReuse()
 
 void UAeyerjiAttributeSet::HandleOutOfHealth(const FGameplayEffectModCallbackData& Data, const float DamageTaken)
 {
-    if (bIsDead || GetHP() > 0.f)
+	AActor* OwnerActor = GetOwningActor();
+	if (!OwnerActor || !OwnerActor->HasAuthority() || bIsDead || GetHP() > 0.f)
     {
         return;
     }
@@ -614,7 +715,7 @@ void UAeyerjiAttributeSet::HandleOutOfHealth(const FGameplayEffectModCallbackDat
         World->GetTimerManager().ClearTimer(PoiseRecoveryTickHandle);
     }
 
-    OnOutOfHealth.Broadcast(GetOwningActor(), Data.EffectSpec.GetContext().GetOriginalInstigator(), DamageTaken);
+	OnOutOfHealth.Broadcast(OwnerActor, Data.EffectSpec.GetContext().GetOriginalInstigator(), FMath::Max(0.f, AttributeFiniteOrDefault(DamageTaken)));
 }
 
 

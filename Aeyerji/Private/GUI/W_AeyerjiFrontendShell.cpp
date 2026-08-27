@@ -15,6 +15,16 @@
 
 namespace
 {
+	constexpr float MaxFrontendXPDisplay = 1000000000000.f;
+
+	int64 FrontendXPInteger(const float Value)
+	{
+		return FMath::RoundToInt64(FMath::Clamp(
+			FMath::IsFinite(Value) ? static_cast<double>(Value) : 0.0,
+			0.0,
+			static_cast<double>(MaxFrontendXPDisplay)));
+	}
+
 	FText GetFrontendOperationText(const EAeyerjiFrontendOperationState OperationState)
 	{
 		switch (OperationState)
@@ -115,6 +125,7 @@ void UW_AeyerjiFrontendShell::BindNativeButtonHandlers()
 	if (UButton* Button = FindDesignerButton(TEXT("Button_TierNext"))) Button->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleTierNextClicked);
 	if (UButton* Button = FindDesignerButton(TEXT("Button_Launch"))) Button->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleLaunchClicked);
 	if (UButton* Button = FindDesignerButton(TEXT("Button_Leave"))) Button->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleLeaveClicked);
+	if (UButton* Button = FindDesignerButton(TEXT("Button_Invite"))) Button->OnClicked.AddUniqueDynamic(this, &ThisClass::HandleInviteClicked);
 }
 
 void UW_AeyerjiFrontendShell::ApplyNativeFrontendSnapshot(const FAeyerjiFrontendSnapshot& Snapshot)
@@ -123,14 +134,21 @@ void UW_AeyerjiFrontendShell::ApplyNativeFrontendSnapshot(const FAeyerjiFrontend
 		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("Frontend_LevelFormat")), FText::AsNumber(Snapshot.CharacterLevel)));
 	SetWidgetText(TEXT("Text_XP"), FText::Format(
 		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("Frontend_XPFormat")),
-		FText::AsNumber(FMath::RoundToInt(Snapshot.CurrentXP)), FText::AsNumber(FMath::RoundToInt(Snapshot.XPRequiredForNextLevel))));
+		FText::AsNumber(FrontendXPInteger(Snapshot.CurrentXP)),
+		FText::AsNumber(FrontendXPInteger(Snapshot.XPRequiredForNextLevel))));
 	SetWidgetText(TEXT("Text_Gold"), FText::Format(
 		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("Frontend_GoldFormat")), FText::AsNumber(Snapshot.Gold)));
 
 	if (UProgressBar* ProgressBar = Cast<UProgressBar>(FindDesignerWidget(TEXT("Progress_XP"))))
 	{
-		const float Percent = Snapshot.XPRequiredForNextLevel > 0.f
-			? FMath::Clamp(Snapshot.CurrentXP / Snapshot.XPRequiredForNextLevel, 0.f, 1.f)
+		const float SafeCurrentXP = FMath::Clamp(
+			FMath::IsFinite(Snapshot.CurrentXP) ? Snapshot.CurrentXP : 0.f, 0.f, MaxFrontendXPDisplay);
+		const float SafeRequiredXP = FMath::Clamp(
+			FMath::IsFinite(Snapshot.XPRequiredForNextLevel) ? Snapshot.XPRequiredForNextLevel : 0.f,
+			0.f,
+			MaxFrontendXPDisplay);
+		const float Percent = SafeRequiredXP > 0.f
+			? FMath::Clamp(SafeCurrentXP / SafeRequiredXP, 0.f, 1.f)
 			: 0.f;
 		ProgressBar->SetPercent(Percent);
 	}
@@ -351,6 +369,11 @@ void UW_AeyerjiFrontendShell::HandleLeaveClicked()
 	LeaveCurrentParty();
 }
 
+void UW_AeyerjiFrontendShell::HandleInviteClicked()
+{
+	OpenPartyInviteOverlay();
+}
+
 void UW_AeyerjiFrontendShell::RefreshFrontend()
 {
 	if (UAeyerjiFrontendSubsystem* Frontend = GetFrontendSubsystem()) Frontend->RefreshCurrentState();
@@ -386,6 +409,12 @@ bool UW_AeyerjiFrontendShell::LeaveCurrentParty()
 	return Frontend && Frontend->LeaveCurrentParty();
 }
 
+bool UW_AeyerjiFrontendShell::OpenPartyInviteOverlay()
+{
+	UAeyerjiFrontendSubsystem* Frontend = GetFrontendSubsystem();
+	return Frontend && Frontend->OpenPartyInviteOverlay();
+}
+
 bool UW_AeyerjiFrontendShell::SetPartyReady(const bool bReady)
 {
 	UAeyerjiFrontendSubsystem* Frontend = GetFrontendSubsystem();
@@ -419,6 +448,15 @@ void UW_AeyerjiFrontendShell::HandleFrontendSnapshot(const FAeyerjiFrontendSnaps
 void UW_AeyerjiFrontendShell::HandleLobbySnapshot(const FAeyerjiLobbySnapshot& Snapshot)
 {
 	LatestLobbySnapshot = Snapshot;
+	if (Snapshot.Phase == EAeyerjiLobbyPhase::InGameplay)
+	{
+		// The shell is local presentation state and must not survive seamless travel into a run.
+		// This also covers menus created directly by Blueprint before the controller adopted them.
+		SetVisibility(ESlateVisibility::Collapsed);
+		RemoveFromParent();
+		return;
+	}
+
 	ApplyNativeLobbySnapshot(Snapshot);
 	ApplyLobbySnapshot(Snapshot);
 	// Hosting reloads the menu as a listen server; select staging again on the newly constructed widget.

@@ -58,4 +58,12 @@ public:
 	/** Authored encounter-group composition emitted once when this anchor is activated by a Rift. Empty uses the director fallback pool. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SpawnRegion|Rift")
 	TObjectPtr<UEnemySpawnGroupDefinition> RiftEncounterGroup = nullptr;
+
+	/**
+	 * Monotonic route position used by Rift pacing to distinguish forward progress from backtracking.
+	 * Assign every eligible Rift region a value of zero or greater in the level. Regions on parallel
+	 * branches may share an index; actor path is used as the deterministic tiebreaker.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="SpawnRegion|Rift", meta=(ClampMin="-1"))
+	int32 RiftProgressionIndex = INDEX_NONE;
 };

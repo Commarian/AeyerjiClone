@@ -2,6 +2,8 @@
 
 #include "Misc/AutomationTest.h"
 
+#include <limits>
+
 #include "AeyerjiGameplayTags.h"
 #include "Items/LootSourceRuleSet.h"
 
@@ -27,6 +29,7 @@ bool FAeyerjiLootSourceRuleSetProfileTest::RunTest(const FString& Parameters)
 	Rule.Profile.SourceTag = AeyerjiTags::Loot_Source_Boss;
 	Rule.Profile.PityGroup = AeyerjiTags::Loot_Pity_BossUnique;
 	Rule.Profile.BaseLegendaryChance = 0.35f;
+	Rule.Profile.RewardQualityMultiplier = 2.5f;
 	Rule.Profile.MinimumRarity = EItemRarity::Rare;
 	Rule.Profile.PitySuccessRarity = EItemRarity::Epic;
 	Rule.Profile.PitySoftStartOverride = 5;
@@ -52,6 +55,7 @@ bool FAeyerjiLootSourceRuleSetProfileTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Profile source tag is applied."), Resolved.SourceTag == FGameplayTag(AeyerjiTags::Loot_Source_Boss));
 	TestTrue(TEXT("Profile pity group is applied."), Resolved.PityGroup == FGameplayTag(AeyerjiTags::Loot_Pity_BossUnique));
 	TestEqual(TEXT("Profile legendary chance is applied."), Resolved.BaseLegendaryChance, 0.35f);
+	TestEqual(TEXT("Profile reward quality multiplier is applied."), Resolved.RewardQualityMultiplier, 2.5f);
 	TestEqual(TEXT("Profile minimum rarity is applied."), Resolved.MinimumRarity, EItemRarity::Rare);
 	TestEqual(TEXT("Profile pity success rarity is applied."), Resolved.PitySuccessRarity, EItemRarity::Epic);
 	TestEqual(TEXT("Profile soft pity start is applied."), Resolved.PitySoftStartOverride, 5);
@@ -80,6 +84,7 @@ bool FAeyerjiLootSourceRuleSetSanitizesTest::RunTest(const FString& Parameters)
 
 	RuleSet->DefaultProfile.BaseLegendaryChance = 2.0f;
 	RuleSet->DefaultProfile.DifficultyScale = -3.0f;
+	RuleSet->DefaultProfile.RewardQualityMultiplier = std::numeric_limits<float>::quiet_NaN();
 	RuleSet->DefaultProfile.PitySoftStartOverride = -20;
 	RuleSet->DefaultProfile.PitySoftSlopeOverride = -0.2f;
 	RuleSet->DefaultProfile.PityHardAttemptsOverride = -30;
@@ -95,6 +100,7 @@ bool FAeyerjiLootSourceRuleSetSanitizesTest::RunTest(const FString& Parameters)
 
 	TestEqual(TEXT("Legendary chance clamps to probability."), Resolved.BaseLegendaryChance, 1.0f);
 	TestEqual(TEXT("Invalid difficulty scale falls back to 1."), Resolved.DifficultyScale, 1.0f);
+	TestEqual(TEXT("Invalid reward quality multiplier falls back to 1."), Resolved.RewardQualityMultiplier, 1.0f);
 	TestEqual(TEXT("Negative soft pity start normalizes to default sentinel."), Resolved.PitySoftStartOverride, -1);
 	TestEqual(TEXT("Negative soft pity slope normalizes to default sentinel."), Resolved.PitySoftSlopeOverride, -1.0f);
 	TestEqual(TEXT("Negative hard pity normalizes to default sentinel."), Resolved.PityHardAttemptsOverride, -1);

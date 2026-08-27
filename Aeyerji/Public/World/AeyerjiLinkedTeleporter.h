@@ -38,7 +38,7 @@ public:
 	FVector GetEndpointLocation(uint8 EndpointIndex) const;
 
 	/** Moves endpoint B by converting a world-space destination into this actor's relative endpoint transform. */
-	UFUNCTION(BlueprintCallable, Category="Aeyerji|Teleporter")
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Teleporter")
 	void SetEndpointBWorldTransform(const FTransform& WorldTransform);
 
 	/** Returns the usable click interaction radius for either endpoint. */

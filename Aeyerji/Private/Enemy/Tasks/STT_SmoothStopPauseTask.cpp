@@ -8,6 +8,9 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
+#include "Attributes/AeyerjiAttributeSet.h"
 #include "StateTreeExecutionContext.h"
 
 USTT_SmoothStopPauseTask::USTT_SmoothStopPauseTask(const FObjectInitializer& ObjectInitializer)
@@ -31,7 +34,13 @@ EStateTreeRunStatus USTT_SmoothStopPauseTask::EnterState(FStateTreeExecutionCont
         return EStateTreeRunStatus::Failed;
     }
 
-    OriginalMaxWalkSpeed = CachedMove->MaxWalkSpeed;
+	OriginalMaxWalkSpeed = CachedMove->MaxWalkSpeed;
+	if (OriginalMaxWalkSpeed <= 1.f)
+	{
+		const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Char, /*LookForComponent=*/true);
+		const float AttributeSpeed = ASC ? ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetWalkSpeedAttribute()) : 0.f;
+		OriginalMaxWalkSpeed = FMath::Max(50.f, AttributeSpeed);
+	}
     DecelStartTime = Char->GetWorld() ? Char->GetWorld()->GetTimeSeconds() : 0.f;
     bReachedZero = false;
     PauseStartTime = 0.f;
@@ -91,8 +100,6 @@ void USTT_SmoothStopPauseTask::ExitState(FStateTreeExecutionContext& Context, co
     {
         return;
     }
-    if (bRestoreSpeedOnExit)
-    {
-        CachedMove->MaxWalkSpeed = OriginalMaxWalkSpeed;
-    }
+	// Always restore a usable speed. Serialized Blueprint defaults may still contain the old false flag.
+	CachedMove->MaxWalkSpeed = FMath::Max(50.f, OriginalMaxWalkSpeed);
 }

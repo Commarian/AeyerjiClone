@@ -7,21 +7,30 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "PhysicsEngine/BodyInstance.h"
 
-static void CopyVelocityToRagdoll(USkeletalMeshComponent* Mesh, const FVector& Vel)
+namespace
 {
-	if (!Mesh) return;
-	Mesh->SetAllPhysicsLinearVelocity(Vel);
+	bool IsFiniteRagdollVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
 }
 
 void FAeyerjiRagdollHelpers::StartRagdoll(ACharacter* Char, const FVector& Impulse, const FVector& ImpulseWorldLocation, FName BoneName)
 {
-	if (!Char) return;
+	if (!IsValid(Char)) return;
 
 	UCapsuleComponent* Capsule = Char->GetCapsuleComponent();
 	USkeletalMeshComponent* Mesh = Char->GetMesh();
 	if (!Capsule || !Mesh) return;
 
-	// 1) Stop normal movement & input
+	// Capture momentum before StopMovementImmediately clears the movement component velocity.
+	FVector PreRagdollVelocity = FVector::ZeroVector;
+	if (const UCharacterMovementComponent* Move = Char->GetCharacterMovement())
+	{
+		PreRagdollVelocity = IsFiniteRagdollVector(Move->Velocity) ? Move->Velocity : FVector::ZeroVector;
+	}
+
+	// Stop normal movement and input.
 	if (UCharacterMovementComponent* Move = Char->GetCharacterMovement())
 	{
 		Move->StopMovementImmediately();
@@ -34,14 +43,13 @@ void FAeyerjiRagdollHelpers::StartRagdoll(ACharacter* Char, const FVector& Impul
 	// Make physics drive the component transform
 	Mesh->PhysicsTransformUpdateMode = EPhysicsTransformUpdateMode::SimulationUpatesComponentTransform;
 
-	// Stop any animation influence
+	// Stop animation influence before enabling physics.
 	if (UAnimInstance* AI = Mesh->GetAnimInstance())
 	{
 		AI->StopAllMontages(0.05f);
 	}
 	Mesh->bPauseAnims = true;
 
-	// 🔸 Flip the component flag too (this makes the Details "Simulate Physics" tick true)
 	Mesh->SetSimulatePhysics(true);
 
 	// Ensure all bodies are simulating and not blending with animation
@@ -50,24 +58,15 @@ void FAeyerjiRagdollHelpers::StartRagdoll(ACharacter* Char, const FVector& Impul
 	Mesh->WakeAllRigidBodies();
 
 	// Capsule out of the way
-	Char->GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	
-	if (UAnimInstance* AI = Mesh->GetAnimInstance())
-	{
-		AI->StopAllMontages(0.05f);   // kill any slots
-	}
-	Mesh->bPauseAnims = true;
+	Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	// 4) Give the ragdoll the current movement velocity so it doesn't "freeze" on death
-	if (const UCharacterMovementComponent* Move = Char->GetCharacterMovement())
-	{
-		CopyVelocityToRagdoll(Mesh, Move->Velocity);
-	}
+	// Preserve the character's momentum rather than starting the corpse from rest.
+	Mesh->SetAllPhysicsLinearVelocity(PreRagdollVelocity);
 
 	// 5) Optional impulse/knockback at the hit point
-	if (!Impulse.IsNearlyZero())
+	if (IsFiniteRagdollVector(Impulse) && !Impulse.IsNearlyZero())
 	{
-		if (BoneName.IsNone())
+		if (BoneName.IsNone() && IsFiniteRagdollVector(ImpulseWorldLocation))
 		{
 			Mesh->AddImpulseAtLocation(Impulse, ImpulseWorldLocation, NAME_None);
 		}
@@ -81,8 +80,6 @@ void FAeyerjiRagdollHelpers::StartRagdoll(ACharacter* Char, const FVector& Impul
 	Mesh->SetIgnoreBoundsForEditorFocus(true);
 	Mesh->SetEnableGravity(true);
 
-	// 7) Optional: let the actor die after a while
-	// Char->SetLifeSpan(10.f);
 }
 
 void FAeyerjiRagdollHelpers::TeardownAfterRagdoll(ACharacter* Char)

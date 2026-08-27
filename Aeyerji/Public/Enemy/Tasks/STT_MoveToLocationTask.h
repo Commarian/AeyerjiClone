@@ -7,7 +7,6 @@
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "STT_MoveToLocationTask.generated.h"
-#pragma once
 
 /**
  * StateTree task: orders the controller to move to a world-space location.

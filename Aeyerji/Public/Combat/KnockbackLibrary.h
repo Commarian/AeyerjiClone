@@ -25,7 +25,7 @@ public:
 
 	/** Applies randomized knockback to Target, using Source's forward as the base direction.
 	 *  Force = random in [MinForce, MaxForce]. Adds UpBoost to Z. Uses LaunchCharacter by default.
-	 *  Run this on the server for authoritative physics/networking.
+	 *  The world context, source, and target must share a world, and the call only acts on authority.
 	 */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Knockback", meta=(WorldContext="WorldContextObject"))
 	static void ApplyKnockback(UObject* WorldContextObject,

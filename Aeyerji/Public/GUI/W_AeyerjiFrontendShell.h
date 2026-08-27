@@ -34,6 +34,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Session")
 	bool LeaveCurrentParty();
 
+	/** Opens the Steam/provider invite overlay; an optional Button_Invite Designer widget binds here automatically. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Session")
+	bool OpenPartyInviteOverlay();
+
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Lobby")
 	bool SetPartyReady(bool bReady);
 
@@ -141,6 +145,9 @@ private:
 
 	UFUNCTION()
 	void HandleLeaveClicked();
+
+	UFUNCTION()
+	void HandleInviteClicked();
 
 	/** Latest replicated lobby view used only to formulate UI requests; server validation remains authoritative. */
 	FAeyerjiLobbySnapshot LatestLobbySnapshot;

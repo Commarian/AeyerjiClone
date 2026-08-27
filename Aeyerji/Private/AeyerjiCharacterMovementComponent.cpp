@@ -2,12 +2,12 @@
 
 #include "AeyerjiCharacterMovementComponent.h"
 #include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/PlayerState.h"
 #include "GameFramework/Pawn.h"
-#include "AbilitySystemInterface.h"
 #include "Logging/AeyerjiLog.h"
 #include "Navigation/PathFollowingComponent.h"
 
@@ -23,7 +23,7 @@ UAeyerjiCharacterMovementComponent::UAeyerjiCharacterMovementComponent()
 	MaxNetUpdateFrequency = 100.0f;
 	ClientPredictionFudgeFactor = 0.0f;
 	NetworkSmoothingMode = ENetworkSmoothingMode::Linear;
-	NetworkMaxSmoothUpdateDistance = 120.f;  // how far we�ll smooth server corrections
+	NetworkMaxSmoothUpdateDistance = 120.f;  // Maximum distance over which clients smooth server corrections.
     NetworkNoSmoothUpdateDistance  = 250.f;  // snap if farther than this
 }
 
@@ -67,33 +67,26 @@ bool UAeyerjiCharacterMovementComponent::GetCachedRootedState() const
 
 void UAeyerjiCharacterMovementComponent::ForceRootedStateRefresh()
 {
-	LastRootedCheckTime = 0.0f; // Force immediate refresh on next check
-	GetCachedRootedState(); // Update the cache now
+	// A zero timestamp would not force a refresh during the first cache interval after world start.
+	LastRootedCheckTime = -FMath::Max(0.f, RootedStateCheckInterval);
+	GetCachedRootedState();
 }
 
 UAbilitySystemComponent* UAeyerjiCharacterMovementComponent::GetAbilitySystemComponent() const
 {
-	// Get the ASC from the specific pawn that owns this movement component
-	if (const APawn* OwningPawn = GetPawnOwner())
+	if (APawn* OwningPawn = GetPawnOwner())
 	{
-		// First try to get ASC directly from the pawn
-		if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(OwningPawn))
+		if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(OwningPawn))
 		{
-			if (UAbilitySystemComponent* ASC = ASI->GetAbilitySystemComponent())
-			{
-				return ASC;
-			}
+			return ASC;
 		}
 		
-		// Fallback: check PlayerState for ASC (common pattern where ASC lives on PlayerState)
-		if (const APlayerState* PS = OwningPawn->GetPlayerState())
+		// Player pawns may keep their ASC on PlayerState so it survives respawn.
+		if (APlayerState* PlayerState = OwningPawn->GetPlayerState())
 		{
-			if (const IAbilitySystemInterface* PSI = Cast<IAbilitySystemInterface>(PS))
+			if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(PlayerState))
 			{
-				if (UAbilitySystemComponent* ASC = PSI->GetAbilitySystemComponent())
-				{
-					return ASC;
-				}
+				return ASC;
 			}
 		}
 	}
@@ -140,7 +133,6 @@ FVector UAeyerjiCharacterMovementComponent::ConsumeInputVector()
 
 void UAeyerjiCharacterMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
-	//TODO Optimize
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	// Clear velocity after the parent tick if rooted (double ensure no movement)

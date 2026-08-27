@@ -4,10 +4,41 @@
 #include "AbilitySystemComponent.h"
 #include "Components/ProgressBar.h"
 #include "Components/Image.h"
+#include "Components/Border.h"
+#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/SizeBox.h"
+#include "Blueprint/WidgetTree.h"
+#include "Brushes/SlateColorBrush.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Components/TextBlock.h"
+#include "GUI/AeyerjiStringLibrary.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "TimerManager.h"
+
+#define LOCTEXT_NAMESPACE "AeyerjiStatusBar"
+
+namespace
+{
+	constexpr float MaxStatusDisplayValue = 1000000000.f;
+
+	float FiniteStatusValue(const float Value, const float DefaultValue = 0.f)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
+
+	int32 StatusDisplayInteger(const float Value)
+	{
+		return FMath::FloorToInt(FMath::Clamp(
+			FiniteStatusValue(Value), 0.f, MaxStatusDisplayValue));
+	}
+
+	FText FormatStatusPair(const FName Key, const FText& Fallback, const int32 Current, const int32 Maximum)
+	{
+		const FText Template = AeyerjiStringLibrary::GetGlobalStringTableText(Key);
+		return FText::Format(Template.IsEmpty() ? Fallback : Template, FText::AsNumber(Current), FText::AsNumber(Maximum));
+	}
+}
 
 bool UW_AeyerjiStatusBar::BP_ShouldShowResource_Implementation(UAbilitySystemComponent* /*ASC*/)
 {
@@ -15,10 +46,156 @@ bool UW_AeyerjiStatusBar::BP_ShouldShowResource_Implementation(UAbilitySystemCom
     return false;
 }
 
+void UW_AeyerjiStatusBar::ConfigureHealthChunkDivisions(
+    const bool bInEnabled,
+    const bool bInRequireAnyEligibilityTag,
+    const FGameplayTagContainer& InEligibilityTags,
+    const int32 InTargetChunkCount,
+    const int32 InMinPreferredChunkCount,
+    const int32 InMaxPreferredChunkCount,
+    const int32 InHardMaxChunkCount,
+    const float InSeparatorThickness,
+    const float InSeparatorVerticalInset,
+    const FLinearColor& InSeparatorColor)
+{
+    bHealthChunkDivisionsEnabled = bInEnabled;
+    bRequireAnyHealthChunkEligibilityTag = bInRequireAnyEligibilityTag;
+    HealthChunkEligibilityTags = InEligibilityTags;
+    HardMaxHealthChunkCount = FMath::Clamp(InHardMaxChunkCount, 1, 32);
+    TargetHealthChunkCount = FMath::Clamp(InTargetChunkCount, 1, HardMaxHealthChunkCount);
+    MinPreferredHealthChunkCount = FMath::Clamp(InMinPreferredChunkCount, 1, HardMaxHealthChunkCount);
+    MaxPreferredHealthChunkCount = FMath::Clamp(
+        InMaxPreferredChunkCount,
+        MinPreferredHealthChunkCount,
+        HardMaxHealthChunkCount);
+    HealthChunkSeparatorThickness = FMath::Clamp(
+        FMath::IsFinite(InSeparatorThickness) ? InSeparatorThickness : 1.f,
+        0.25f,
+        8.f);
+    HealthChunkSeparatorVerticalInset = FMath::Clamp(
+        FMath::IsFinite(InSeparatorVerticalInset) ? InSeparatorVerticalInset : 1.f,
+        0.f,
+        8.f);
+    const bool bHasFiniteSeparatorColor =
+        FMath::IsFinite(InSeparatorColor.R)
+        && FMath::IsFinite(InSeparatorColor.G)
+        && FMath::IsFinite(InSeparatorColor.B)
+        && FMath::IsFinite(InSeparatorColor.A);
+    HealthChunkSeparatorColor = bHasFiniteSeparatorColor
+        ? InSeparatorColor
+        : FLinearColor(0.01f, 0.01f, 0.01f, 0.9f);
+
+    ChunkLayoutMaxHealth = -1.f;
+    bHealthChunkTagEligible = false;
+    const float MaxHealth = ASC.IsValid() && MaxHealthAttr.IsValid()
+        ? ASC->GetNumericAttribute(MaxHealthAttr)
+        : 0.f;
+    UpdateHealthChunkLayout(MaxHealth);
+    RefreshHealthChunkSeparatorWidgets();
+    InvalidateLayoutAndVolatility();
+}
+
+void UW_AeyerjiStatusBar::SetOverlayWidthScale(const float InWidthScale)
+{
+    const float SafeWidthScale = FMath::Clamp(
+        FMath::IsFinite(InWidthScale) ? InWidthScale : 1.f,
+        0.05f,
+        10.f);
+
+    // The current floating widget uses a CanvasPanel with fixed-width bar slots.
+    // Resize those slots directly so health and mana bars respond to owner size without
+    // horizontally compressing the level text or any future labels/icons.
+    bool bResizedCanvasSlot = false;
+    bResizedCanvasSlot |= SetOverlayCanvasSlotWidth(HealthBar, SafeWidthScale);
+    bResizedCanvasSlot |= SetOverlayCanvasSlotWidth(HealthBar_Ghost, SafeWidthScale);
+    bResizedCanvasSlot |= SetOverlayCanvasSlotWidth(ManaBar, SafeWidthScale);
+    bResizedCanvasSlot |= SetOverlayCanvasSlotWidth(ManaBar_Ghost, SafeWidthScale);
+    bResizedCanvasSlot |= SetOverlayCanvasSlotWidth(XPBar, SafeWidthScale);
+    bResizedCanvasSlot |= SetOverlayCanvasSlotWidth(XPBar_Ghost, SafeWidthScale);
+    if (bResizedCanvasSlot)
+    {
+        SetRenderScale(FVector2D(1.f, 1.f));
+        RefreshHealthChunkSeparatorWidgets();
+        return;
+    }
+
+    if (OverlaySizeBox)
+    {
+        if (OverlayBaseWidth <= KINDA_SMALL_NUMBER)
+        {
+            ForceLayoutPrepass();
+            OverlayBaseWidth = OverlaySizeBox->IsWidthOverride()
+                ? OverlaySizeBox->GetWidthOverride()
+                : OverlaySizeBox->GetDesiredSize().X;
+        }
+
+        if (FMath::IsFinite(OverlayBaseWidth) && OverlayBaseWidth > KINDA_SMALL_NUMBER)
+        {
+            OverlaySizeBox->SetWidthOverride(OverlayBaseWidth * SafeWidthScale);
+            SetRenderScale(FVector2D(1.f, 1.f));
+            return;
+        }
+    }
+
+    // Existing widgets remain compatible until their Blueprint adds OverlaySizeBox.
+    // The fallback only changes width and preserves the authored vertical position/height.
+    SetRenderScale(FVector2D(SafeWidthScale, 1.f));
+    RefreshHealthChunkSeparatorWidgets();
+}
+
+bool UW_AeyerjiStatusBar::SetOverlayCanvasSlotWidth(UWidget* Widget, const float WidthScale)
+{
+    if (!Widget)
+    {
+        return false;
+    }
+
+    UCanvasPanelSlot* CanvasSlot = Cast<UCanvasPanelSlot>(Widget->Slot);
+    if (!CanvasSlot)
+    {
+        return false;
+    }
+
+    FOverlayCanvasSlotSize* CachedSize = OverlayCanvasSlotSizes.FindByPredicate(
+        [Widget](const FOverlayCanvasSlotSize& Entry)
+        {
+            return Entry.Widget.Get() == Widget;
+        });
+    if (!CachedSize)
+    {
+        FOverlayCanvasSlotSize NewEntry;
+        NewEntry.Widget = Widget;
+        NewEntry.BaseSize = CanvasSlot->GetSize();
+        NewEntry.BasePosition = CanvasSlot->GetPosition();
+        CachedSize = &OverlayCanvasSlotSizes.Add_GetRef(NewEntry);
+    }
+
+    if (CachedSize->BaseSize.ContainsNaN()
+        || CachedSize->BasePosition.ContainsNaN()
+        || !FMath::IsFinite(CachedSize->BaseSize.X)
+        || CachedSize->BaseSize.X <= KINDA_SMALL_NUMBER)
+    {
+        return false;
+    }
+
+    const float ScaledWidth = CachedSize->BaseSize.X * WidthScale;
+    const float CenteringOffset = (CachedSize->BaseSize.X - ScaledWidth) * 0.5f;
+    CanvasSlot->SetSize(FVector2D(ScaledWidth, CachedSize->BaseSize.Y));
+    CanvasSlot->SetPosition(FVector2D(
+        CachedSize->BasePosition.X + CenteringOffset,
+        CachedSize->BasePosition.Y));
+    return true;
+}
+
 void UW_AeyerjiStatusBar::BindToAttributes(UAbilitySystemComponent* InASC,
                                            FGameplayAttribute InHealth, FGameplayAttribute InMaxHealth,
                                            FGameplayAttribute InMana,   FGameplayAttribute InMaxMana)
 {
+	if (InASC && (!IsValid(InASC) || (GetWorld() && InASC->GetWorld() != GetWorld())))
+	{
+		InASC = nullptr;
+	}
+
     UAbilitySystemComponent* OldASC = ASC.Get();
     const FGameplayAttribute OldHealthAttr = HealthAttr;
     const FGameplayAttribute OldMaxHealthAttr = MaxHealthAttr;
@@ -284,13 +461,14 @@ void UW_AeyerjiStatusBar::RecalculateTargets()
     if (!ASC.IsValid())
     {
         HealthTarget = ManaTarget = XPTarget = 1.f;
+        UpdateHealthChunkLayout(0.f);
         return;
     }
 
-    const float CurHP  = ASC->GetNumericAttribute(HealthAttr);
-    const float MaxHP  = ASC->GetNumericAttribute(MaxHealthAttr);
-    const float CurMP  = ASC->GetNumericAttribute(ManaAttr);
-    const float MaxMP  = ASC->GetNumericAttribute(MaxManaAttr);
+	const float CurHP = HealthAttr.IsValid() ? ASC->GetNumericAttribute(HealthAttr) : 0.f;
+	const float MaxHP = MaxHealthAttr.IsValid() ? ASC->GetNumericAttribute(MaxHealthAttr) : 0.f;
+	const float CurMP = ManaAttr.IsValid() ? ASC->GetNumericAttribute(ManaAttr) : 0.f;
+	const float MaxMP = MaxManaAttr.IsValid() ? ASC->GetNumericAttribute(MaxManaAttr) : 0.f;
     const bool bHasXP  = XPAttr.IsValid() && XPMaxAttr.IsValid();
     const float CurXP  = bHasXP ? ASC->GetNumericAttribute(XPAttr)    : 0.f;
     const float MaxXP  = bHasXP ? ASC->GetNumericAttribute(XPMaxAttr) : 1.f;
@@ -298,32 +476,305 @@ void UW_AeyerjiStatusBar::RecalculateTargets()
     HealthTarget = FMath::Clamp(SafeDiv(GetDisplayedHealthValue(CurHP, MaxHP), MaxHP), 0.f, 1.f);
     ManaTarget   = FMath::Clamp(SafeDiv(GetDisplayedManaValue(CurMP, MaxMP), MaxMP), 0.f, 1.f);
     XPTarget     = FMath::Clamp(SafeDiv(CurXP, MaxXP), 0.f, 1.f);
+    UpdateHealthChunkLayout(MaxHP);
     UpdateXPLabel();
     UpdateHPValueLabels();
     UpdateManaValueLabels();
     UpdateRegenLabels();
 }
 
+float UW_AeyerjiStatusBar::SelectNiceHealthPerChunk(
+    const float MaxHealth,
+    const int32 TargetCount,
+    const int32 MinPreferredCount,
+    const int32 MaxPreferredCount,
+    const int32 HardMaxCount,
+    int32& OutChunkCount)
+{
+    OutChunkCount = 0;
+    if (!FMath::IsFinite(MaxHealth) || MaxHealth <= KINDA_SMALL_NUMBER)
+    {
+        return 0.f;
+    }
+
+    // Extra intermediate values close the large 2.5-to-5 and 5-to-10 gaps while
+    // retaining the same clean, quickly readable decimal vocabulary.
+    static constexpr float NiceMultipliers[] =
+    {
+        1.f, 1.25f, 1.5f, 2.f, 2.5f, 3.f, 4.f, 5.f, 7.5f, 10.f
+    };
+
+    const int32 SafeHardMax = FMath::Max(1, HardMaxCount);
+    const int32 SafeTarget = FMath::Clamp(TargetCount, 1, SafeHardMax);
+    const int32 SafeMinPreferred = FMath::Clamp(MinPreferredCount, 1, SafeHardMax);
+    const int32 SafeMaxPreferred = FMath::Clamp(
+        MaxPreferredCount,
+        SafeMinPreferred,
+        SafeHardMax);
+    const float DesiredChunkHP = MaxHealth / static_cast<float>(SafeTarget);
+    const float Magnitude = FMath::Pow(10.f, FMath::FloorToFloat(FMath::LogX(10.f, DesiredChunkHP)));
+    const float NormalizedDesired = DesiredChunkHP / Magnitude;
+
+    int32 UpwardIndex = UE_ARRAY_COUNT(NiceMultipliers) - 1;
+    for (int32 Index = 0; Index < UE_ARRAY_COUNT(NiceMultipliers); ++Index)
+    {
+        if (NiceMultipliers[Index] + UE_KINDA_SMALL_NUMBER >= NormalizedDesired)
+        {
+            UpwardIndex = Index;
+            break;
+        }
+    }
+
+    float SelectedChunkHP = NiceMultipliers[UpwardIndex] * Magnitude;
+    int32 SelectedCount = FMath::CeilToInt((MaxHealth / SelectedChunkHP) - UE_KINDA_SMALL_NUMBER);
+
+    // Rounding upward is the default. If it undershoots the preferred visual density,
+    // use the adjacent lower clean value when that restores the requested 10-14 range.
+    if (SelectedCount < SafeMinPreferred)
+    {
+        const float LowerChunkHP = UpwardIndex > 0
+            ? NiceMultipliers[UpwardIndex - 1] * Magnitude
+            : NiceMultipliers[UE_ARRAY_COUNT(NiceMultipliers) - 2] * (Magnitude * 0.1f);
+        const int32 LowerCount = FMath::CeilToInt((MaxHealth / LowerChunkHP) - UE_KINDA_SMALL_NUMBER);
+        if (LowerCount >= SafeMinPreferred
+            && LowerCount <= SafeMaxPreferred
+            && LowerCount <= SafeHardMax)
+        {
+            SelectedChunkHP = LowerChunkHP;
+            SelectedCount = LowerCount;
+        }
+    }
+
+    // This is normally already satisfied because selected chunk HP starts at MaxHP/target.
+    // Keep the hard limit authoritative if designer settings are configured unusually.
+    while (SelectedCount > SafeHardMax)
+    {
+        SelectedChunkHP *= 2.f;
+        SelectedCount = FMath::CeilToInt((MaxHealth / SelectedChunkHP) - UE_KINDA_SMALL_NUMBER);
+    }
+
+    OutChunkCount = FMath::Clamp(SelectedCount, 1, SafeHardMax);
+    return SelectedChunkHP;
+}
+
+void UW_AeyerjiStatusBar::UpdateHealthChunkLayout(const float MaxHealth)
+{
+    const float SafeMaxHealth = FMath::IsFinite(MaxHealth) ? FMath::Max(0.f, MaxHealth) : 0.f;
+    const bool bIsTagEligible = IsHealthChunkTagEligible();
+    if (FMath::IsNearlyEqual(ChunkLayoutMaxHealth, SafeMaxHealth)
+        && bHealthChunkTagEligible == bIsTagEligible)
+    {
+        return;
+    }
+
+    ChunkLayoutMaxHealth = SafeMaxHealth;
+    bHealthChunkTagEligible = bIsTagEligible;
+    if (!bHealthChunkDivisionsEnabled
+        || !bHealthChunkTagEligible
+        || SafeMaxHealth <= KINDA_SMALL_NUMBER)
+    {
+        HealthChunkCount = 0;
+        HealthPerChunk = 0.f;
+        HideHealthChunkSeparatorWidgets();
+        return;
+    }
+
+    HealthPerChunk = SelectNiceHealthPerChunk(
+        SafeMaxHealth,
+        TargetHealthChunkCount,
+        MinPreferredHealthChunkCount,
+        MaxPreferredHealthChunkCount,
+        HardMaxHealthChunkCount,
+        HealthChunkCount);
+    RefreshHealthChunkSeparatorWidgets();
+}
+
+bool UW_AeyerjiStatusBar::IsHealthChunkTagEligible() const
+{
+    if (!bHealthChunkDivisionsEnabled)
+    {
+        return false;
+    }
+
+    if (!bRequireAnyHealthChunkEligibilityTag)
+    {
+        return true;
+    }
+
+    // An enabled requirement with an empty container deliberately matches nothing,
+    // avoiding an accidental return to segmented trash-enemy bars.
+    return ASC.IsValid()
+        && !HealthChunkEligibilityTags.IsEmpty()
+        && ASC->HasAnyMatchingGameplayTags(HealthChunkEligibilityTags);
+}
+
+void UW_AeyerjiStatusBar::HideHealthChunkSeparatorWidgets()
+{
+    for (UBorder* Separator : HealthChunkSeparatorWidgets)
+    {
+        if (Separator)
+        {
+            Separator->SetVisibility(ESlateVisibility::Collapsed);
+        }
+    }
+}
+
+void UW_AeyerjiStatusBar::RefreshHealthChunkSeparatorWidgets()
+{
+    if (!bHealthChunkDivisionsEnabled
+        || !bHealthChunkTagEligible
+        || HealthChunkCount <= 1
+        || HealthPerChunk <= KINDA_SMALL_NUMBER
+        || ChunkLayoutMaxHealth <= KINDA_SMALL_NUMBER
+        || !HealthBar
+        || !WidgetTree)
+    {
+        HideHealthChunkSeparatorWidgets();
+        return;
+    }
+
+    UCanvasPanelSlot* HealthCanvasSlot = Cast<UCanvasPanelSlot>(HealthBar->Slot);
+    UCanvasPanel* HealthCanvas = HealthCanvasSlot
+        ? Cast<UCanvasPanel>(HealthBar->GetParent())
+        : nullptr;
+    if (!HealthCanvasSlot || !HealthCanvas)
+    {
+        HideHealthChunkSeparatorWidgets();
+        return;
+    }
+
+    const FVector2D BarSize = HealthCanvasSlot->GetSize();
+    const FVector2D BarPosition = HealthCanvasSlot->GetPosition();
+    const FVector2D BarAlignment = HealthCanvasSlot->GetAlignment();
+    if (BarSize.ContainsNaN()
+        || BarPosition.ContainsNaN()
+        || BarAlignment.ContainsNaN()
+        || BarSize.X <= KINDA_SMALL_NUMBER
+        || BarSize.Y <= KINDA_SMALL_NUMBER)
+    {
+        HideHealthChunkSeparatorWidgets();
+        return;
+    }
+
+    const FVector2D BarTopLeft = BarPosition - (BarSize * BarAlignment);
+    const float SeparatorHeight = FMath::Max(
+        0.f,
+        BarSize.Y - (HealthChunkSeparatorVerticalInset * 2.f));
+    if (SeparatorHeight <= KINDA_SMALL_NUMBER)
+    {
+        HideHealthChunkSeparatorWidgets();
+        return;
+    }
+
+    int32 SeparatorZOrder = HealthCanvasSlot->GetZOrder() + 1;
+    if (HealthBar_Ghost)
+    {
+        if (const UCanvasPanelSlot* GhostCanvasSlot = Cast<UCanvasPanelSlot>(HealthBar_Ghost->Slot);
+            GhostCanvasSlot && HealthBar_Ghost->GetParent() == HealthCanvas)
+        {
+            SeparatorZOrder = FMath::Max(SeparatorZOrder, GhostCanvasSlot->GetZOrder() + 1);
+        }
+    }
+
+    int32 VisibleSeparatorCount = 0;
+    for (int32 ChunkIndex = 1; ChunkIndex < HealthChunkCount; ++ChunkIndex)
+    {
+        const float BoundaryFraction =
+            (HealthPerChunk * static_cast<float>(ChunkIndex)) / ChunkLayoutMaxHealth;
+        if (BoundaryFraction >= 1.f - UE_KINDA_SMALL_NUMBER)
+        {
+            break;
+        }
+
+        UBorder* Separator = HealthChunkSeparatorWidgets.IsValidIndex(VisibleSeparatorCount)
+            ? HealthChunkSeparatorWidgets[VisibleSeparatorCount]
+            : nullptr;
+        if (!Separator)
+        {
+            const FName SeparatorName(*FString::Printf(
+                TEXT("NativeHealthChunkSeparator_%d"),
+                VisibleSeparatorCount));
+            Separator = WidgetTree->ConstructWidget<UBorder>(UBorder::StaticClass(), SeparatorName);
+            if (!Separator)
+            {
+                continue;
+            }
+
+            const FSlateColorBrush SolidBrush(FLinearColor::White);
+            Separator->SetBrush(SolidBrush);
+            Separator->SetPadding(FMargin(0.f));
+            if (HealthChunkSeparatorWidgets.IsValidIndex(VisibleSeparatorCount))
+            {
+                HealthChunkSeparatorWidgets[VisibleSeparatorCount] = Separator;
+            }
+            else
+            {
+                HealthChunkSeparatorWidgets.Add(Separator);
+            }
+        }
+
+        UCanvasPanelSlot* SeparatorSlot = Cast<UCanvasPanelSlot>(Separator->Slot);
+        if (Separator->GetParent() != HealthCanvas || !SeparatorSlot)
+        {
+            Separator->RemoveFromParent();
+            SeparatorSlot = HealthCanvas->AddChildToCanvas(Separator);
+        }
+        if (!SeparatorSlot)
+        {
+            Separator->SetVisibility(ESlateVisibility::Collapsed);
+            continue;
+        }
+
+        const FVector2D SeparatorPosition(
+            BarTopLeft.X + (BarSize.X * BoundaryFraction) - (HealthChunkSeparatorThickness * 0.5f),
+            BarTopLeft.Y + HealthChunkSeparatorVerticalInset);
+        SeparatorSlot->SetAnchors(HealthCanvasSlot->GetAnchors());
+        SeparatorSlot->SetAlignment(FVector2D::ZeroVector);
+        SeparatorSlot->SetAutoSize(false);
+        SeparatorSlot->SetPosition(SeparatorPosition);
+        SeparatorSlot->SetSize(FVector2D(HealthChunkSeparatorThickness, SeparatorHeight));
+        SeparatorSlot->SetZOrder(SeparatorZOrder);
+
+        Separator->SetBrushColor(HealthChunkSeparatorColor);
+        Separator->SetVisibility(ESlateVisibility::HitTestInvisible);
+        ++VisibleSeparatorCount;
+    }
+
+    for (int32 Index = VisibleSeparatorCount; Index < HealthChunkSeparatorWidgets.Num(); ++Index)
+    {
+        if (UBorder* Separator = HealthChunkSeparatorWidgets[Index])
+        {
+            Separator->SetVisibility(ESlateVisibility::Collapsed);
+        }
+    }
+}
+
 float UW_AeyerjiStatusBar::SafeDiv(float Numerator, float Denominator)
 {
-    return (FMath::IsNearlyZero(Denominator)) ? 1.f : Numerator / Denominator;
+	Numerator = FiniteStatusValue(Numerator);
+	Denominator = FiniteStatusValue(Denominator);
+	const float Result = FMath::IsNearlyZero(Denominator) ? 1.f : Numerator / Denominator;
+	return FiniteStatusValue(Result, 1.f);
 }
 
 void UW_AeyerjiStatusBar::NativeTick(const FGeometry& MyGeometry, float Dt)
 {
     Super::NativeTick(MyGeometry, Dt);
+	Dt = FMath::Clamp(FiniteStatusValue(Dt), 0.f, 1.f);
 
     if (ASC.IsValid())
     {
         // Always pull live values so late replication or missed initial delegates cannot leave stale bars on screen.
         RecalculateTargets();
 
-        if (PeriodicResyncInterval > 0.f)
+		const float SafeResyncInterval = FMath::Clamp(
+			FiniteStatusValue(PeriodicResyncInterval), 0.f, 60.f);
+		if (SafeResyncInterval > 0.f)
         {
             ResyncAccumulator += Dt;
-            if (ResyncAccumulator >= PeriodicResyncInterval)
+			if (ResyncAccumulator >= SafeResyncInterval)
             {
-                ResyncAccumulator = FMath::Fmod(ResyncAccumulator, PeriodicResyncInterval);
+				ResyncAccumulator = FMath::Fmod(ResyncAccumulator, SafeResyncInterval);
                 UpdateResourceVisibility();
                 UpdateColors();
             }
@@ -352,7 +803,12 @@ void UW_AeyerjiStatusBar::TickBar(float Dt, float Target, float& Main, float& Gh
     if (!MainPB) return;
 
     // Move main toward target
-    const float FillSpeed = (Target > Main) ? FillLerpSpeed_HealUp : FillLerpSpeed_DmgDown;
+	Target = FMath::Clamp(FiniteStatusValue(Target, 1.f), 0.f, 1.f);
+	Main = FMath::Clamp(FiniteStatusValue(Main, Target), 0.f, 1.f);
+	Ghost = FMath::Clamp(FiniteStatusValue(Ghost, Main), 0.f, 1.f);
+	Hold = FMath::Clamp(FiniteStatusValue(Hold), 0.f, 60.f);
+	const float FillSpeed = FMath::Clamp(FiniteStatusValue(
+		Target > Main ? FillLerpSpeed_HealUp : FillLerpSpeed_DmgDown), 0.f, 1000.f);
     Main = UKismetMathLibrary::FInterpTo(Main, Target, Dt, FillSpeed);
     MainPB->SetPercent(Main);
 
@@ -368,13 +824,15 @@ void UW_AeyerjiStatusBar::TickBar(float Dt, float Target, float& Main, float& Gh
             Hold = FMath::Max(0.f, Hold - Dt);
             if (Hold <= 0.f)
             {
-                Ghost = UKismetMathLibrary::FInterpTo(Ghost, Target, Dt, ChipLerpSpeedDown);
+				Ghost = UKismetMathLibrary::FInterpTo(Ghost, Target, Dt, FMath::Clamp(
+					FiniteStatusValue(ChipLerpSpeedDown), 0.f, 1000.f));
             }
         }
         else
         {
             // heal/refund: ghost catches up more quickly upward
-            Ghost = UKismetMathLibrary::FInterpTo(Ghost, Target, Dt, ChipLerpSpeedDown * 1.5f);
+			Ghost = UKismetMathLibrary::FInterpTo(Ghost, Target, Dt, FMath::Clamp(
+				FiniteStatusValue(ChipLerpSpeedDown), 0.f, 1000.f) * 1.5f);
         }
         GhostPB->SetPercent(Ghost);
     }
@@ -385,12 +843,14 @@ void UW_AeyerjiStatusBar::ApplyFX(float Dt)
     // Fade flashes
     if (ImgHealFlash && HealFlash > 0.f)
     {
-        HealFlash = FMath::Max(0.f, HealFlash - FlashFadePerSec * Dt);
+		HealFlash = FMath::Clamp(HealFlash - FMath::Clamp(
+			FiniteStatusValue(FlashFadePerSec), 0.f, 1000.f) * Dt, 0.f, 1.f);
         ImgHealFlash->SetRenderOpacity(HealFlash);
     }
     if (ImgDamageFlash && DmgFlash > 0.f)
     {
-        DmgFlash = FMath::Max(0.f, DmgFlash - FlashFadePerSec * Dt);
+		DmgFlash = FMath::Clamp(DmgFlash - FMath::Clamp(
+			FiniteStatusValue(FlashFadePerSec), 0.f, 1000.f) * Dt, 0.f, 1.f);
         ImgDamageFlash->SetRenderOpacity(DmgFlash);
     }
 }
@@ -401,13 +861,15 @@ void UW_AeyerjiStatusBar::UpdateColors()
 
     // Pulse color when low HP
     const float H = HealthMain;
-    const bool bLow = (H <= LowHPThreshold);
+	const bool bLow = H <= FMath::Clamp(FiniteStatusValue(LowHPThreshold, 0.25f), 0.f, 1.f);
     FLinearColor C = HealthColor_Normal;
 
     if (bLow)
     {
         // soft pulse between Low and Normal
-        const float Pulse = 0.5f + 0.5f * FMath::Sin(GetWorld()->TimeSeconds * 6.0f);
+		const UWorld* World = GetWorld();
+		const float TimeSeconds = World ? World->GetTimeSeconds() : 0.f;
+		const float Pulse = 0.5f + 0.5f * FMath::Sin(FiniteStatusValue(TimeSeconds) * 6.0f);
         C = FMath::Lerp(HealthColor_Low, HealthColor_Normal, Pulse);
     }
     HealthBar->SetFillColorAndOpacity(C);
@@ -447,8 +909,8 @@ bool UW_AeyerjiStatusBar::AutoDetectUsesResource() const
         return false;
 
     // Simple, reliable heuristic: if MaxMana is meaningful, show resource
-    const float MaxRes = ASC->GetNumericAttribute(MaxManaAttr);
-    if (MaxRes > MinResourceToShow)
+	const float MaxRes = MaxManaAttr.IsValid() ? FiniteStatusValue(ASC->GetNumericAttribute(MaxManaAttr)) : 0.f;
+	if (MaxRes > FMath::Clamp(FiniteStatusValue(MinResourceToShow, 0.5f), 0.f, MaxStatusDisplayValue))
     {
         return true;
     }
@@ -456,7 +918,7 @@ bool UW_AeyerjiStatusBar::AutoDetectUsesResource() const
     // Optional: if any granted ability has the specified tag, treat as mana user
     if (ManaAbilityTag.IsValid())
     {
-        for (TArray<FGameplayAbilitySpec> Specs = ASC->GetActivatableAbilities(); const FGameplayAbilitySpec& Spec : Specs)
+		for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
         {
             const UGameplayAbility* GA = Spec.Ability;
             if (!GA) continue;
@@ -483,7 +945,7 @@ void UW_AeyerjiStatusBar::UpdateXPLabel()
 
     if (LevelAttr.IsValid())
     {
-        const int32 CurrentLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(ASC->GetNumericAttribute(LevelAttr)));
+		const int32 CurrentLevel = UAeyerjiDifficultySettings::FloatToGameplayLevel(ASC->GetNumericAttribute(LevelAttr));
         if (CurrentLevel >= UAeyerjiDifficultySettings::GetMaxGameplayLevel())
         {
             XPText->SetVisibility(ESlateVisibility::Collapsed);
@@ -491,13 +953,12 @@ void UW_AeyerjiStatusBar::UpdateXPLabel()
         }
     }
 
-    const float CurXP = ASC->GetNumericAttribute(XPAttr);
-    const float MaxXP = ASC->GetNumericAttribute(XPMaxAttr);
-    const int32 Cur = FMath::FloorToInt(CurXP);
-    const int32 Max = FMath::Max(1, FMath::FloorToInt(MaxXP));
+	const int32 Cur = StatusDisplayInteger(ASC->GetNumericAttribute(XPAttr));
+	const int32 Max = FMath::Max(1, StatusDisplayInteger(ASC->GetNumericAttribute(XPMaxAttr)));
 
     XPText->SetVisibility(ESlateVisibility::Visible);
-    XPText->SetText(FText::FromString(FString::Printf(TEXT("%d/%d XP"), Cur, Max)));
+	XPText->SetText(FormatStatusPair(
+		TEXT("StatusXPFormat"), LOCTEXT("StatusXPFormatFallback", "{0}/{1} XP"), Cur, Max));
 }
 
 void UW_AeyerjiStatusBar::UpdateLevelLabel()
@@ -505,7 +966,7 @@ void UW_AeyerjiStatusBar::UpdateLevelLabel()
     if (!ASC.IsValid() || !LevelText) return;
     if (!LevelAttr.IsValid()) return;
 
-    const int32 Lvl = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(ASC->GetNumericAttribute(LevelAttr)));
+	const int32 Lvl = UAeyerjiDifficultySettings::FloatToGameplayLevel(ASC->GetNumericAttribute(LevelAttr));
     LevelText->SetText(FText::AsNumber(Lvl));
 }
 
@@ -514,12 +975,14 @@ void UW_AeyerjiStatusBar::UpdateHPValueLabels()
     if (!ASC.IsValid()) return;
     const float RawCurHP = ASC->GetNumericAttribute(HealthAttr);
     const float RawMaxHP = ASC->GetNumericAttribute(MaxHealthAttr);
-    const int32 CurHP = FMath::FloorToInt(GetDisplayedHealthValue(RawCurHP, RawMaxHP));
-    const int32 MaxHP = FMath::FloorToInt(RawMaxHP);
+	const int32 CurHP = StatusDisplayInteger(GetDisplayedHealthValue(RawCurHP, RawMaxHP));
+	const int32 MaxHP = StatusDisplayInteger(RawMaxHP);
     if (HPValueText)
     {
-        HPValueText->SetText(FText::FromString(FString::Printf(TEXT("%d/%d HP"), CurHP, MaxHP)));
+		HPValueText->SetText(FormatStatusPair(
+			TEXT("StatusHPFormat"), LOCTEXT("StatusHPFormatFallback", "{0}/{1} HP"), CurHP, MaxHP));
     }
+	if (HPMaxValueText) HPMaxValueText->SetText(FText::AsNumber(MaxHP));
 }
 
 void UW_AeyerjiStatusBar::UpdateManaValueLabels()
@@ -527,12 +990,14 @@ void UW_AeyerjiStatusBar::UpdateManaValueLabels()
     if (!ASC.IsValid()) return;
     const float RawCurMana = ASC->GetNumericAttribute(ManaAttr);
     const float RawMaxMana = ASC->GetNumericAttribute(MaxManaAttr);
-    const int32 CurMana = FMath::FloorToInt(GetDisplayedManaValue(RawCurMana, RawMaxMana));
-    const int32 MaxMana = FMath::FloorToInt(RawMaxMana);
+	const int32 CurMana = StatusDisplayInteger(GetDisplayedManaValue(RawCurMana, RawMaxMana));
+	const int32 MaxMana = StatusDisplayInteger(RawMaxMana);
     if (ManaValueText)
     {
-        ManaValueText->SetText(FText::FromString(FString::Printf(TEXT("%d/%d Mana"), CurMana, MaxMana)));
+		ManaValueText->SetText(FormatStatusPair(
+			TEXT("StatusManaFormat"), LOCTEXT("StatusManaFormatFallback", "{0}/{1} Mana"), CurMana, MaxMana));
     }
+	if (ManaMaxValueText) ManaMaxValueText->SetText(FText::AsNumber(MaxMana));
 }
 
 void UW_AeyerjiStatusBar::UpdateRegenLabels()
@@ -540,13 +1005,19 @@ void UW_AeyerjiStatusBar::UpdateRegenLabels()
     if (!ASC.IsValid()) return;
     if (HPRegenText && HPRegenAttr.IsValid())
     {
-        const float Regen = ASC->GetNumericAttribute(HPRegenAttr);
-        HPRegenText->SetText(FText::FromString(FString::Printf(TEXT("+%.1f"), Regen)));
+		const float Regen = FMath::Clamp(FiniteStatusValue(ASC->GetNumericAttribute(HPRegenAttr)), 0.f, MaxStatusDisplayValue);
+		const FText Template = AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("StatusRegenFormat"));
+		HPRegenText->SetText(FText::Format(
+			Template.IsEmpty() ? LOCTEXT("StatusRegenFormatFallback", "+{0}") : Template,
+			FText::AsNumber(Regen)));
     }
     if (ManaRegenText && ManaRegenAttr.IsValid())
     {
-        const float Regen = ASC->GetNumericAttribute(ManaRegenAttr);
-        ManaRegenText->SetText(FText::FromString(FString::Printf(TEXT("+%.1f"), Regen)));
+		const float Regen = FMath::Clamp(FiniteStatusValue(ASC->GetNumericAttribute(ManaRegenAttr)), 0.f, MaxStatusDisplayValue);
+		const FText Template = AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("StatusRegenFormat"));
+		ManaRegenText->SetText(FText::Format(
+			Template.IsEmpty() ? LOCTEXT("StatusRegenFormatFallback", "+{0}") : Template,
+			FText::AsNumber(Regen)));
     }
 }
 
@@ -607,7 +1078,8 @@ void UW_AeyerjiStatusBar::ScheduleDelayedInitialSync()
 
     World->GetTimerManager().ClearTimer(InitialDelayedSyncTimer);
 
-    if (InitialDelayedSyncSeconds <= 0.f)
+	const float SafeDelay = FMath::Clamp(FiniteStatusValue(InitialDelayedSyncSeconds), 0.f, 60.f);
+	if (SafeDelay <= 0.f)
     {
         RunDelayedInitialSync();
         return;
@@ -617,7 +1089,7 @@ void UW_AeyerjiStatusBar::ScheduleDelayedInitialSync()
         InitialDelayedSyncTimer,
         this,
         &UW_AeyerjiStatusBar::RunDelayedInitialSync,
-        InitialDelayedSyncSeconds,
+		SafeDelay,
         false);
 }
 
@@ -651,6 +1123,15 @@ void UW_AeyerjiStatusBar::BindRegenAttributes(UAbilitySystemComponent* InASC,
                                               FGameplayAttribute InHPRegen,
                                               FGameplayAttribute InManaRegen)
 {
+	if (InASC && (!IsValid(InASC) || (GetWorld() && InASC->GetWorld() != GetWorld())))
+	{
+		return;
+	}
+	if (ASC.IsValid() && InASC != ASC.Get())
+	{
+		return;
+	}
+
     UAbilitySystemComponent* OldASC = ASC.Get();
     const FGameplayAttribute OldHPRegenAttr = HPRegenAttr;
     const FGameplayAttribute OldManaRegenAttr = ManaRegenAttr;
@@ -688,3 +1169,5 @@ void UW_AeyerjiStatusBar::BindRegenAttributes(UAbilitySystemComponent* InASC,
 
     UpdateRegenLabels();
 }
+
+#undef LOCTEXT_NAMESPACE

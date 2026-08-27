@@ -4,6 +4,7 @@
 #include "CoreMinimal.h"
 #include "AeyerjiObjectiveTypes.h"
 #include "Director/AeyerjiEncounterDefinition.h"
+#include "Director/AeyerjiTreasureTypes.h"
 #include "Engine/DataAsset.h"
 #include "Engine/DataTable.h"
 #include "GameFramework/Actor.h"
@@ -20,6 +21,7 @@ class AAeyerjiEncounterDirector;
 class AAeyerjiEndRunPortal;
 class AAeyerjiLinkedTeleporter;
 class AAeyerjiRewardPresentationActor;
+class AAeyerjiTreasureSpawnPoint;
 class AAeyerjiPlayerController;
 class AAeyerjiPlayerState;
 class UAeyerjiEncounterDirectorDefinition;
@@ -603,6 +605,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run|Rift", meta=(ClampMin="0.0", Units="cm"))
 	float StandardRiftActivationDistance = 2500.f;
 
+	/** Designer-owned candidate-point, spatial-selection, and chest-release policy for this Rift. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Run|Rift|Treasure")
+	FAeyerjiRiftTreasureSpawnConfig TreasureSpawnConfig;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Difficulty")
 	bool bResyncEnemyLevelsOnRunStart = true;
 
@@ -672,6 +678,7 @@ public:
 	AAeyerjiLevelDirector();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	/**
 	 * Arms the level run: resets shard count, locks the boss gate, and starts the encounter timer.
@@ -888,6 +895,24 @@ public:
 
 	/** Builds a deterministic one-shot SpawnRegion plan without spawning enemies. */
 	bool PrepareRiftRegionEncounterPlan(int32 RunSerial, int32 RunSeed, int32 ProgressTarget, FString& OutReason);
+
+	/**
+	 * Validates candidate points, selects a spatially weighted seeded layout, rolls existing loot profiles,
+	 * and spawns the existing chest presentation class. Authority only.
+	 */
+	bool SpawnRiftTreasuresForRun(int32 RunSerial, int32 RunSeed, FString& OutReason);
+
+	/** Validates all loaded authored treasure points against the current ZoneRunDefinition and NavMesh. */
+	UFUNCTION(CallInEditor, Category="Director|Rift|Treasure")
+	void ValidateRiftTreasureSpawnPoints();
+
+	/** Simulates the configured number of deterministic layouts and logs selection frequency per valid point. */
+	UFUNCTION(CallInEditor, Category="Director|Rift|Treasure")
+	void SimulateRiftTreasureLayouts();
+
+	/** Number of currently spawned chest actors owned by this Rift run. */
+	UFUNCTION(BlueprintPure, Category="Director|Rift|Treasure")
+	int32 GetActiveRiftTreasureCount() const;
 
 	/** Stops selecting unused Rift regions; activated queues and living enemies remain valid. */
 	void DisableUnopenedRiftEncounterRegions();
@@ -1118,6 +1143,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
 	float StandardRiftActivationDistance = 2500.f;
 
+	/** Treasure policy copied from ZoneRunDefinition before a Rift starts, so map selection and chest settings stay designer-owned. */
+	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
+	FAeyerjiRiftTreasureSpawnConfig RiftTreasureSpawnConfig;
+
 	/** Controls which objective source should end the run in this level. */
 	UPROPERTY(BlueprintReadOnly, Category="Director|Resolved")
 	EAeyerjiRunWinCondition RunWinCondition = EAeyerjiRunWinCondition::BossCleared;
@@ -1267,6 +1296,11 @@ protected:
 	/** Chooses a nearby pickup location for round-clear rewards. */
 	FVector GetSurvivalRewardSpawnLocation(const FAeyerjiSurvivalRoundRewardDefinition& Reward, const APawn* PlayerPawn) const;
 	void BuildAuthoredSurvivalRounds(TArray<FAeyerjiSurvivalRoundDefinition>& OutRounds) const;
+	/**
+	 * Creates and binds an authoritative transient boss spawner when streamed map content
+	 * provides a boss class/destination but omits the tagged AAeyerjiSpawnerGroup actor.
+	 */
+	bool EnsureRuntimeBossSpawner();
 	/** Rebuilds the imported/base survival round cache from the current mission definition. */
 	void RebuildAuthoredSurvivalRoundsCache() const;
 	/** Clears cached survival round data and any in-flight preload when the zone definition changes. */
@@ -1281,6 +1315,36 @@ protected:
 	int32 CountRuntimeWaveEnemies(const FWaveDefinition& WaveDefinition) const;
 	int32 GetSurvivalCycleForRound(int32 RoundNumber) const;
 	bool IsSurvivalBossRound(int32 RoundNumber) const;
+
+	struct FRiftTreasureCandidateRuntime
+	{
+		TWeakObjectPtr<AAeyerjiTreasureSpawnPoint> Point;
+		/** Exact typed row validated for this candidate. Re-resolve it immediately before the server rolls loot. */
+		FDataTableRowHandle LootProfileRow;
+		FAeyerjiRiftTreasureSelectionCandidate SelectionCandidate;
+	};
+
+	/** Resolves and projects the configured Rift-start anchor used by candidate reachability and start exclusion. */
+	bool ResolveRiftTreasureStartNavigationAnchor(
+		const FAeyerjiRiftTreasureSpawnConfig& Config,
+		FVector& OutNavigationAnchor,
+		FString& OutReason) const;
+
+	/** Collects only enabled, in-scope, configured, NavMesh-valid, reachable treasure candidates. */
+	void CollectRiftTreasureCandidates(
+		const FAeyerjiRiftTreasureSpawnConfig& Config,
+		bool bRecordValidationState,
+		TArray<FRiftTreasureCandidateRuntime>& OutCandidates,
+		FAeyerjiRiftTreasureValidationSummary& OutSummary,
+		FString& OutReason) const;
+
+	/** Builds one existing-loot-service roll context from a treasure DataTable row and the active authoritative Rift snapshot. */
+	FLootContext BuildRiftTreasureLootContext(
+		const FAeyerjiTreasureLootProfileRow& Profile,
+		AActor* PlayerActor) const;
+
+	/** Destroys the Rift-owned chest actors and any still-live pickups released by those chests. */
+	void ClearActiveRiftTreasures();
 
 protected:
 	UPROPERTY(VisibleAnywhere, Category="Director|State")
@@ -1313,6 +1377,14 @@ protected:
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Director|Boss|Teleporter")
 	TObjectPtr<AAeyerjiLinkedTeleporter> ActiveBossLinkedTeleporter = nullptr;
+
+	/** Spawned treasure chest presentations owned by the active Rift and removed on reset/end. */
+	UPROPERTY(Transient)
+	TArray<TWeakObjectPtr<AAeyerjiRewardPresentationActor>> ActiveRiftTreasureActors;
+
+	/** Prevents a duplicated run-start signal from selecting and spawning a second treasure layout. */
+	UPROPERTY(Transient)
+	int32 ActiveRiftTreasureRunSerial = 0;
 
 	UPROPERTY(VisibleAnywhere, Category="Director|State")
 	int32 FixedPopulationClustersCleared = 0;

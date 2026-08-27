@@ -7,9 +7,6 @@ class AEYERJI_API UAeyerjiGameInstance : public UGameInstance
 {
 	GENERATED_BODY()
 
-protected:
-	virtual void Shutdown() override;   // called in PIE stop & real quit
-
 public:
 	/** Compatibility wrapper that converts the legacy UI slider (0..1000) into the authoritative WorldTier. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Difficulty")

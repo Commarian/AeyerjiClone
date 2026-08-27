@@ -40,8 +40,8 @@ struct FAeyerjiSaveTransportHeader
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Save")
 	FString OwnerKey;
 
-	// When a profile uses a named character slot, carry that slot through pawn RPC
-	// transport so it cannot race against PlayerState replication/RPC ordering.
+	// NULL/offline play may carry a named character slot through pawn RPC transport so it
+	// cannot race against PlayerState replication. This field never identifies the account.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Save")
 	FString ExplicitSaveSlotOverride;
 

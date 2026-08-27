@@ -5,24 +5,45 @@
 
 #include "Aeyerji/AeyerjiPlayerController.h"
 #include "AbilitySystemComponent.h"
-#include "AbilitySystemInterface.h"
+#include "AbilitySystemGlobals.h"
+#include "Abilities/AbilityTeamUtils.h"
 #include "Abilities/AeyerjiAbilityTuning.h"
 #include "Abilities/Blink/GABlink.h"
 #include "Abilities/GameplayAbility.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Attributes/AttributeSet_Ranges.h"
+#include "AeyerjiGameplayTags.h"
 #include "CharacterStatsLibrary.h"
 #include "CollisionQueryParams.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/GameInstance.h"
 #include "Logging/AeyerjiLog.h"
-#include "UObject/UnrealType.h"
+
+namespace
+{
+	bool TargetingVectorIsFinite(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
+	float TargetingFiniteOrDefault(const float Value, const float DefaultValue)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
+}
 
 void UAeyerjiTargetingManager::Initialize(AAeyerjiPlayerController* InOwner, const FAeyerjiTargetingTunables& InTunables)
 {
-	// Cache owning controller and tunables (owner re-calls on possession swaps).
+	// A possession/world transfer must stop the timer owned by the previous controller first.
+	if (OwnerPC.Get() != InOwner)
+	{
+		ClearTargeting();
+	}
 	OwnerPC = InOwner;
 	Tunables = InTunables;
+	Tunables.RangePreviewTickRate = FMath::Max(0.f, TargetingFiniteOrDefault(Tunables.RangePreviewTickRate, 0.05f));
+	Tunables.RangePreviewDrawLife = FMath::Max(0.f, TargetingFiniteOrDefault(Tunables.RangePreviewDrawLife, 0.06f));
+	Tunables.RangePreviewThickness = FMath::Max(0.f, TargetingFiniteOrDefault(Tunables.RangePreviewThickness, 2.5f));
 }
 
 void UAeyerjiTargetingManager::BeginDestroy()
@@ -40,7 +61,7 @@ void UAeyerjiTargetingManager::SetHooks(FAeyerjiTargetingHooks InHooks)
 
 void UAeyerjiTargetingManager::BeginTargeting(const FAeyerjiAbilitySlot& Slot)
 {
-	// Enter a cast flow state based on the ability’s target mode, then kick off preview.
+	// Enter a cast flow state based on the ability's target mode, then kick off preview.
 	PendingSlot = Slot;
 	StopRangePreview();
 
@@ -63,29 +84,29 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 		return false;
 	}
 
-	if (!OwnerPC)
+	if (!OwnerPC.IsValid())
 	{
 		return false;
 	}
 
-	AJ_LOG(OwnerPC, TEXT("HandleTargetingClick() CastFlow=%d"), static_cast<int32>(CastFlow));
+	AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick() CastFlow=%d"), static_cast<int32>(CastFlow));
 
 	const bool bHasGroundHit = Context.bHasGroundHit;
 	const FHitResult& GroundHit = Context.GroundHit;
 
-	if (bHasGroundHit)
+	if (bHasGroundHit && TargetingVectorIsFinite(GroundHit.ImpactPoint))
 	{
-		AJ_LOG(OwnerPC, TEXT("HandleTargetingClick() ground hit at %s"), *GroundHit.ImpactPoint.ToString());
+		AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick() ground hit at %s"), *GroundHit.ImpactPoint.ToString());
 	}
 	else
 	{
-		AJ_LOG(OwnerPC, TEXT("HandleTargetingClick() no ground hit"));
+		AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick() no valid ground hit"));
 	}
 
 	switch (CastFlow)
 	{
 	case EAeyerjiCastFlow::AwaitingGround:
-		if (bHasGroundHit)
+		if (bHasGroundHit && TargetingVectorIsFinite(GroundHit.ImpactPoint))
 		{
 			if (Hooks.ActivateAtLocation)
 			{
@@ -93,7 +114,7 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 			}
 			else
 			{
-				AJ_LOG(OwnerPC, TEXT("HandleTargetingClick(): missing ActivateAtLocation hook"));
+				AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick(): missing ActivateAtLocation hook"));
 			}
 		}
 		break;
@@ -112,12 +133,18 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 		{
 			TargetActor = GroundHit.GetActor();
 		}
+		if (!IsEligibleActorTarget(TargetActor))
+		{
+			TargetActor = nullptr;
+		}
 
 		if (!TargetActor)
 		{
 			FVector WorldOrigin;
 			FVector WorldDir;
-			if (OwnerPC->DeprojectMousePositionToWorld(WorldOrigin, WorldDir))
+			if (OwnerPC->DeprojectMousePositionToWorld(WorldOrigin, WorldDir)
+				&& TargetingVectorIsFinite(WorldOrigin)
+				&& TargetingVectorIsFinite(WorldDir))
 			{
 				if (UWorld* World = OwnerPC->GetWorld())
 				{
@@ -129,30 +156,7 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 
 					auto ShouldIgnoreActor = [&](const AActor* Actor) -> bool
 					{
-						if (!Actor)
-						{
-							return false;
-						}
-
-						if (const APawn* Pawn = Cast<APawn>(Actor))
-						{
-							return Pawn->IsPlayerControlled();
-						}
-
-						const AActor* Owner = Actor->GetOwner();
-						while (Owner)
-						{
-							if (const APawn* OwnerPawn = Cast<APawn>(Owner))
-							{
-								if (OwnerPawn->IsPlayerControlled())
-								{
-									return true;
-								}
-							}
-							Owner = Owner->GetOwner();
-						}
-
-						return false;
+						return Actor && !IsEligibleActorTarget(Actor);
 					};
 
 					const FVector TraceStart = WorldOrigin;
@@ -168,7 +172,10 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 
 						if (ShouldIgnoreActor(PawnHit.GetActor()))
 						{
-							Params.AddIgnoredActor(PawnHit.GetActor());
+							if (AActor* IgnoredActor = PawnHit.GetActor())
+							{
+								Params.AddIgnoredActor(IgnoredActor);
+							}
 							continue;
 						}
 
@@ -179,21 +186,21 @@ bool UAeyerjiTargetingManager::HandleClick(const FAeyerjiTargetingClickContext& 
 			}
 		}
 
-		if (TargetActor)
+		if (IsEligibleActorTarget(TargetActor))
 		{
-			AJ_LOG(OwnerPC, TEXT("HandleTargetingClick() activating ability on actor %s"), *GetNameSafe(TargetActor));
+			AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick() activating ability on actor %s"), *GetNameSafe(TargetActor));
 			if (Hooks.ActivateOnActor)
 			{
 				Hooks.ActivateOnActor(PendingSlot, TargetActor);
 			}
 			else
 			{
-				AJ_LOG(OwnerPC, TEXT("HandleTargetingClick(): missing ActivateOnActor hook"));
+				AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick(): missing ActivateOnActor hook"));
 			}
 		}
 		else
 		{
-			AJ_LOG(OwnerPC, TEXT("HandleTargetingClick() no actor target found for CastFlow=%d"), static_cast<int32>(CastFlow));
+			AJ_LOG(OwnerPC.Get(), TEXT("HandleTargetingClick() no actor target found for CastFlow=%d"), static_cast<int32>(CastFlow));
 		}
 		break;
 	}
@@ -231,7 +238,7 @@ void UAeyerjiTargetingManager::TickPreview()
 void UAeyerjiTargetingManager::StartRangePreview(const FAeyerjiAbilitySlot& Slot)
 {
 	// Begins drawing the range circle on the local client.
-	if (!OwnerPC || !OwnerPC->IsLocalController())
+	if (!OwnerPC.IsValid() || !OwnerPC->IsLocalController())
 	{
 		return;
 	}
@@ -264,7 +271,7 @@ void UAeyerjiTargetingManager::StopRangePreview()
 	// Clears preview state and timer.
 	Preview = {};
 
-	if (OwnerPC)
+	if (OwnerPC.IsValid())
 	{
 		// World can be gone during teardown (e.g., PIE end); guard before touching timer manager.
 		if (UWorld* World = OwnerPC->GetWorld())
@@ -294,7 +301,7 @@ float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbility
 	}
 
 	const UAeyerjiAbilityTuningSubsystem* Tuning = nullptr;
-	if (OwnerPC)
+	if (OwnerPC.IsValid())
 	{
 		if (UGameInstance* GameInstance = OwnerPC->GetGameInstance())
 		{
@@ -372,7 +379,7 @@ float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbility
 			}
 		}
 
-		if (Range <= 0.f && OwnerPC)
+		if (Range <= 0.f && OwnerPC.IsValid())
 		{
 			if (APawn* LocalPawn = OwnerPC->GetPawn())
 			{
@@ -381,13 +388,13 @@ float UAeyerjiTargetingManager::ResolveAbilityPreviewRange(const FAeyerjiAbility
 		}
 	}
 
-	return FMath::Max(0.f, Range);
+	return FMath::Max(0.f, TargetingFiniteOrDefault(Range, 0.f));
 }
 
 void UAeyerjiTargetingManager::DrawAbilityRangePreview(float Range, EAeyerjiTargetMode Mode)
 {
 	// Renders a colored circle at pawn location (snapped to ground if available).
-	if (!OwnerPC || !OwnerPC->IsLocalController() || Range <= KINDA_SMALL_NUMBER)
+	if (!OwnerPC.IsValid() || !OwnerPC->IsLocalController() || !FMath::IsFinite(Range) || Range <= KINDA_SMALL_NUMBER)
 	{
 		return;
 	}
@@ -400,10 +407,14 @@ void UAeyerjiTargetingManager::DrawAbilityRangePreview(float Range, EAeyerjiTarg
 	}
 
 	FVector Center = LocalPawn->GetActorLocation();
+	if (!TargetingVectorIsFinite(Center))
+	{
+		return;
+	}
 	if (Hooks.GroundTrace)
 	{
 		FHitResult GroundHit;
-		if (Hooks.GroundTrace(GroundHit))
+		if (Hooks.GroundTrace(GroundHit) && TargetingVectorIsFinite(GroundHit.ImpactPoint))
 		{
 			Center.Z = GroundHit.ImpactPoint.Z + 2.f;
 		}
@@ -422,17 +433,41 @@ void UAeyerjiTargetingManager::DrawAbilityRangePreview(float Range, EAeyerjiTarg
 UAbilitySystemComponent* UAeyerjiTargetingManager::GetControlledAbilitySystem() const
 {
 	// Helper to fetch the ASC from the currently possessed pawn (if any).
-	if (!OwnerPC)
+	if (!OwnerPC.IsValid())
 	{
 		return nullptr;
 	}
 
-	const APawn* ControlledPawn = OwnerPC->GetPawn();
+	APawn* ControlledPawn = OwnerPC->GetPawn();
 	if (!ControlledPawn)
 	{
 		return nullptr;
 	}
 
-	const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(ControlledPawn);
-	return ASI ? ASI->GetAbilitySystemComponent() : nullptr;
+	return UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(ControlledPawn);
+}
+
+bool UAeyerjiTargetingManager::IsEligibleActorTarget(const AActor* TargetActor) const
+{
+	if (!OwnerPC.IsValid() || !IsValid(TargetActor) || TargetActor->GetWorld() != OwnerPC->GetWorld())
+	{
+		return false;
+	}
+
+	const APawn* ControlledPawn = OwnerPC->GetPawn();
+	if (!ControlledPawn || TargetActor == ControlledPawn)
+	{
+		return false;
+	}
+
+	if (const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(TargetActor))
+	{
+		if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+		{
+			return false;
+		}
+	}
+
+	const bool bSameTeam = AbilityTeamUtils::AreOnSameTeam(ControlledPawn, TargetActor);
+	return CastFlow == EAeyerjiCastFlow::AwaitingFriend ? bSameTeam : !bSameTeam;
 }

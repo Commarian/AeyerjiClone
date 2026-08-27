@@ -31,8 +31,9 @@ void UW_ActionSlotNative::NativeConstruct()
 
 void UW_ActionSlotNative::UpdateCooldownDisplay(float TimeRemaining, float TotalDuration)
 {
-	CooldownTotalTime = FMath::Max(0.f, TotalDuration);
-	CooldownTimeRemaining = FMath::Max(0.f, TimeRemaining);
+	constexpr float MaxCooldownSeconds = 604800.f;
+	CooldownTotalTime = FMath::Clamp(FMath::IsFinite(TotalDuration) ? TotalDuration : 0.f, 0.f, MaxCooldownSeconds);
+	CooldownTimeRemaining = FMath::Clamp(FMath::IsFinite(TimeRemaining) ? TimeRemaining : 0.f, 0.f, CooldownTotalTime);
 
 	const bool bHasActiveCooldown = CooldownTotalTime > KINDA_SMALL_NUMBER && CooldownTimeRemaining > KINDA_SMALL_NUMBER;
 	bIsCoolingDown = bHasActiveCooldown;
@@ -42,7 +43,7 @@ void UW_ActionSlotNative::UpdateCooldownDisplay(float TimeRemaining, float Total
 		: 0.f;
 
 	CooldownDisplaySeconds = bHasActiveCooldown
-		? FMath::Max(1, FMath::RoundToInt(CooldownTimeRemaining))
+		? FMath::Max(1, FMath::RoundToInt(FMath::Min(CooldownTimeRemaining, MaxCooldownSeconds)))
 		: 0;
 
 	BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::CooldownTotalTime);

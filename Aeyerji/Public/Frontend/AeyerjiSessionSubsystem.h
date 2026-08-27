@@ -40,6 +40,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Session")
 	bool LeaveCurrentParty();
 
+	/** Opens the active online provider's friend-invite UI for the current lobby. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Session")
+	bool OpenPartyInviteOverlay();
+
 	/** Closes joining and starts/updates the online session before authoritative gameplay travel. */
 	bool MarkPartyLaunching(EAeyerjiRiftActivityType ActivityType, int32 ExcursionTier, FName GameplayMapId);
 

@@ -2,7 +2,7 @@
     {
         "Name":  "AeyerjiAttributeSet.ManaMax",
         "BaseValue":  0,
-        "MinValue":  1,
+        "MinValue":  0,
         "MaxValue":  1000000,
         "DerivedAttributeInfo":  "",
         "bCanStack":  false
@@ -17,7 +17,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.HP",
-        "BaseValue":  150.0,
+        "BaseValue":  44.0,
         "MinValue":  0,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",
@@ -25,7 +25,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.HPMax",
-        "BaseValue":  75.0,
+        "BaseValue":  44.0,
         "MinValue":  1,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",
@@ -33,7 +33,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.RunSpeed",
-        "BaseValue":  350,
+        "BaseValue":  500,
         "MinValue":  50,
         "MaxValue":  3000,
         "DerivedAttributeInfo":  "",

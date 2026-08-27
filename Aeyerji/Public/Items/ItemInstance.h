@@ -28,7 +28,8 @@ public:
 
 	// UObject
 	virtual bool IsSupportedForNetworking() const override { return true; }
-	virtual bool IsNameStableForNetworking() const override { return true; }
+	// Item instances are created dynamically; their network GUID, not their runtime-generated name, identifies them.
+	virtual bool IsNameStableForNetworking() const override { return false; }
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	UPROPERTY(ReplicatedUsing = OnRep_Definition, EditAnywhere, BlueprintReadOnly, Category = "Item")

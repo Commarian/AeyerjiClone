@@ -20,6 +20,7 @@ namespace
 	const FName FallbackNeonZoneId(TEXT("Zone.Neon"));
 	const FName LegacyMenuZoneId(TEXT("L_MainMenu"));
 	const FName LegacyNeonZoneId(TEXT("NeonMap"));
+	const TCHAR* FallbackGameplayMapPath = TEXT("/Game/Levels/L_PersistentRoot.L_PersistentRoot");
 	const FName FallbackNeonPlayerStartTag(TEXT("Zone.Neon.Entry"));
 	constexpr float StreamingTickIntervalSeconds = 0.05f;
 
@@ -303,12 +304,11 @@ bool UAeyerjiStreamingSubsystem::StartGameplaySession(const bool bCampaignMode)
 	{
 		return false;
 	}
-	if (!MapDef.EntryZoneId.IsNone())
-	{
-		CurrentZoneId = MapDef.EntryZoneId;
-	}
+	CurrentZoneId = MapDef.EntryZoneId;
 
-	PendingStartupZoneOverride = NAME_None;
+	// The persistent root's WorldDirector consumes this one-shot value. Its authored setting
+	// intentionally does not prefer saved state, so CurrentZoneId alone cannot select gameplay.
+	PendingStartupZoneOverride = CurrentZoneId;
 	bCurrentZoneReadyPending = false;
 
 	OnGameplayMapSelected.Broadcast(CurrentGameplayMapId, MapPackageName);
@@ -334,10 +334,7 @@ bool UAeyerjiStreamingSubsystem::PrepareFrontendRunLaunch(const EAeyerjiRiftActi
 	{
 		return false;
 	}
-	if (!MapDef.EntryZoneId.IsNone())
-	{
-		CurrentZoneId = MapDef.EntryZoneId;
-	}
+	CurrentZoneId = MapDef.EntryZoneId;
 
 	PendingFrontendRunLaunch.RequestId = FMath::Max(NextFrontendRunLaunchRequestId++, 1);
 	PendingFrontendRunLaunch.ActivityType = ActivityType;
@@ -362,12 +359,15 @@ bool UAeyerjiStreamingSubsystem::ExecutePendingFrontendRunLaunch()
 	{
 		return false;
 	}
-	PendingStartupZoneOverride = NAME_None;
+	// Preserve the exact entry zone selected with the launch request across seamless travel.
+	// BP_AeyerjiWorldDirector consumes and clears this after the persistent root has loaded.
+	PendingStartupZoneOverride = CurrentZoneId;
 	bCurrentZoneReadyPending = false;
 	OnGameplayMapSelected.Broadcast(PendingFrontendRunLaunch.MapId, PendingFrontendRunLaunch.MapPackageName);
 	MarkStateDirtyAndMaybeSave();
-	UE_LOG(LogTemp, Display, TEXT("[LobbyLaunch] Travel RequestId=%d Package=%s"),
-		PendingFrontendRunLaunch.RequestId, *PendingFrontendRunLaunch.MapPackageName.ToString());
+	UE_LOG(LogTemp, Display, TEXT("[LobbyLaunch] Travel RequestId=%d Package=%s EntryZone=%s"),
+		PendingFrontendRunLaunch.RequestId, *PendingFrontendRunLaunch.MapPackageName.ToString(),
+		*PendingStartupZoneOverride.ToString());
 	return TravelToMapPackage(PendingFrontendRunLaunch.MapPackageName);
 }
 
@@ -852,9 +852,32 @@ const FZoneDef* UAeyerjiStreamingSubsystem::FindZoneDef(const FName ZoneId) cons
 
 bool UAeyerjiStreamingSubsystem::SelectGameplayMap(const bool bCampaignMode, const bool bAdvanceCursor, FAeyerjiGameplayMapDef& OutMapDef, FName& OutMapPackageName)
 {
-	if (!EnsureManifestLoaded() || !Manifest || Manifest->GameplayMaps.Num() <= 0)
+	const bool bHasAuthoredGameplayMaps = EnsureManifestLoaded() && Manifest && !Manifest->GameplayMaps.IsEmpty();
+	if (!bHasAuthoredGameplayMaps)
 	{
-		return false;
+		// NeonMap is a streamed gameplay zone, not the persistent travel destination. Route an
+		// empty authored rotation through the persistent root so its WorldDirector can enter Zone.Neon.
+		OutMapDef = FAeyerjiGameplayMapDef();
+		OutMapDef.MapId = LegacyNeonZoneId;
+		OutMapDef.MapAsset = TSoftObjectPtr<UWorld>(FSoftObjectPath(FallbackGameplayMapPath));
+		OutMapDef.EntryZoneId = FallbackNeonZoneId;
+		if (!ResolveMapPackageName(OutMapDef, OutMapPackageName))
+		{
+			UE_LOG(LogTemp, Error, TEXT("UAeyerjiStreamingSubsystem: fallback gameplay map is invalid Path=%s"),
+				FallbackGameplayMapPath);
+			return false;
+		}
+
+		if (bAdvanceCursor)
+		{
+			bCampaignModeEnabled = bCampaignMode;
+			CurrentGameplayMapId = OutMapDef.MapId;
+			CampaignMapCursor = 0;
+		}
+		UE_LOG(LogTemp, Warning,
+			TEXT("UAeyerjiStreamingSubsystem: gameplay rotation is empty; using fallback MapId=%s Package=%s"),
+			*OutMapDef.MapId.ToString(), *OutMapPackageName.ToString());
+		return true;
 	}
 
 	const int32 NumMaps = Manifest->GameplayMaps.Num();

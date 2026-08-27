@@ -65,21 +65,25 @@ void UGA_AeyerjiTargetedEffectBase::ActivateAbility(const FGameplayAbilitySpecHa
 	FVector TargetLocation = ActorInfo->AvatarActor->GetActorLocation();
 	ResolveTargets(*ActorInfo, TriggerEventData, Config, Targets, TargetLocation);
 
-	if (!IsWithinRange(*ActorInfo, Config, TargetLocation))
+	if (TargetLocation.ContainsNaN() || !IsWithinRange(*ActorInfo, Config, TargetLocation))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("TargetedAbility: activation rejected for %s, target location is out of range."),
 			*Config.AbilityTag.ToString());
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
 		return;
 	}
-
-	const float ImpactDelay = CalculateImpactDelay(Config);
-	if (ImpactDelay > KINDA_SMALL_NUMBER)
+	if (Config.Shape == EAeyerjiAbilityTargetShape::SingleActor
+		&& Config.TargetTeam != EAeyerjiAbilityTargetTeam::Self
+		&& Targets.IsEmpty())
 	{
-		ApplyCastingLock(*ActorInfo);
+		UE_LOG(LogTemp, Warning, TEXT("TargetedAbility: activation rejected for %s, no valid actor target."),
+			*Config.AbilityTag.ToString());
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
+		return;
 	}
 
-	PlayAbilityCastMontageNative(*ActorInfo, Config);
+	const float ImpactDelay = CalculateAbilityImpactDelay(Config);
+	BeginAbilityCastPresentation(*ActorInfo, Config, ImpactDelay);
 
 	if (ImpactDelay <= KINDA_SMALL_NUMBER)
 	{
@@ -87,10 +91,28 @@ void UGA_AeyerjiTargetedEffectBase::ActivateAbility(const FGameplayAbilitySpecHa
 		return;
 	}
 
-	FTimerDelegate ImpactDelegate;
-	ImpactDelegate.BindWeakLambda(this, [this, Handle, ActorInfo, ActivationInfo, ConfigCopy = Config, Targets, TargetLocation]()
+	TArray<TWeakObjectPtr<AActor>> WeakTargets;
+	WeakTargets.Reserve(Targets.Num());
+	for (AActor* Target : Targets)
 	{
-		ExecuteTargetedImpact(Handle, ActorInfo, ActivationInfo, ConfigCopy, Targets, TargetLocation);
+		WeakTargets.Add(Target);
+	}
+
+	FTimerDelegate ImpactDelegate;
+	ImpactDelegate.BindWeakLambda(this, [this, Handle, ActorInfo, ActivationInfo, ConfigCopy = Config, WeakTargets, TargetLocation]()
+	{
+		TArray<AActor*> ValidTargets;
+		for (const TWeakObjectPtr<AActor>& WeakTarget : WeakTargets)
+		{
+			AActor* Target = WeakTarget.Get();
+			if (Target && ActorInfo && IsTargetAllowed(*ActorInfo, ConfigCopy, Target)
+				&& (ConfigCopy.Shape != EAeyerjiAbilityTargetShape::SingleActor
+					|| IsWithinRange(*ActorInfo, ConfigCopy, Target->GetActorLocation())))
+			{
+				ValidTargets.Add(Target);
+			}
+		}
+		ExecuteTargetedImpact(Handle, ActorInfo, ActivationInfo, ConfigCopy, ValidTargets, TargetLocation);
 	});
 
 	if (UWorld* World = ActorInfo->AvatarActor->GetWorld())
@@ -117,131 +139,81 @@ void UGA_AeyerjiTargetedEffectBase::EndAbility(const FGameplayAbilitySpecHandle 
 		}
 	}
 
-	RemoveCastingLock(ActorInfo);
 	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
-}
-
-float UGA_AeyerjiTargetedEffectBase::CalculateImpactDelay(const FAeyerjiAbilityResolvedConfig& Config) const
-{
-	if (Config.Visuals.ImpactDelaySeconds >= 0.f)
-	{
-		return Config.Visuals.ImpactDelaySeconds;
-	}
-
-	if (Config.Visuals.Montage.IsNull())
-	{
-		return 0.f;
-	}
-
-	UAnimMontage* Montage = Config.Visuals.Montage.Get();
-	if (!Montage)
-	{
-		Montage = Config.Visuals.Montage.LoadSynchronous();
-	}
-
-	if (!Montage)
-	{
-		return 0.f;
-	}
-
-	const float PlayRate = FMath::Max(0.01f, Config.Visuals.MontagePlayRate);
-	return FMath::Max(0.f, Montage->GetPlayLength() * 0.5f / PlayRate);
-}
-
-void UGA_AeyerjiTargetedEffectBase::ApplyCastingLock(const FGameplayAbilityActorInfo& ActorInfo) const
-{
-	UAbilitySystemComponent* ASC = ActorInfo.AbilitySystemComponent.Get();
-	if (ASC && AeyerjiTags::State_Ability_Casting.GetTag().IsValid())
-	{
-		FGameplayTagContainer PrimaryAttackTags;
-		PrimaryAttackTags.AddTag(AeyerjiTags::Ability_Primary);
-		ASC->CancelAbilities(&PrimaryAttackTags);
-		ASC->AddLooseGameplayTag(AeyerjiTags::State_Ability_Casting, 1, EGameplayTagReplicationState::TagOnly);
-	}
-
-	APawn* Pawn = Cast<APawn>(ActorInfo.AvatarActor.Get());
-	if (!Pawn)
-	{
-		return;
-	}
-
-	if (AController* Controller = Pawn->GetController())
-	{
-		Controller->StopMovement();
-	}
-
-	if (ACharacter* Character = Cast<ACharacter>(Pawn))
-	{
-		if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-		{
-			Movement->StopMovementImmediately();
-		}
-	}
-}
-
-void UGA_AeyerjiTargetedEffectBase::RemoveCastingLock(const FGameplayAbilityActorInfo* ActorInfo) const
-{
-	if (!ActorInfo || !AeyerjiTags::State_Ability_Casting.GetTag().IsValid())
-	{
-		return;
-	}
-
-	if (UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get())
-	{
-		if (ASC->GetTagCount(AeyerjiTags::State_Ability_Casting) > 0)
-		{
-			ASC->RemoveLooseGameplayTag(AeyerjiTags::State_Ability_Casting, 1, EGameplayTagReplicationState::TagOnly);
-		}
-	}
-}
-
-void UGA_AeyerjiTargetedEffectBase::PlayAbilityCastMontageNative(const FGameplayAbilityActorInfo& ActorInfo, const FAeyerjiAbilityResolvedConfig& Config) const
-{
-	AAeyerjiCharacter* Character = Cast<AAeyerjiCharacter>(ActorInfo.AvatarActor.Get());
-	if (!Character || !Character->HasAuthority())
-	{
-		return;
-	}
-
-	if (Config.Visuals.Montage.IsNull())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("TargetedAbility: %s has no cast montage configured."),
-			*Config.AbilityTag.ToString());
-		return;
-	}
-
-	UE_LOG(LogTemp, Display, TEXT("TargetedAbility: playing cast montage for %s from %s."),
-		*Config.AbilityTag.ToString(),
-		*Config.Visuals.Montage.ToSoftObjectPath().ToString());
-	Character->Multicast_PlayAbilityMontageByPath(Config.Visuals.Montage.ToSoftObjectPath(), Config.Visuals.MontagePlayRate);
 }
 
 void UGA_AeyerjiTargetedEffectBase::ExecuteTargetedImpact(
 	const FGameplayAbilitySpecHandle Handle,
 	const FGameplayAbilityActorInfo* ActorInfo,
 	const FGameplayAbilityActivationInfo ActivationInfo,
-	const FAeyerjiAbilityResolvedConfig Config,
-	const TArray<AActor*> Targets,
+	const FAeyerjiAbilityResolvedConfig& Config,
+	const TArray<AActor*>& Targets,
 	FVector TargetLocation)
 {
 	if (!ActorInfo || !ActorInfo->AvatarActor.IsValid() || !IsActive())
 	{
 		return;
 	}
+	if (IsOwnerDead(ActorInfo))
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+	if (TargetLocation.ContainsNaN() || !IsWithinRange(*ActorInfo, Config, TargetLocation))
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+
+	TArray<AActor*> ValidTargets;
+	if (Config.TargetTeam == EAeyerjiAbilityTargetTeam::Self)
+	{
+		ValidTargets.Add(ActorInfo->AvatarActor.Get());
+	}
+	else if (Config.Shape == EAeyerjiAbilityTargetShape::SingleActor)
+	{
+		for (AActor* Target : Targets)
+		{
+			if (IsTargetAllowed(*ActorInfo, Config, Target)
+				&& IsWithinRange(*ActorInfo, Config, Target->GetActorLocation()))
+			{
+				ValidTargets.AddUnique(Target);
+			}
+		}
+	}
+	else
+	{
+		// Area and cone attacks resolve occupants at impact time so actors that leave
+		// a telegraphed shape are not hit by a stale activation-time overlap result.
+		GatherShapeTargets(*ActorInfo, Config, TargetLocation, ValidTargets);
+	}
+
+	if (Config.Shape == EAeyerjiAbilityTargetShape::SingleActor
+		&& Config.TargetTeam != EAeyerjiAbilityTargetTeam::Self
+		&& ValidTargets.IsEmpty())
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+	if (Config.MaxTargets > 0 && ValidTargets.Num() > Config.MaxTargets)
+	{
+		ValidTargets.SetNum(Config.MaxTargets);
+	}
 
 	if (!TryCommitAbilityInternal(Handle, ActorInfo, ActivationInfo, true))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("TargetedAbility: impact rejected for %s, commit failed."),
 			*Config.AbilityTag.ToString());
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
 		return;
 	}
 
-	ApplyResolvedConfigEffects(Handle, *ActorInfo, ActivationInfo, Config, Targets);
+	ApplyResolvedConfigEffects(Handle, *ActorInfo, Config, ValidTargets);
 	UE_LOG(LogTemp, Display, TEXT("TargetedAbility: activated %s Targets=%d."),
 		*Config.AbilityTag.ToString(),
-		Targets.Num());
-	OnTargetedAbilityAppliedNative(*ActorInfo, Config, Targets, TargetLocation);
-	BP_OnTargetedAbilityApplied(Targets, TargetLocation);
+		ValidTargets.Num());
+	OnTargetedAbilityAppliedNative(*ActorInfo, Config, ValidTargets, TargetLocation);
+	BP_OnTargetedAbilityApplied(ValidTargets, TargetLocation);
 	EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
 }
 
@@ -316,9 +288,10 @@ bool UGA_AeyerjiTargetedEffectBase::ResolveTargetLocation(const FGameplayAbility
 			return true;
 		}
 
-		const FGameplayAbilityTargetData_LocationInfo* LocationData = static_cast<const FGameplayAbilityTargetData_LocationInfo*>(Data);
-		if (LocationData)
+		const UScriptStruct* TargetDataStruct = Data->GetScriptStruct();
+		if (TargetDataStruct && TargetDataStruct->IsChildOf(FGameplayAbilityTargetData_LocationInfo::StaticStruct()))
 		{
+			const FGameplayAbilityTargetData_LocationInfo* LocationData = static_cast<const FGameplayAbilityTargetData_LocationInfo*>(Data);
 			OutLocation = LocationData->GetEndPoint();
 			return true;
 		}
@@ -349,7 +322,9 @@ void UGA_AeyerjiTargetedEffectBase::ResolveTargets(const FGameplayAbilityActorIn
 			{
 				for (const TWeakObjectPtr<AActor>& ActorPtr : Data->GetActors())
 				{
-					if (ActorPtr.IsValid() && IsTargetAllowed(ActorInfo, Config, ActorPtr.Get()))
+					if (ActorPtr.IsValid()
+						&& IsTargetAllowed(ActorInfo, Config, ActorPtr.Get())
+						&& IsWithinRange(ActorInfo, Config, ActorPtr->GetActorLocation()))
 					{
 						OutTargets.AddUnique(ActorPtr.Get());
 					}
@@ -361,6 +336,12 @@ void UGA_AeyerjiTargetedEffectBase::ResolveTargets(const FGameplayAbilityActorIn
 	{
 		GatherShapeTargets(ActorInfo, Config, OutTargetLocation, OutTargets);
 	}
+
+	OutTargets.Sort([&OutTargetLocation](const AActor& A, const AActor& B)
+	{
+		return FVector::DistSquared(A.GetActorLocation(), OutTargetLocation)
+			< FVector::DistSquared(B.GetActorLocation(), OutTargetLocation);
+	});
 
 	if (Config.MaxTargets > 0 && OutTargets.Num() > Config.MaxTargets)
 	{
@@ -378,7 +359,10 @@ void UGA_AeyerjiTargetedEffectBase::GatherShapeTargets(const FGameplayAbilityAct
 	}
 
 	const FVector Origin = Config.Shape == EAeyerjiAbilityTargetShape::GroundRadius ? TargetLocation : Avatar->GetActorLocation();
-	const float Radius = FMath::Max(Config.Radius, Config.Shape == EAeyerjiAbilityTargetShape::OwnerCone ? Config.MaxRange : 0.f);
+	const float ConfiguredRadius = Config.Shape == EAeyerjiAbilityTargetShape::OwnerCone
+		? Config.MaxRange
+		: Config.Radius;
+	const float Radius = FMath::IsFinite(ConfiguredRadius) ? FMath::Max(0.f, ConfiguredRadius) : 0.f;
 	if (Radius <= KINDA_SMALL_NUMBER)
 	{
 		return;
@@ -395,7 +379,9 @@ void UGA_AeyerjiTargetedEffectBase::GatherShapeTargets(const FGameplayAbilityAct
 		Params);
 
 	const FVector AvatarForward = Avatar->GetActorForwardVector();
-	const float HalfAngle = FMath::Clamp(Config.ArcAngleDegrees * 0.5f, 0.f, 180.f);
+	const float HalfAngle = FMath::IsFinite(Config.ArcAngleDegrees)
+		? FMath::Clamp(Config.ArcAngleDegrees * 0.5f, 0.f, 180.f)
+		: 0.f;
 
 	for (const FOverlapResult& Overlap : Overlaps)
 	{
@@ -428,7 +414,18 @@ void UGA_AeyerjiTargetedEffectBase::GatherShapeTargets(const FGameplayAbilityAct
 bool UGA_AeyerjiTargetedEffectBase::IsTargetAllowed(const FGameplayAbilityActorInfo& ActorInfo, const FAeyerjiAbilityResolvedConfig& Config, AActor* Target) const
 {
 	AActor* Avatar = ActorInfo.AvatarActor.Get();
-	if (!Target || !Avatar)
+	if (!IsValid(Target) || !IsValid(Avatar) || Target->GetWorld() != Avatar->GetWorld())
+	{
+		return false;
+	}
+	if (const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Target, true))
+	{
+		if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+		{
+			return false;
+		}
+	}
+	if (Target->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName()))
 	{
 		return false;
 	}
@@ -454,7 +451,15 @@ bool UGA_AeyerjiTargetedEffectBase::IsTargetAllowed(const FGameplayAbilityActorI
 
 bool UGA_AeyerjiTargetedEffectBase::IsWithinRange(const FGameplayAbilityActorInfo& ActorInfo, const FAeyerjiAbilityResolvedConfig& Config, const FVector& TargetLocation) const
 {
-	if (!ActorInfo.AvatarActor.IsValid() || Config.MaxRange <= KINDA_SMALL_NUMBER)
+	if (!ActorInfo.AvatarActor.IsValid() || TargetLocation.ContainsNaN())
+	{
+		return false;
+	}
+	if (!FMath::IsFinite(Config.MaxRange))
+	{
+		return false;
+	}
+	if (Config.MaxRange <= KINDA_SMALL_NUMBER)
 	{
 		return true;
 	}
@@ -473,10 +478,10 @@ float UGA_AeyerjiTargetedEffectBase::EvaluateMagnitude(const FGameplayAbilityAct
 			Value += StatValue * Magnitude.SourceStatScalar;
 		}
 	}
-	return Value;
+	return FMath::IsFinite(Value) ? Value : 0.f;
 }
 
-void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo& ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, const FAeyerjiAbilityResolvedConfig& Config, const TArray<AActor*>& Targets) const
+void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo& ActorInfo, const FAeyerjiAbilityResolvedConfig& Config, const TArray<AActor*>& Targets) const
 {
 	UAbilitySystemComponent* SourceASC = ActorInfo.AbilitySystemComponent.Get();
 	if (!SourceASC)
@@ -492,7 +497,7 @@ void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAb
 	                             const FGameplayTag& DamageTypeTag,
 	                             const FAeyerjiDamageRuleConfig& DamageRules) -> FActiveGameplayEffectHandle
 	{
-		if (!Target || !EffectClass)
+		if (!IsValid(Target) || !EffectClass)
 		{
 			return FActiveGameplayEffectHandle();
 		}
@@ -508,7 +513,8 @@ void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAb
 
 		FGameplayEffectContextHandle Context = SourceASC->MakeEffectContext();
 		Context.AddSourceObject(this);
-		FGameplayEffectSpecHandle SpecHandle = SourceASC->MakeOutgoingSpec(EffectClass, FMath::Max(0.01f, Level), Context);
+		const float SafeLevel = FMath::IsFinite(Level) ? FMath::Max(0.01f, Level) : 1.f;
+		FGameplayEffectSpecHandle SpecHandle = SourceASC->MakeOutgoingSpec(EffectClass, SafeLevel, Context);
 		if (!SpecHandle.IsValid() || !SpecHandle.Data.IsValid())
 		{
 			UE_LOG(LogTemp, Warning, TEXT("TargetedEffect: failed to create spec for %s on %s."),
@@ -517,7 +523,7 @@ void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAb
 			return FActiveGameplayEffectHandle();
 		}
 
-		if (SetByCallerTag.IsValid())
+		if (SetByCallerTag.IsValid() && FMath::IsFinite(Magnitude))
 		{
 			SpecHandle.Data->SetSetByCallerMagnitude(SetByCallerTag, Magnitude);
 		}
@@ -531,9 +537,11 @@ void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAb
 	};
 
 	const float DamageMagnitude = EvaluateMagnitude(ActorInfo, Config.Damage);
-	TSubclassOf<UGameplayEffect> DamageClass = Config.Damage.GameplayEffectClass.IsNull()
-		? UGE_DamagePhysical::StaticClass()
-		: Config.Damage.GameplayEffectClass.Get();
+	TSubclassOf<UGameplayEffect> DamageClass = UGE_DamagePhysical::StaticClass();
+	if (!Config.Damage.GameplayEffectClass.IsNull())
+	{
+		DamageClass = Config.Damage.GameplayEffectClass.LoadSynchronous();
+	}
 	const FGameplayTag DamageSetByCaller = Config.Damage.SetByCallerTag.IsValid() ? Config.Damage.SetByCallerTag : AeyerjiTags::SBC_Damage_Instant;
 	if (DamageMagnitude > KINDA_SMALL_NUMBER && DamageClass)
 	{
@@ -552,7 +560,7 @@ void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAb
 
 	for (const FAeyerjiAbilityAppliedEffect& Effect : Config.AdditionalEffects)
 	{
-		TSubclassOf<UGameplayEffect> EffectClass = Effect.GameplayEffectClass.Get();
+		TSubclassOf<UGameplayEffect> EffectClass = Effect.GameplayEffectClass.LoadSynchronous();
 		if (!EffectClass)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("TargetedEffect: Additional effect class is not loaded. SetByCaller=%s Magnitude=%.2f"),
@@ -573,41 +581,6 @@ void UGA_AeyerjiTargetedEffectBase::ApplyResolvedConfigEffects(const FGameplayAb
 					FGameplayTag(),
 					FAeyerjiDamageRuleConfig());
 
-			UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Target, true);
-			int32 StunTagCount = TargetASC ? TargetASC->GetTagCount(AeyerjiTags::State_CrowdControl_Stunned) : 0;
-
-			if (Target
-				&& Target->HasAuthority()
-				&& TargetASC
-				&& Effect.SetByCallerTag == AeyerjiTags::SBC_Stun_Duration
-				&& Effect.Magnitude > KINDA_SMALL_NUMBER
-				&& StunTagCount <= 0)
-			{
-				TargetASC->AddLooseGameplayTag(AeyerjiTags::State_CrowdControl_Stunned, 1, EGameplayTagReplicationState::TagOnly);
-				StunTagCount = TargetASC->GetTagCount(AeyerjiTags::State_CrowdControl_Stunned);
-
-				TWeakObjectPtr<UAbilitySystemComponent> WeakTargetASC = TargetASC;
-				if (UWorld* TargetWorld = Target->GetWorld())
-				{
-					FTimerHandle RemoveStunTagTimer;
-					TargetWorld->GetTimerManager().SetTimer(
-						RemoveStunTagTimer,
-						[WeakTargetASC]()
-						{
-							if (UAbilitySystemComponent* ASC = WeakTargetASC.Get())
-							{
-								ASC->RemoveLooseGameplayTag(AeyerjiTags::State_CrowdControl_Stunned, 1, EGameplayTagReplicationState::TagOnly);
-							}
-						},
-						Effect.Magnitude,
-						false);
-				}
-
-				UE_LOG(LogTemp, Warning, TEXT("TargetedEffect: Applied replicated stun fallback Target=%s Duration=%.2f StunTagCount=%d"),
-					*GetNameSafe(Target),
-					Effect.Magnitude,
-					StunTagCount);
-			}
 			if (!AppliedHandle.IsValid())
 			{
 				UE_LOG(LogTemp, Warning, TEXT("TargetedEffect: failed to apply additional effect Class=%s Target=%s."),

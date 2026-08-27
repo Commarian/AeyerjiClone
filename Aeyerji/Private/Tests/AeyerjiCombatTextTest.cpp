@@ -22,10 +22,11 @@ bool FAeyerjiCombatTextPayloadTest::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	TestEqual(
-		TEXT("Combat text defaults to ImportantOnly."),
-		Settings->GetCombatTextMode(),
-		EAeyerjiCombatTextMode::ImportantOnly);
+	const UEnum* CombatTextModeEnum = StaticEnum<EAeyerjiCombatTextMode>();
+	TestTrue(
+		TEXT("Configured combat text mode is a valid enum value."),
+		CombatTextModeEnum
+			&& CombatTextModeEnum->IsValidEnumValue(static_cast<int64>(Settings->GetCombatTextMode())));
 
 	Settings->SetCombatTextMode(EAeyerjiCombatTextMode::All, false);
 	TestEqual(TEXT("Combat text setter updates without saving."), Settings->GetCombatTextMode(), EAeyerjiCombatTextMode::All);

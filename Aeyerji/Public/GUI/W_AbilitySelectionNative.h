@@ -9,6 +9,7 @@
 #include "W_AbilitySelectionNative.generated.h"
 
 class UAbilitySystemComponent;
+class UButton;
 class UUniformGridPanel;
 class UWidget;
 class AAeyerjiPlayerState;
@@ -20,6 +21,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 );
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAbilityUpgradeRequested, FGameplayTag, AbilityTag);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAbilityPickerClosed);
 
 UENUM(BlueprintType)
 enum class EAeyerjiAbilityPickerMode : uint8
@@ -73,6 +75,7 @@ public:
 	/** Re-apply square sizing when the picker's layout changes at runtime. */
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual void NativeDestruct() override;
+	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 
 	/** Set by ActionBar right before AddToViewport(). */
 	UPROPERTY(BlueprintReadOnly)
@@ -130,12 +133,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|UI|Abilities")
 	void RebuildAbilityGrid();
 
-	/** Helper BP call: the widget finished, close itself. */
-	UFUNCTION(BlueprintCallable)
-	void Close()
-	{
-		RemoveFromParent();
-	}
+	/** Accepts one icon choice and routes it to the owning action bar using this picker's configured slot. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|UI|Abilities")
+	bool SelectAbility(const FAeyerjiAbilitySlot& SlotData);
+
+	/** Configures one assignment/upgrade session before the widget is presented. */
+	void ConfigureForSlot(int32 InEditingSlotIndex, bool bInEditingPotionSlot,
+		EAeyerjiAbilityPickerMode InPickerMode, UAbilitySystemComponent* InAbilitySystem);
+
+	/** Presents the configured picker and takes local UI focus without mutating replicated gameplay state. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|UI|Abilities")
+	void Open();
+
+	/** Closes the picker, restores gameplay input, and releases any standalone-only pause it requested. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|UI|Abilities")
+	void Close();
+
+	UFUNCTION(BlueprintPure, Category="Aeyerji|UI|Abilities")
+	bool IsOpen() const { return bPickerOpen && IsInViewport(); }
+
+	/** Allows the owning action bar to clear local menu state when this picker closes. */
+	UPROPERTY(BlueprintAssignable, Category="Events")
+	FOnAbilityPickerClosed OnAbilityPickerClosed;
 
 	/** Designers implement these to spawn/dismiss their ability tooltip widget. */
 	UFUNCTION(BlueprintImplementableEvent, Category="Aeyerji|UI|Tooltip")
@@ -145,6 +164,10 @@ public:
 	void BP_HideAbilityTooltip(const FAeyerjiAbilityTooltipData& TooltipData, UWidget* SourceWidget);
 
 protected:
+	/** Optional existing Designer save/close button. Native code binds it, so Blueprint Construct wiring is unnecessary. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional), Category="Aeyerji|UI|Abilities")
+	TObjectPtr<UButton> SaveBtn = nullptr;
+
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional), Category="Aeyerji|UI|Abilities")
 	TObjectPtr<UUniformGridPanel> UniformGridPanel_Abilities = nullptr;
 
@@ -156,6 +179,10 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|UI|Abilities")
 	bool bPopulateAbilitiesOnConstruct = true;
+
+	/** True standalone games may pause while choosing; networked worlds always continue authoritatively. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|UI|Abilities")
+	bool bPauseStandaloneGameWhileOpen = true;
 
 	/** Caches UniformGrid panels that need their entries clamped to square tiles. */
 	void RefreshManagedUniformGrids();
@@ -170,6 +197,11 @@ protected:
 	bool GetUniformGridDimensions(const UUniformGridPanel& GridPanel, int32& OutRows, int32& OutColumns) const;
 
 private:
+	UFUNCTION()
+	void HandleSaveClicked();
+
+	void EnterPickerInteraction();
+	void LeavePickerInteraction();
 	void SetActiveTooltipSource(UWidget* SourceWidget);
 	AAeyerjiPlayerState* ResolveOwningPlayerState() const;
 
@@ -177,10 +209,13 @@ private:
 	void HandleAbilityProgressionChanged(const TArray<FAeyerjiAbilityProgressEntry>& ProgressEntries, int32 RemainingPoints, int32 TotalPointSpends);
 
 	TArray<TWeakObjectPtr<UUniformGridPanel>> ManagedUniformGrids;
+	TMap<TWeakObjectPtr<UUniformGridPanel>, float> LastAppliedGridSquareSizes;
 
 	UPROPERTY()
 	FAeyerjiAbilityTooltipData LastTooltipData;
 
 	TWeakObjectPtr<UWidget> ActiveTooltipSource;
 	TWeakObjectPtr<AAeyerjiPlayerState> BoundPlayerState;
+	bool bPickerOpen = false;
+	bool bRequestedStandalonePause = false;
 };

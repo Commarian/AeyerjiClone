@@ -11,15 +11,15 @@ struct AEYERJI_API FLootSourceRule
 {
 	GENERATED_BODY()
 
-	// Higher number wins if multiple rules match.
+	/** Higher number wins if multiple rules match. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	int32 Priority = 0;
 
-	// Tag query allows "contains"/hierarchy matching and complex logic.
+	/** Tag query allows hierarchy matching and compound source conditions. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FGameplayTagQuery MatchQuery;
 
-	// The profile to apply if this rule matches.
+	/** Loot tuning profile applied when this rule wins. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FLootContext Profile;
 };
@@ -30,18 +30,16 @@ class AEYERJI_API ULootSourceRuleSet : public UDataAsset
 	GENERATED_BODY()
 
 public:
-	// Used when no rules match (your "common mob" default).
+	/** Fallback profile used when no rule matches. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	FLootContext DefaultProfile;
 
-	// Ordered/priority-based overrides.
+	/** Priority-based source overrides; equal priorities retain authored order. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly)
 	TArray<FLootSourceRule> Rules;
 
-	// Resolve the best matching profile for SourceTags and apply tuning to BaseContext.
+	/** Resolves the best profile while preserving dynamic level, player, and world-tier inputs from BaseContext. */
 	UFUNCTION(BlueprintCallable, BlueprintPure)
 	FLootContext ResolveContext(const FLootContext& BaseContext, const FGameplayTagContainer& SourceTags) const;
 
-private:
-	static float ClampNonNegative(float V) { return (V < 0.0f) ? 0.0f : V; }
 };

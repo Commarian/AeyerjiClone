@@ -3,6 +3,7 @@
 
 #include "AeyerjiObjectiveTypes.h"
 #include "CoreMinimal.h"
+#include "Director/AeyerjiSpawnerGroup.h"
 #include "GameplayTagContainer.h"
 #include "GameFramework/Actor.h"
 #include "Engine/DataAsset.h"
@@ -15,6 +16,7 @@ class AAeyerjiLevelDirector;
 class AAeyerjiSpawnerGroup;
 class AAeyerjiSpawnRegion;
 class UAeyerjiWorldSpawnProfile;
+enum class EAeyerjiEnemyRevealStyle : uint8;
 
 /**
  * Designer-authored definition describing a pool of enemies the encounter director can spawn.
@@ -70,7 +72,7 @@ public:
 	int32 RiftEliteProgressPoints = 5;
 
 	/** Returns a resolved spawn count in the configured min/max range. */
-	int32 ResolveSpawnCount() const { return (MinCount == MaxCount) ? MinCount : FMath::RandRange(MinCount, MaxCount); }
+	int32 ResolveSpawnCount() const;
 
 	/** Returns a random enemy class from the configured pool. */
 	TSubclassOf<AEnemyParentNative> ResolveEnemyClass() const;
@@ -182,6 +184,65 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift")
 	bool bRiftPreferHiddenSpawnLocations = true;
 
+	/** Distance at which a forward Rift region places its ambient attractor pack. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", Units="cm"))
+	float RiftRegionStagingDistance = 6500.f;
+
+	/** Fraction of each staged region that is immediately visible and combat active. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RiftAmbientEnemyFraction = 0.33f;
+
+	/** Number of reinforcement enemies revealed in one short presentation batch. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="1"))
+	int32 RiftRevealBatchSize = 3;
+
+	/** Delay between reinforcement reveal batches. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float RiftRevealBatchInterval = 0.15f;
+
+	/** Gameplay-lock duration supplied to the Blueprint reveal animation hook. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float RiftRevealDurationSeconds = 1.f;
+
+	/** Deterministic relative weight for climb-from-ground reinforcement presentation. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0"))
+	float RiftGroundRevealWeight = 0.75f;
+
+	/** Deterministic relative weight for drop-from-sky reinforcement presentation. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0"))
+	float RiftSkyRevealWeight = 0.25f;
+
+	/**
+	 * Maximum exact planned enemies constructed during one loading frame.
+	 * Rift prewarm temporarily ticks every frame and still respects this cap.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Prewarm", meta=(ClampMin="1"))
+	int32 RiftPrewarmActorsPerTick = 2;
+
+	/** Loading-frame game-thread budget for one exact pool-prewarm pass; actor construction itself cannot run off-thread. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Prewarm", meta=(ClampMin="0.0", Units="ms"))
+	float RiftPrewarmWorkMillisecondsPerTick = 4.f;
+
+	/** Short replication-settle delay before loading releases the prewarmed population. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Prewarm", meta=(ClampMin="0.0", Units="s"))
+	float RiftPrewarmReplicationSettleSeconds = 1.f;
+
+	/** Distance at which a sleeping Rift enemy wakes for any living participant. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float RiftEnemyWakeDistance = 8000.f;
+
+	/** Distance beyond which a Rift enemy pauses AI and becomes dormant. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float RiftEnemySleepDistance = 10000.f;
+
+	/** Maximum combat-awake ordinary Rift enemies across the party. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="1"))
+	int32 RiftMaximumAwakeEnemies = 48;
+
+	/** Only combat-active enemies inside this radius contribute to forward pressure. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float RiftPressureRadius = 8000.f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance")
 	bool bEnableEnemyLODThrottling = true;
 
@@ -230,6 +291,7 @@ enum class EEncounterDirectorState : uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FFixedClusterClearedSignature, int32, ClusterId, float, DensityAlpha, bool, bDenseCluster);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FFixedPopulationClearedSignature);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FFixedPopulationInitialSpawnCompleteSignature, AAeyerjiEncounterDirector*, Director);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FRiftPopulationPrewarmCompleteSignature, AAeyerjiEncounterDirector*, Director);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FEncounterProgressChangedSignature, float, Progress01, int32, Killed, int32, Total);
 
 /**
@@ -244,6 +306,7 @@ public:
 	AAeyerjiEncounterDirector();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -320,6 +383,14 @@ public:
 		float EncounterSizeMultiplier, float ProgressMultiplier, AAeyerjiSpawnerGroup* SpawnManager,
 		AAeyerjiLevelDirector* LevelDirector, FString& OutReason);
 
+	/** Enables staging/activation after the loading gate has completed exact population prewarm. */
+	void ActivatePreparedRiftRun();
+
+	bool IsRiftPopulationPrewarmComplete() const { return bRiftPopulationPrewarmComplete; }
+	bool IsRiftPopulationPrewarmInProgress() const { return bRiftPopulationPrewarmInProgress; }
+	int32 GetRiftPopulationPrewarmRemaining() const { return RiftPrewarmQueue.Num(); }
+	int32 GetPreparedRiftRunSerial() const { return RiftRegionRunSerial; }
+
 	/** Stops consuming unused regions while allowing already accepted region queues to finish spawning. */
 	void StopRiftRegionActivation();
 
@@ -338,9 +409,13 @@ public:
 
 #if WITH_DEV_AUTOMATION_TESTS
 	/** Test-only ledger inspection and direct native callback entry points. */
+	int32 GetTrackedEnemyCountForAutomation() const { return LiveEnemies.Num(); }
 	int32 GetRegisteredProgressPointsForAutomation(const AActor* Enemy) const;
 	void NotifyProgressEnemyDiedForAutomation(AActor* Enemy);
 	void NotifyProgressEnemyDestroyedForAutomation(AActor* Enemy);
+	void ConfigureRiftEnemyHomeForAutomation(AEnemyParentNative* Enemy, int32 RegionPlanIndex, const FVector& HomeLocation);
+	void SetEnemySleepingForAutomation(AEnemyParentNative* Enemy, bool bSleeping);
+	bool IsEnemySleepingForAutomation(const AEnemyParentNative* Enemy) const;
 #endif
 
 	/** Applies designer-owned pacing/spawn setup from DirectorDefinition. */
@@ -372,6 +447,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|FixedPopulation")
 	FFixedPopulationInitialSpawnCompleteSignature OnFixedPopulationInitialSpawnComplete;
 
+	/** Fired after the complete exact Rift population has been constructed and parked during loading. */
+	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|Rift")
+	FRiftPopulationPrewarmCompleteSignature OnRiftPopulationPrewarmComplete;
+
 	/** Fired when progress or boss state changes so UI can refresh. */
 	UPROPERTY(BlueprintAssignable, Category="EncounterDirector|Progress")
 	FEncounterProgressChangedSignature OnProgressChanged;
@@ -382,6 +461,7 @@ protected:
 	float TickIntervalSeconds = 0.2f;
 
 	void RefreshPlayerReference();
+	void SanitizeRuntimeSettings();
 	void UpdateRecentPlayerPath();
 	void CleanupInactiveEnemies();
 	void UpdateKillWindow();
@@ -458,6 +538,10 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="1"))
 	int32 MaxSpawnsPerTick = 5;
 
+	/** Wall-clock budget shared by each spawn queue pass to avoid long server-frame bursts. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="ms", AdvancedDisplay))
+	float MaxSpawnWorkMillisecondsPerTick = 2.f;
+
 	/** Minimum distance from the player for dynamic spawns (0 = no minimum). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Spawning", meta=(ClampMin="0.0", Units="cm"))
 	float MinSpawnDistanceFromPlayer = 0.f;
@@ -525,6 +609,53 @@ protected:
 	/** Prefer an occluded location first to reduce visible ordinary-enemy pop-in. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift")
 	bool bRiftPreferHiddenSpawnLocations = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", Units="cm"))
+	float RiftRegionStagingDistance = 6500.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RiftAmbientEnemyFraction = 0.33f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="1"))
+	int32 RiftRevealBatchSize = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float RiftRevealBatchInterval = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0", Units="s"))
+	float RiftRevealDurationSeconds = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0"))
+	float RiftGroundRevealWeight = 0.75f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Pacing", meta=(ClampMin="0.0"))
+	float RiftSkyRevealWeight = 0.25f;
+
+	/**
+	 * Maximum exact planned enemies constructed during one loading frame.
+	 * Rift prewarm temporarily ticks every frame and still respects this cap.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Prewarm", meta=(ClampMin="1"))
+	int32 RiftPrewarmActorsPerTick = 2;
+
+	/** Loading-frame game-thread budget for one exact pool-prewarm pass; actor construction itself cannot run off-thread. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Prewarm", meta=(ClampMin="0.0", Units="ms"))
+	float RiftPrewarmWorkMillisecondsPerTick = 4.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Prewarm", meta=(ClampMin="0.0", Units="s"))
+	float RiftPrewarmReplicationSettleSeconds = 1.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float RiftEnemyWakeDistance = 8000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float RiftEnemySleepDistance = 10000.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="1"))
+	int32 RiftMaximumAwakeEnemies = 48;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Rift|Performance", meta=(ClampMin="0.0", Units="cm"))
+	float RiftPressureRadius = 8000.f;
 
 	/** When true, enemy tick rates are throttled based on distance to the player. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="EncounterDirector|Performance")
@@ -630,8 +761,8 @@ private:
 	AAeyerjiLevelDirector* ResolveObjectiveLevelDirector() const;
 	// Recomputes distance-based tick throttling for active enemies.
 	void UpdateEnemyLOD(float DeltaSeconds);
-	// Sleeps or wakes fixed clusters based on player distance.
-	void UpdateFixedClusterLOD(const FVector& PlayerLocation);
+	// Sleeps or wakes fixed clusters based on the nearest living party participant.
+	void UpdateFixedClusterLOD(const TArray<APawn*>& LivingParticipants);
 	// Applies the requested sleep state to all members of a fixed cluster.
 	void ApplyFixedClusterSleepState(int32 ClusterId, bool bSleep);
 	// Enables or disables ticking and AI for a single enemy when sleeping.
@@ -642,6 +773,8 @@ private:
 	FEnemyLODState& GetOrCreateEnemyLODState(AEnemyParentNative* Enemy);
 	// Removes cached LOD state for a destroyed enemy.
 	void RemoveEnemyLODState(AActor* Enemy);
+	// Publishes Rift population counts to Unreal Insights counters.
+	void UpdateRiftTraceCounters() const;
 	// Removes an enemy from its fixed cluster membership list.
 	void RemoveFixedClusterMember(int32 ClusterId, AActor* Enemy);
 	const UEnemySpawnGroupDefinition* ChooseFixedSpawnGroup(const TArray<FFixedSpawnGroupEntry>& Groups);
@@ -652,9 +785,16 @@ private:
 	void HandleFixedPopulationClusterDecrement(int32 ClusterId);
 	void NotifyFixedPopulationInitialSpawnComplete();
 	void ResetRiftRegionRun();
+	void ProcessRiftPopulationPrewarm();
+	void FinalizeRiftPopulationPrewarm();
 	void ProcessRiftRegionActivation();
 	void ProcessRiftSpawnQueue();
-	bool TryActivateRiftEncounterGroup(int32 PlanIndex, APawn* Participant, const TCHAR* ActivationReason);
+	void UpdateRiftRevealStates();
+	bool TryStageRiftEncounterGroup(int32 PlanIndex, APawn* Participant, const TCHAR* ActivationReason);
+	bool TryBeginRiftEncounterReveal(int32 PlanIndex, APawn* Participant, const TCHAR* ActivationReason);
+	void RetireAndRedistributeSkippedRiftRegions(int32 NewFrontierIndex);
+	EAeyerjiEnemyRevealStyle ResolveRiftRevealStyle();
+	bool IsRiftAmbientGroupEngaged(const FRiftRegionPlan& Plan) const;
 	int32 FindRiftPressureActivationCandidate(APawn*& OutParticipant) const;
 	int32 GetActiveRiftEnemyPressure() const;
 	void GetLivingRiftParticipants(TArray<APawn*>& OutParticipants) const;
@@ -665,7 +805,7 @@ private:
 		FVector& OutLocation, FString& OutRejectReason);
 	bool IsRiftSpawnLocationSafe(const FVector& Candidate, const TArray<APawn*>& LivingParticipants,
 		bool& bOutVisibleToParticipant, FString& OutRejectReason) const;
-	bool SpawnRiftRequest(FRiftSpawnRequest& Request);
+	bool SpawnRiftRequest(FRiftSpawnRequest& Request, AEnemyParentNative** OutSpawnedEnemy = nullptr);
 	FGameplayTag ResolveArchetypeTagFromClass(TSubclassOf<AEnemyParentNative> EnemyClass) const;
 	void ResetProgress(int32 NewTotal);
 	void UpdateTotalToKill(int32 NewTotal);
@@ -721,7 +861,10 @@ private:
 		bool bCachedPerception = false;
 		bool bSleeping = false;
 		bool bPausedByLOD = false;
+		bool bHasRiftHome = false;
 		uint8 LODBucket = 255;
+		int32 RiftRegionPlanIndex = INDEX_NONE;
+		FVector RiftHomeLocation = FVector::ZeroVector;
 		float BaseMovementTickInterval = 0.f;
 		bool bMovementTickEnabled = true;
 		float BaseMeshTickInterval = 0.f;
@@ -744,6 +887,15 @@ private:
 
 	struct FRiftRegionPlan
 	{
+		enum class EState : uint8
+		{
+			Planned,
+			Staged,
+			Revealing,
+			Active,
+			Retired
+		};
+
 		TWeakObjectPtr<AAeyerjiSpawnRegion> Region;
 		TWeakObjectPtr<const UEnemySpawnGroupDefinition> EncounterGroup;
 		FBox Bounds = FBox(EForceInit::ForceInit);
@@ -752,7 +904,11 @@ private:
 		float Weight = 1.f;
 		int32 Budget = 0;
 		int32 ReservedProgress = 0;
-		bool bConsumed = false;
+		int32 ProgressionIndex = INDEX_NONE;
+		int32 PendingRevealCount = 0;
+		double RevealCompleteTime = 0.0;
+		EState State = EState::Planned;
+		TArray<TWeakObjectPtr<AEnemyParentNative>> AmbientEnemies;
 	};
 
 	struct FRiftSpawnRequest
@@ -762,6 +918,8 @@ private:
 		int32 ProgressPoints = 1;
 		bool bIsElite = false;
 		int32 FailedAttempts = 0;
+		double EarliestSpawnTime = 0.0;
+		EAeyerjiEnemyRevealStyle RevealStyle = static_cast<EAeyerjiEnemyRevealStyle>(0);
 	};
 
 	struct FRecentPlayerSample
@@ -785,6 +943,7 @@ private:
 	TArray<FRiftRegionPlan> RiftRegionPlans;
 	TArray<TArray<FRiftSpawnRequest>> RiftReservedRegionRequests;
 	TArray<FRiftSpawnRequest> RiftSpawnQueue;
+	TArray<FEnemySet> RiftPrewarmQueue;
 	/** Prevents one stationary participant from consuming every nearby/overlapping region on consecutive ticks. */
 	TMap<TWeakObjectPtr<APawn>, TWeakObjectPtr<AAeyerjiSpawnRegion>> RiftParticipantRegionLatch;
 	TArray<FVector> FixedClusterCenters;
@@ -811,11 +970,20 @@ private:
 	bool bSpawnedPopulationSpawner = false;
 	bool bSpawnedRiftPopulationSpawner = false;
 	bool bRiftRegionActivationEnabled = false;
+	bool bRiftPopulationPrewarmInProgress = false;
+	bool bRiftPopulationPrewarmComplete = false;
 	float RiftRegionActivationDistance = 2500.f;
 	float RiftEliteRateMultiplier = 1.f;
 	float RiftProgressMultiplier = 1.f;
 	double NextRiftPressureEvaluationTime = 0.0;
+	double RiftPrewarmFinalizeTime = 0.0;
+	/** Real-time diagnostics distinguish unavoidable actor construction from frame-scheduling delay. */
+	double RiftPrewarmStartPlatformSeconds = 0.0;
+	double RiftPrewarmGameThreadWorkSeconds = 0.0;
+	int32 RiftPrewarmConstructionPasses = 0;
+	int32 RiftPrewarmInitialPopulation = 0;
 	int32 RiftRegionRunSerial = 0;
+	int32 HighestRiftProgressionIndex = INDEX_NONE;
 	FVector LastEncounterLocation = FVector::ZeroVector;
 	double LastEncounterTimestamp = 0.0;
 	double LastKillTimestamp = 0.0;

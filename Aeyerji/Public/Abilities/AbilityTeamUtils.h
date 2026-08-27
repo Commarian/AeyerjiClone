@@ -43,6 +43,20 @@ namespace AbilityTeamUtils
 
 	inline bool AreOnSameTeam(const AActor* A, const AActor* B)
 	{
-		return ResolveTeamId(A) == ResolveTeamId(B);
+		if (!A || !B)
+		{
+			return false;
+		}
+		if (A == B)
+		{
+			return true;
+		}
+
+		const FGenericTeamId TeamA = ResolveTeamId(A);
+		const FGenericTeamId TeamB = ResolveTeamId(B);
+		// NoTeam means unknown affiliation, not a shared friendly faction.
+		return TeamA != FGenericTeamId::NoTeam
+			&& TeamB != FGenericTeamId::NoTeam
+			&& TeamA == TeamB;
 	}
 }

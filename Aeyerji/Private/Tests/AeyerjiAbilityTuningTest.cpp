@@ -9,10 +9,13 @@
 #include "Abilities/GravitonPull/GA_AGGravitonPull.h"
 #include "AeyerjiGameplayTags.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "Engine/GameInstance.h"
 #include "GameFramework/Actor.h"
 #include "GAS/GE_AeyerjiAbilityCooldown.h"
 #include "GAS/GE_AeyerjiAbilityCostMana.h"
 #include "GUI/AbilityTooltipData.h"
+
+#include <limits>
 
 namespace
 {
@@ -206,7 +209,8 @@ bool FAeyerjiAbilityRankMergeTest::RunTest(const FString& Parameters)
 	UDataTable* BaseTable = MakeAbilityTable(GetTransientPackage());
 	UDataTable* RankTable = MakeAbilityRankTable(GetTransientPackage());
 
-	UAeyerjiAbilityTuningSubsystem* Tuning = NewObject<UAeyerjiAbilityTuningSubsystem>(GetTransientPackage());
+	UGameInstance* GameInstance = NewObject<UGameInstance>(GetTransientPackage());
+	UAeyerjiAbilityTuningSubsystem* Tuning = NewObject<UAeyerjiAbilityTuningSubsystem>(GameInstance);
 	Tuning->SetRuntimeAbilityTuningTable(BaseTable);
 	Tuning->SetRuntimeAbilityRankTuningTable(RankTable);
 
@@ -223,6 +227,71 @@ bool FAeyerjiAbilityRankMergeTest::RunTest(const FString& Parameters)
 	float PullDistance = 0.f;
 	TestTrue(TEXT("Rank tunable overlay resolves by key."), Config.TryGetFloatTunable(AeyerjiTags::SBC_Damage_Instant, PullDistance));
 	TestEqual(TEXT("Rank tunable overlay replaces the base value."), PullDistance, 1800.f);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiAbilityTuningSanitizationTest,
+	"Aeyerji.Abilities.Tuning.RuntimeSanitization",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiAbilityTuningSanitizationTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	FAeyerjiAbilityTableRow Row;
+	Row.AbilityTag = FGameplayTag::RequestGameplayTag(TEXT("Ability.AG.GravitonPull"), false);
+	Row.RequiredLevel = -7;
+	Row.Cost.ManaCost = std::numeric_limits<float>::infinity();
+	Row.Cost.Cooldown = -5.f;
+	Row.MaxRange = std::numeric_limits<float>::quiet_NaN();
+	Row.Radius = -10.f;
+	Row.ArcAngleDegrees = 300.f;
+	Row.MaxTargets = MAX_int32;
+	Row.Shape = static_cast<EAeyerjiAbilityTargetShape>(255);
+	Row.Damage.SourceStat = static_cast<EAeyerjiStat>(255);
+	Row.Damage.ArmorPenetration = 4.f;
+	Row.Damage.VarianceOverride = 1.f;
+	Row.Visuals.MontagePlayRate = std::numeric_limits<float>::quiet_NaN();
+	Row.Visuals.NiagaraOffset.X = std::numeric_limits<double>::infinity();
+
+	FAeyerjiAbilityFloatTunable InvalidFloat;
+	InvalidFloat.Key = AeyerjiTags::SBC_Damage_Instant;
+	InvalidFloat.Value = std::numeric_limits<float>::infinity();
+	Row.FloatTunables.Add(InvalidFloat);
+
+	FAeyerjiAbilityBoolTunable DuplicateA;
+	DuplicateA.Key = AeyerjiTags::DamageType_Physical;
+	DuplicateA.Value = true;
+	FAeyerjiAbilityBoolTunable DuplicateB = DuplicateA;
+	DuplicateB.Value = false;
+	Row.BoolTunables = {DuplicateA, DuplicateB};
+
+	FAeyerjiAbilityAppliedEffect InvalidEffect;
+	InvalidEffect.Magnitude = 10.f;
+	Row.AdditionalEffects.Add(InvalidEffect);
+
+	FAeyerjiAbilityResolvedConfig Config;
+	TestTrue(TEXT("Malformed authored row still resolves safely."),
+		UAeyerjiAbilityTuningSubsystem::MakeResolvedConfigFromBaseRow(Row, Config));
+	TestEqual(TEXT("Required level is bounded."), Config.RequiredLevel, 1);
+	TestEqual(TEXT("Non-finite mana cost is neutralized."), Config.Cost.ManaCost, 0.f);
+	TestEqual(TEXT("Negative cooldown is neutralized."), Config.Cost.Cooldown, 0.f);
+	TestEqual(TEXT("Non-finite range is neutralized."), Config.MaxRange, 0.f);
+	TestEqual(TEXT("Negative radius is neutralized."), Config.Radius, 0.f);
+	TestEqual(TEXT("Arc is bounded."), Config.ArcAngleDegrees, 180.f);
+	TestEqual(TEXT("Target count is bounded."), Config.MaxTargets, 256);
+	TestEqual(TEXT("Invalid target shape falls back safely."), Config.Shape, EAeyerjiAbilityTargetShape::SingleActor);
+	TestEqual(TEXT("Invalid source stat falls back safely."), Config.Damage.SourceStat, EAeyerjiStat::None);
+	TestEqual(TEXT("Armor penetration is bounded."), Config.Damage.ArmorPenetration, 1.f);
+	TestEqual(TEXT("Variance is bounded."), Config.Damage.VarianceOverride, 0.95f);
+	TestEqual(TEXT("Invalid montage rate falls back safely."), Config.Visuals.MontagePlayRate, 1.f);
+	TestTrue(TEXT("Invalid Niagara offset falls back safely."), Config.Visuals.NiagaraOffset.IsNearlyZero());
+	TestEqual(TEXT("Non-finite float tunables are discarded."), Config.FloatTunables.Num(), 0);
+	TestEqual(TEXT("Duplicate tunable keys are deterministic."), Config.BoolTunables.Num(), 1);
+	TestTrue(TEXT("First duplicate tunable value wins."), Config.BoolTunables[0].Value);
+	TestEqual(TEXT("Effects without a class are discarded."), Config.AdditionalEffects.Num(), 0);
 
 	return true;
 }

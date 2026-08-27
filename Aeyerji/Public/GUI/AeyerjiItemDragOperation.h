@@ -37,7 +37,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Inventory")
 	FIntPoint OriginalTopLeft = FIntPoint::ZeroValue;
 
-	/** Mouse offset (in pixels) relative to the tile when drag started. */
+	/** Mouse offset in the tile's local Slate units when the drag started. */
 	UPROPERTY(BlueprintReadOnly, Category = "Aeyerji|Inventory")
 	FVector2D GrabOffsetPx = FVector2D::ZeroVector;
 

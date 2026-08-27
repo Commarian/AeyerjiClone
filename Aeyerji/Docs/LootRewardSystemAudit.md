@@ -137,6 +137,7 @@ The pool match is hierarchical: a runtime tag such as `Loot.Source.Mobs.Grunt` c
 | `MinimumRarity` | Applies rarity floor. |
 | `PitySuccessRarity` | Defines what counts as named pity success. |
 | `DifficultyScale` | Defaults invalid values back to 1. |
+| `RewardQualityMultiplier` | Clamps to a finite non-negative scalar and biases rarity without changing item level. |
 | `RarityWeights` | Negative weights clamp to zero. |
 | `ItemLevelJitterMin/Max` | Swapped when min > max. |
 | `PitySoftStartOverride`, `PitySoftSlopeOverride`, `PityHardAttemptsOverride`, `PityMaxChanceOverride` | Negative values normalize to the "use service default" sentinel; max chance clamps to 0..1. |
@@ -224,8 +225,8 @@ Current Aeyerji automation suite includes:
 | `Aeyerji.Inventory.LegacySnapshotLoad` | Legacy snapshot with only `Definition` still loads and round-trips with `DefinitionKey`. |
 | `Aeyerji.Loot.PityMemory` | Named pity memory records attempts, source tag, successes, and last dropped definition key. |
 | `Aeyerji.Loot.PityChance` | Named pity hard/soft thresholds affect legendary chance. |
-| `Aeyerji.Loot.SourceRuleSetProfile` | Source-rule profiles propagate source/pity/rarity/pity override fields. |
-| `Aeyerji.Loot.SourceRuleSetSanitizes` | Source-rule context sanitizes invalid probabilities, weights, difficulty, jitter, and pity sentinels. |
+| `Aeyerji.Loot.SourceRuleSetProfile` | Source-rule profiles propagate source, pity, rarity, reward-quality, and pity override fields. |
+| `Aeyerji.Loot.SourceRuleSetSanitizes` | Source-rule context sanitizes invalid probabilities, weights, difficulty, reward quality, jitter, and pity sentinels. |
 | `Aeyerji.Save.ProfileSerialization` | Character profile roundtrip for progression, selections, inventory/equipment, loot stats, and world-state entries. |
 | `Aeyerji.Save.ProfileLargePayloadSerialization` | Large profile payload serialization over the legacy 65 KB RPC risk threshold. |
 | `Aeyerji.WorldState.Types` | World-state key/value copy, equality, numeric compare, and data-only behavior. |

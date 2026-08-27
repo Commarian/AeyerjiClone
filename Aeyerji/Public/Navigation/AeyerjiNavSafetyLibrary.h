@@ -53,18 +53,23 @@ struct AEYERJI_API FAeyerjiNavSafetyResult
 {
 	GENERATED_BODY()
 
+	/** True only when both navigation projection and grounding succeeded. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Navigation")
 	bool bSuccess = false;
 
+	/** Original finite location submitted by the caller. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Navigation")
 	FVector RequestedLocation = FVector::ZeroVector;
 
+	/** Point returned by the navigation projection. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Navigation")
 	FVector NavLocation = FVector::ZeroVector;
 
+	/** Capsule-safe grounded location suitable for an authority teleport. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Navigation")
 	FVector GroundedLocation = FVector::ZeroVector;
 
+	/** Stable diagnostic key describing the last failed resolution stage. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Navigation")
 	FName FailureReason = NAME_None;
 };

@@ -47,13 +47,26 @@ EStateTreeRunStatus USTT_FocusTargetTask::EnterState(FStateTreeExecutionContext&
     return EStateTreeRunStatus::Succeeded;
 }
 
-// No Tick needed; focus remains set until ExitState.
+// No Tick needed; AEnemyAIController owns target/focus lifetime between StateTree branch transitions.
 
 void USTT_FocusTargetTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition)
 {
-    // When the state ends or this task is interrupted, clear the focus.
     if (AAIController* AI = Cast<AAIController>(Context.GetOwner()))
     {
-        AI->ClearFocus(EAIFocusPriority::Gameplay);
+        bool bKeepEnemyTargetFocus = false;
+        if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
+        {
+            const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(AI->GetPawn());
+            bKeepEnemyTargetFocus = IsValid(EnemyAI->GetTargetActor())
+                && (!ControlledCharacter || !ControlledCharacter->IsCrowdControlled());
+        }
+
+        // A StateTree combat branch ending is not a target-loss event. Retaining the
+        // controller-owned target prevents desired yaw from falling back to Detour
+        // Crowd's rapidly alternating avoidance direction between branch transitions.
+        if (!bKeepEnemyTargetFocus)
+        {
+            AI->ClearFocus(EAIFocusPriority::Gameplay);
+        }
     }
 }

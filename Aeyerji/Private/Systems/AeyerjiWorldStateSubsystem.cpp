@@ -11,9 +11,129 @@
 
 namespace
 {
+	constexpr int32 MaxWorldStateEntries = 8192;
+	constexpr int32 MaxWorldStateDebugEntries = 8192;
+	constexpr int32 MaxWorldStateStringLength = 4096;
+	constexpr int32 MaxWorldStateSoftPathLength = 1024;
+
 	bool IsRuntimeGameWorld(const UWorld* World)
 	{
 		return World && (World->WorldType == EWorldType::Game || World->WorldType == EWorldType::PIE);
+	}
+
+	bool IsValidPersistence(const EAeyerjiWorldStatePersistence Value)
+	{
+		return Value == EAeyerjiWorldStatePersistence::RuntimeOnly
+			|| Value == EAeyerjiWorldStatePersistence::Persistent;
+	}
+
+	bool IsValidReplication(const EAeyerjiWorldStateReplication Value)
+	{
+		return Value == EAeyerjiWorldStateReplication::ServerOnly
+			|| Value == EAeyerjiWorldStateReplication::PublicReplicated;
+	}
+
+	bool IsValidScope(const EAeyerjiWorldStateScope Value)
+	{
+		return Value == EAeyerjiWorldStateScope::Global
+			|| Value == EAeyerjiWorldStateScope::Run
+			|| Value == EAeyerjiWorldStateScope::Character
+			|| Value == EAeyerjiWorldStateScope::Session;
+	}
+
+	bool SanitizeWorldStateValue(
+		const FAeyerjiWorldStateValue& InValue,
+		const UWorld* ExpectedWorld,
+		FAeyerjiWorldStateValue& OutValue)
+	{
+		switch (InValue.Type)
+		{
+		case EAeyerjiWorldStateValueType::None:
+			OutValue = FAeyerjiWorldStateValue();
+			return true;
+		case EAeyerjiWorldStateValueType::Bool:
+			OutValue = FAeyerjiWorldStateValue::FromBool(InValue.BoolValue);
+			return true;
+		case EAeyerjiWorldStateValueType::Int:
+			OutValue = FAeyerjiWorldStateValue::FromInt(InValue.IntValue);
+			return true;
+		case EAeyerjiWorldStateValueType::Float:
+			if (!FMath::IsFinite(InValue.FloatValue))
+			{
+				return false;
+			}
+			OutValue = FAeyerjiWorldStateValue::FromFloat(FMath::Clamp(InValue.FloatValue, -1.0e30f, 1.0e30f));
+			return true;
+		case EAeyerjiWorldStateValueType::Name:
+			OutValue = FAeyerjiWorldStateValue::FromName(InValue.NameValue);
+			return true;
+		case EAeyerjiWorldStateValueType::String:
+			OutValue = FAeyerjiWorldStateValue::FromString(InValue.StringValue.Left(MaxWorldStateStringLength));
+			return true;
+		case EAeyerjiWorldStateValueType::GameplayTag:
+			OutValue = FAeyerjiWorldStateValue::FromGameplayTag(InValue.TagValue);
+			return true;
+		case EAeyerjiWorldStateValueType::SoftObjectPath:
+			if (!InValue.SoftObjectPathValue.IsValid()
+				|| InValue.SoftObjectPathValue.ToString().Len() > MaxWorldStateSoftPathLength)
+			{
+				return false;
+			}
+			OutValue = FAeyerjiWorldStateValue::FromSoftObjectPath(InValue.SoftObjectPathValue);
+			return true;
+		case EAeyerjiWorldStateValueType::Object:
+		{
+			UObject* LiveObject = InValue.ObjectValue.Get();
+			if (LiveObject && (!IsValid(LiveObject)
+				|| (LiveObject->GetWorld() && ExpectedWorld && LiveObject->GetWorld() != ExpectedWorld)))
+			{
+				return false;
+			}
+			const FSoftObjectPath SoftPath = LiveObject ? FSoftObjectPath(LiveObject) : InValue.SoftObjectPathValue;
+			if (!LiveObject && !SoftPath.IsValid())
+			{
+				return false;
+			}
+			if (SoftPath.IsValid() && SoftPath.ToString().Len() > MaxWorldStateSoftPathLength)
+			{
+				return false;
+			}
+			OutValue = FAeyerjiWorldStateValue::FromObject(LiveObject);
+			OutValue.Type = EAeyerjiWorldStateValueType::Object;
+			OutValue.SoftObjectPathValue = SoftPath;
+			return true;
+		}
+		default:
+			return false;
+		}
+	}
+
+	int32 NextWorldStateVersion(const int32 CurrentVersion)
+	{
+		return CurrentVersion >= MAX_int32 ? MAX_int32 : FMath::Max(CurrentVersion + 1, 1);
+	}
+
+	bool SanitizeWorldStateEntry(
+		const FAeyerjiWorldStateEntry& InEntry,
+		const UWorld* ExpectedWorld,
+		FAeyerjiWorldStateEntry& OutEntry)
+	{
+		if (!InEntry.Key.IsValid() || !IsValidPersistence(InEntry.Persistence)
+			|| !IsValidReplication(InEntry.Replication) || !IsValidScope(InEntry.Scope))
+		{
+			return false;
+		}
+
+		FAeyerjiWorldStateValue SanitizedValue;
+		if (!SanitizeWorldStateValue(InEntry.Value, ExpectedWorld, SanitizedValue))
+		{
+			return false;
+		}
+
+		OutEntry = InEntry.MakeDataOnlyCopy();
+		OutEntry.Value = MoveTemp(SanitizedValue);
+		OutEntry.Version = FMath::Clamp(InEntry.Version, 0, MAX_int32);
+		return true;
 	}
 }
 
@@ -72,17 +192,27 @@ FAeyerjiWorldStateKey UAeyerjiWorldStateSubsystem::MakeWorldStateKey(const FGame
 
 bool UAeyerjiWorldStateSubsystem::SetValue(const FAeyerjiWorldStateKey& Key, const FAeyerjiWorldStateValue& Value, const EAeyerjiWorldStatePersistence Persistence, const EAeyerjiWorldStateReplication Replication, const EAeyerjiWorldStateScope Scope)
 {
-	if (!Key.IsValid() || !HasWriteAuthority())
+	if (!Key.IsValid() || !HasWriteAuthority() || !IsValidPersistence(Persistence)
+		|| !IsValidReplication(Replication) || !IsValidScope(Scope))
 	{
 		return false;
 	}
 
 	EnsurePersistentStateLoaded();
+	FAeyerjiWorldStateValue SanitizedValue;
+	if (!SanitizeWorldStateValue(Value, GetWorld(), SanitizedValue))
+	{
+		return false;
+	}
 
 	FAeyerjiWorldStateEntry* ExistingEntry = Entries.Find(Key);
+	if (!ExistingEntry && Entries.Num() >= MaxWorldStateEntries)
+	{
+		return false;
+	}
 	const bool bExistingReplicated = ExistingEntry && ExistingEntry->Replication == EAeyerjiWorldStateReplication::PublicReplicated;
 	const bool bChanged = !ExistingEntry
-		|| !ExistingEntry->Value.Equals(Value)
+		|| !ExistingEntry->Value.Equals(SanitizedValue)
 		|| ExistingEntry->Persistence != Persistence
 		|| ExistingEntry->Replication != Replication
 		|| ExistingEntry->Scope != Scope;
@@ -99,11 +229,11 @@ bool UAeyerjiWorldStateSubsystem::SetValue(const FAeyerjiWorldStateKey& Key, con
 	}
 
 	Entry.Key = Key;
-	Entry.Value = Value;
+	Entry.Value = MoveTemp(SanitizedValue);
 	Entry.Persistence = Persistence;
 	Entry.Replication = Replication;
 	Entry.Scope = Scope;
-	Entry.Version = FMath::Max(Entry.Version + 1, 1);
+	Entry.Version = NextWorldStateVersion(Entry.Version);
 	Entry.LastUpdatedUtc = FDateTime::UtcNow();
 
 	Entries.Add(Key, Entry);
@@ -177,7 +307,7 @@ bool UAeyerjiWorldStateSubsystem::ClearValue(const FAeyerjiWorldStateKey& Key)
 
 bool UAeyerjiWorldStateSubsystem::ClearEntriesByScope(const EAeyerjiWorldStateScope Scope)
 {
-	if (!HasWriteAuthority())
+	if (!HasWriteAuthority() || !IsValidScope(Scope))
 	{
 		return false;
 	}
@@ -277,13 +407,29 @@ bool UAeyerjiWorldStateSubsystem::IncrementInt(const FAeyerjiWorldStateKey& Key,
 		switch (ExistingValue.Type)
 		{
 		case EAeyerjiWorldStateValueType::Bool:
-			OutNewValue = (ExistingValue.BoolValue ? 1 : 0) + Delta;
+			OutNewValue = static_cast<int32>(FMath::Clamp(
+				static_cast<int64>(ExistingValue.BoolValue ? 1 : 0) + Delta,
+				static_cast<int64>(MIN_int32),
+				static_cast<int64>(MAX_int32)));
 			break;
 		case EAeyerjiWorldStateValueType::Int:
-			OutNewValue = ExistingValue.IntValue + Delta;
+			OutNewValue = static_cast<int32>(FMath::Clamp(
+				static_cast<int64>(ExistingValue.IntValue) + Delta,
+				static_cast<int64>(MIN_int32),
+				static_cast<int64>(MAX_int32)));
 			break;
 		case EAeyerjiWorldStateValueType::Float:
-			OutNewValue = FMath::RoundToInt(ExistingValue.FloatValue) + Delta;
+			if (!FMath::IsFinite(ExistingValue.FloatValue))
+			{
+				return false;
+			}
+			OutNewValue = static_cast<int32>(FMath::Clamp(
+				FMath::RoundToInt64(FMath::Clamp(
+					static_cast<double>(ExistingValue.FloatValue),
+					static_cast<double>(MIN_int32),
+					static_cast<double>(MAX_int32))) + Delta,
+				static_cast<int64>(MIN_int32),
+				static_cast<int64>(MAX_int32)));
 			break;
 		default:
 			return false;
@@ -299,7 +445,8 @@ bool UAeyerjiWorldStateSubsystem::IncrementInt(const FAeyerjiWorldStateKey& Key,
 
 bool UAeyerjiWorldStateSubsystem::RegisterLiveObject(const FAeyerjiWorldStateKey& Key, UObject* Object, const EAeyerjiWorldStatePersistence Persistence, const EAeyerjiWorldStateReplication Replication, const EAeyerjiWorldStateScope Scope)
 {
-	if (!Object)
+	if (!IsValid(Object) || !HasWriteAuthority()
+		|| (Object->GetWorld() && Object->GetWorld() != GetWorld()))
 	{
 		return false;
 	}
@@ -333,7 +480,7 @@ bool UAeyerjiWorldStateSubsystem::UnregisterLiveObject(const FAeyerjiWorldStateK
 	}
 
 	Entry->Value.ObjectValue.Reset();
-	Entry->Version = FMath::Max(Entry->Version + 1, 1);
+	Entry->Version = NextWorldStateVersion(Entry->Version);
 	Entry->LastUpdatedUtc = FDateTime::UtcNow();
 	if (ShouldPersistToSharedWorldSave(*Entry))
 	{
@@ -393,18 +540,44 @@ bool UAeyerjiWorldStateSubsystem::LoadPersistentState()
 		return false;
 	}
 
-	Entries.Reset();
-	for (const FAeyerjiWorldStateEntry& SavedEntry : SaveData->Entries)
+	// Reload only the shared-persistent lane so an explicit runtime reload cannot erase active run,
+	// session, or character-profile facts.
+	TArray<FAeyerjiWorldStateKey> PreviousSharedKeys;
+	for (const TPair<FAeyerjiWorldStateKey, FAeyerjiWorldStateEntry>& Pair : Entries)
 	{
-		if (!SavedEntry.Key.IsValid())
+		if (ShouldPersistToSharedWorldSave(Pair.Value))
+		{
+			PreviousSharedKeys.Add(Pair.Key);
+		}
+	}
+	for (const FAeyerjiWorldStateKey& PreviousKey : PreviousSharedKeys)
+	{
+		Entries.Remove(PreviousKey);
+		RemoveEntryFromReplication(PreviousKey);
+		BroadcastEntryRemoved(PreviousKey);
+	}
+
+	const int32 SavedEntryCount = FMath::Min(SaveData->Entries.Num(), MaxWorldStateEntries);
+	for (int32 SavedEntryIndex = 0; SavedEntryIndex < SavedEntryCount; ++SavedEntryIndex)
+	{
+		FAeyerjiWorldStateEntry Entry;
+		if (!SanitizeWorldStateEntry(SaveData->Entries[SavedEntryIndex], GetWorld(), Entry))
 		{
 			continue;
 		}
 
-		FAeyerjiWorldStateEntry Entry = SavedEntry.MakeDataOnlyCopy();
 		Entry.Persistence = EAeyerjiWorldStatePersistence::Persistent;
 		Entry.Scope = EAeyerjiWorldStateScope::Global;
+		if (!Entries.Contains(Entry.Key) && Entries.Num() >= MaxWorldStateEntries)
+		{
+			break;
+		}
 		Entries.Add(Entry.Key, Entry);
+		BroadcastEntryChanged(Entry);
+		if (Entry.Replication == EAeyerjiWorldStateReplication::PublicReplicated)
+		{
+			PublishEntryForReplication(Entry);
+		}
 	}
 
 	bPersistentStateLoaded = true;
@@ -440,9 +613,15 @@ bool UAeyerjiWorldStateSubsystem::SavePersistentState()
 
 	for (const TPair<FAeyerjiWorldStateKey, FAeyerjiWorldStateEntry>& Pair : Entries)
 	{
-		if (ShouldPersistToSharedWorldSave(Pair.Value))
+		if (SaveData->Entries.Num() >= MaxWorldStateEntries)
 		{
-			SaveData->Entries.Add(Pair.Value.MakeDataOnlyCopy());
+			break;
+		}
+		FAeyerjiWorldStateEntry SanitizedEntry;
+		if (ShouldPersistToSharedWorldSave(Pair.Value)
+			&& SanitizeWorldStateEntry(Pair.Value, GetWorld(), SanitizedEntry))
+		{
+			SaveData->Entries.Add(MoveTemp(SanitizedEntry));
 		}
 	}
 
@@ -553,6 +732,10 @@ void UAeyerjiWorldStateSubsystem::GetRunFactDebugStrings(TArray<FString>& OutFac
 	OutFacts.Reset();
 	for (const TPair<FAeyerjiWorldStateKey, FAeyerjiWorldStateEntry>& Pair : Entries)
 	{
+		if (OutFacts.Num() >= MaxWorldStateDebugEntries)
+		{
+			break;
+		}
 		const FAeyerjiWorldStateEntry& Entry = Pair.Value;
 		if (Entry.Scope == EAeyerjiWorldStateScope::Run)
 		{
@@ -568,6 +751,10 @@ void UAeyerjiWorldStateSubsystem::GetPersistentFactDebugStrings(TArray<FString>&
 	OutFacts.Reset();
 	for (const TPair<FAeyerjiWorldStateKey, FAeyerjiWorldStateEntry>& Pair : Entries)
 	{
+		if (OutFacts.Num() >= MaxWorldStateDebugEntries)
+		{
+			break;
+		}
 		const FAeyerjiWorldStateEntry& Entry = Pair.Value;
 		if (Entry.Persistence == EAeyerjiWorldStatePersistence::Persistent)
 		{
@@ -678,6 +865,10 @@ bool UAeyerjiWorldStateSubsystem::ExportPersistentCharacterState(const FName Own
 
 	for (const TPair<FAeyerjiWorldStateKey, FAeyerjiWorldStateEntry>& Pair : Entries)
 	{
+		if (OutEntries.Num() >= MaxWorldStateEntries)
+		{
+			break;
+		}
 		const FAeyerjiWorldStateEntry& Entry = Pair.Value;
 		if (Entry.Scope == EAeyerjiWorldStateScope::Character
 			&& Entry.Persistence == EAeyerjiWorldStatePersistence::Persistent
@@ -723,17 +914,21 @@ bool UAeyerjiWorldStateSubsystem::ImportPersistentCharacterState(const FName Own
 		}
 	}
 
-	for (const FAeyerjiWorldStateEntry& SavedEntry : InEntries)
+	const int32 ImportEntryCount = FMath::Min(InEntries.Num(), MaxWorldStateEntries);
+	for (int32 ImportEntryIndex = 0; ImportEntryIndex < ImportEntryCount; ++ImportEntryIndex)
 	{
-		if (!SavedEntry.Key.IsValid())
+		FAeyerjiWorldStateEntry Entry;
+		if (!SanitizeWorldStateEntry(InEntries[ImportEntryIndex], GetWorld(), Entry))
 		{
 			continue;
 		}
-
-		FAeyerjiWorldStateEntry Entry = SavedEntry.MakeDataOnlyCopy();
 		Entry.Key.OwnerId = OwnerId;
 		Entry.Scope = EAeyerjiWorldStateScope::Character;
 		Entry.Persistence = EAeyerjiWorldStatePersistence::Persistent;
+		if (!Entries.Contains(Entry.Key) && Entries.Num() >= MaxWorldStateEntries)
+		{
+			break;
+		}
 		Entries.Add(Entry.Key, Entry);
 		BroadcastEntryChanged(Entry);
 
@@ -748,7 +943,7 @@ bool UAeyerjiWorldStateSubsystem::ImportPersistentCharacterState(const FName Own
 
 void UAeyerjiWorldStateSubsystem::PublishReplicatedEntriesToGameState(AAeyerjiGameState* GameState) const
 {
-	if (!GameState)
+	if (!IsValid(GameState) || GameState->GetWorld() != GetWorld() || !HasWriteAuthority())
 	{
 		return;
 	}
@@ -756,9 +951,15 @@ void UAeyerjiWorldStateSubsystem::PublishReplicatedEntriesToGameState(AAeyerjiGa
 	TArray<FAeyerjiWorldStateEntry> PublicEntries;
 	for (const TPair<FAeyerjiWorldStateKey, FAeyerjiWorldStateEntry>& Pair : Entries)
 	{
-		if (Pair.Value.Replication == EAeyerjiWorldStateReplication::PublicReplicated)
+		if (PublicEntries.Num() >= MaxWorldStateEntries)
 		{
-			PublicEntries.Add(Pair.Value.MakeDataOnlyCopy());
+			break;
+		}
+		FAeyerjiWorldStateEntry SanitizedEntry;
+		if (Pair.Value.Replication == EAeyerjiWorldStateReplication::PublicReplicated
+			&& SanitizeWorldStateEntry(Pair.Value, GetWorld(), SanitizedEntry))
+		{
+			PublicEntries.Add(MoveTemp(SanitizedEntry));
 		}
 	}
 
@@ -767,13 +968,16 @@ void UAeyerjiWorldStateSubsystem::PublishReplicatedEntriesToGameState(AAeyerjiGa
 
 void UAeyerjiWorldStateSubsystem::ApplyReplicatedEntry(const FAeyerjiWorldStateEntry& Entry)
 {
-	if (!Entry.Key.IsValid())
+	FAeyerjiWorldStateEntry SanitizedEntry;
+	if (HasWriteAuthority() || Entry.Replication != EAeyerjiWorldStateReplication::PublicReplicated
+		|| !SanitizeWorldStateEntry(Entry, GetWorld(), SanitizedEntry)
+		|| (!Entries.Contains(Entry.Key) && Entries.Num() >= MaxWorldStateEntries))
 	{
 		return;
 	}
 
-	Entries.Add(Entry.Key, Entry.MakeDataOnlyCopy());
-	BroadcastEntryChanged(Entry);
+	Entries.Add(SanitizedEntry.Key, SanitizedEntry);
+	BroadcastEntryChanged(SanitizedEntry);
 }
 
 void UAeyerjiWorldStateSubsystem::RemoveReplicatedEntry(const FAeyerjiWorldStateKey& Key)
@@ -1060,7 +1264,11 @@ void UAeyerjiWorldStateSubsystem::ScheduleAutoSave()
 	}
 
 	UWorld* World = GetWorld();
-	if (!World || AutoSaveDelaySeconds <= 0.f)
+	const float SafeDelay = FMath::Clamp(
+		FMath::IsFinite(AutoSaveDelaySeconds) ? AutoSaveDelaySeconds : 0.f,
+		0.f,
+		300.f);
+	if (!World || SafeDelay <= 0.f)
 	{
 		SavePersistentState();
 		return;
@@ -1070,7 +1278,7 @@ void UAeyerjiWorldStateSubsystem::ScheduleAutoSave()
 		AutoSaveTimerHandle,
 		this,
 		&UAeyerjiWorldStateSubsystem::HandleAutoSaveTimer,
-		AutoSaveDelaySeconds,
+		SafeDelay,
 		false);
 }
 

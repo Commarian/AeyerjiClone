@@ -164,6 +164,9 @@ public:
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Rift")
 	AAeyerjiPlayerState* GetRunLeaderPlayerState() const { return RunLeaderPlayerState.Get(); }
 
+	/** Validates whether an owned PlayerState may mutate shared lobby, world-flow, or run state. */
+	bool IsRunControlRequesterAuthorized(const AAeyerjiPlayerState* Requester) const;
+
 	/** Replicated presentation-safe party staging state used by the frontend shell. */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Frontend|Lobby")
 	const FAeyerjiLobbySnapshot& GetLobbySnapshot() const { return LobbySnapshot; }
@@ -181,7 +184,7 @@ public:
 	bool Server_SetFrontendReady(AAeyerjiPlayerState* Requester, bool bReady);
 	bool Server_SetFrontendActivity(AAeyerjiPlayerState* Requester, EAeyerjiRiftActivityType ActivityType);
 	bool Server_SetFrontendTier(AAeyerjiPlayerState* Requester, int32 Tier);
-	bool Server_RequestFrontendLaunch(AAeyerjiPlayerState* Requester);
+	bool Server_RequestFrontendLaunch(AAeyerjiPlayerState* Requester, EAeyerjiFrontendFailure& OutFailure);
 
 	/** Server validation endpoint used by the leader-facing PlayerState RPC. */
 	bool Server_TrySelectRiftTier(AAeyerjiPlayerState* Requester, int32 RequestedTier, EAeyerjiRiftTierSelectionFailure& OutFailure);
@@ -424,7 +427,11 @@ public:
 
 	/** Failsafe timeout for server-side world-flow transitions before fallback handling is applied. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|World|Flow", meta=(ClampMin="1.0"))
-	float WorldTransitionTimeoutSeconds = 15.f;
+	float WorldTransitionTimeoutSeconds = 60.f;
+
+	/** Radius around the tagged gameplay start used to place additional party members on safe navigation. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|World|Flow", meta=(ClampMin="0.0", Units="cm"))
+	float PartySpawnRadius = 225.f;
 
 	/** Optional fixed run seed used by deterministic automation. Zero generates a fresh server seed. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Rift|Automation", meta=(ClampMin="0"))
@@ -628,10 +635,16 @@ protected:
 	/** Respawns or despawns players according to the active zone's spawn policy. */
 	bool ApplyZoneSpawnPolicy();
 
+	/** Registers streamed navigation bounds and defers spawning until runtime navigation is ready. */
+	bool PrepareNavigationForZoneSpawn();
+
+	/** Schedules another transition-completion attempt while runtime navigation is still building. */
+	void ScheduleWorldTransitionCompletionRetry();
+
 	/** Re-resolves gameplay actors after a streamed gameplay zone becomes active. */
 	bool ResolveGameplayActorsForActiveZone();
 
-	/** Finds PlayerStart candidates for the zone tag and returns a best match for the player index. */
+	/** Finds the deterministic tagged PlayerStart used as the shared party spawn anchor. */
 	APlayerStart* SelectPlayerStartForZone(const FName DesiredTag, int32 PlayerIndex) const;
 
 	/** Server-only: mirrors run lifecycle into world-state facts for persistence bridges. */
@@ -658,6 +671,9 @@ protected:
 	UFUNCTION()
 	void HandleEncounterDirectorInitialSpawnComplete(AAeyerjiEncounterDirector* Director);
 
+	UFUNCTION()
+	void HandleRiftPopulationPrewarmComplete(AAeyerjiEncounterDirector* Director);
+
 	/** Server hook fired when the active LevelDirector run timer expires. */
 	UFUNCTION()
 	void HandleLevelDirectorRunTimerExpired();
@@ -678,6 +694,9 @@ protected:
 
 	/** Timer callback used as a failsafe when a world transition does not complete in time. */
 	void HandleWorldTransitionTimeout();
+
+	/** Retries the client ready acknowledgement until seamless travel exposes a stable owning PlayerController. */
+	void TryReportLocalZoneReady();
 
 	/** Continues a staged retry once the gameplay zone has been safely unloaded in PIE. */
 	void HandleDeferredRetryTravel();
@@ -717,10 +736,24 @@ private:
 	FTimerHandle BossDefeatedDelayHandle;
 	FTimerHandle AutoReturnDelayHandle;
 	FTimerHandle WorldTransitionTimeoutHandle;
+	FTimerHandle WorldTransitionCompletionRetryHandle;
+	FTimerHandle LocalZoneReadyReportRetryHandle;
 	FTimerHandle DeferredRetryTravelHandle;
 	FTimerHandle DeferredDestroyRunEnemiesHandle;
 	FTimerHandle DeferredAutoStartRunHandle;
 	FTimerHandle FrontendLaunchCountdownHandle;
+
+	/** Prevents streamed navigation bounds from being re-registered on every transition retry. */
+	bool bNavigationBoundsRegisteredForTransition = false;
+
+	/** Tracks whether the active transition has explicitly requested a runtime navigation rebuild. */
+	bool bNavigationBuildRequestedForTransition = false;
+
+	/** Prevents a second transition-completion pass from respawning players after Rift prewarm. */
+	bool bZoneSpawnPolicyAppliedForTransition = false;
+
+	/** True after the Rift run snapshot/plan is frozen but before exact pool prewarm commits gameplay. */
+	bool bRiftRunPreparationPending = false;
 
 	/** Rebuilds the replicated roster, stable leader, and common verified-profile cap. */
 	void RebuildFrontendLobbySnapshot(bool bDetectRosterChange);

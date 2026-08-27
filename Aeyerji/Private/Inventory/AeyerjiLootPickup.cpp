@@ -57,6 +57,52 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 namespace
 {
 	static constexpr ECollisionChannel InteractTraceChannel = ECC_GameTraceChannel1;
+	constexpr float MaxPickupRadius = 100000.f;
+	constexpr float MaxDropDistance = 1000000.f;
+	constexpr float MaxDropDurationSeconds = 3600.f;
+	constexpr float MaxDropVelocity = 1000000.f;
+	constexpr float MaxPhysicsDamping = 1000.f;
+	constexpr float MaxPhysicsFriction = 1000.f;
+	constexpr int32 MaxAdditionalHighlightMeshes = 64;
+
+	float ResolveFiniteFloat(const float Value, const float Fallback)
+	{
+		return FMath::IsFinite(Value) ? Value : Fallback;
+	}
+
+	bool IsFiniteVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
+	bool IsFiniteTransform(const FTransform& Transform)
+	{
+		const FVector Translation = Transform.GetTranslation();
+		const FVector Scale = Transform.GetScale3D();
+		const FQuat Rotation = Transform.GetRotation();
+		return IsFiniteVector(Translation)
+			&& IsFiniteVector(Scale)
+			&& FMath::IsFinite(Rotation.X)
+			&& FMath::IsFinite(Rotation.Y)
+			&& FMath::IsFinite(Rotation.Z)
+			&& FMath::IsFinite(Rotation.W);
+	}
+
+	bool IsValidLootPickupRarity(const EItemRarity Rarity)
+	{
+		const UEnum* RarityEnum = StaticEnum<EItemRarity>();
+		return RarityEnum && RarityEnum->IsValidEnumValue(static_cast<int64>(Rarity));
+	}
+
+	void SanitizeNonNegativeRange(float& Minimum, float& Maximum, const float MaxAllowed)
+	{
+		Minimum = FMath::Clamp(ResolveFiniteFloat(Minimum, 0.f), 0.f, MaxAllowed);
+		Maximum = FMath::Clamp(ResolveFiniteFloat(Maximum, Minimum), 0.f, MaxAllowed);
+		if (Minimum > Maximum)
+		{
+			Swap(Minimum, Maximum);
+		}
+	}
 
 	FAeyerjiNavSafetyResolveParams MakePickupLootDropHardNavFallbackParams()
 	{
@@ -71,12 +117,22 @@ namespace
 
 	bool TryResolveLootDropHardNavFallback(const UObject* WorldContextObject, const FVector& DesiredLocation, FVector& OutLocation)
 	{
+		if (!WorldContextObject || !IsFiniteVector(DesiredLocation))
+		{
+			return false;
+		}
+
 		FAeyerjiNavSafetyResult NavResult;
 		if (!UAeyerjiNavSafetyLibrary::ResolveNearestNavGroundLocation(
 				WorldContextObject,
 				DesiredLocation,
 				MakePickupLootDropHardNavFallbackParams(),
 				NavResult))
+		{
+			return false;
+		}
+
+		if (!IsFiniteVector(NavResult.GroundedLocation))
 		{
 			return false;
 		}
@@ -89,13 +145,14 @@ namespace
 AAeyerjiLootPickup::AAeyerjiLootPickup()
 {
 	bReplicates = true;
-	bAlwaysRelevant = true;
+	// Pickups replicate spatially; distant loot should not consume every connection's actor channel.
+	bAlwaysRelevant = false;
 	bReplicateUsingRegisteredSubObjectList = true;
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickGroup = TG_PrePhysics; // update before physics for smoother motion
 	PrimaryActorTick.TickInterval = 0.f;        // run every frame
-	SetNetUpdateFrequency(60.f);                 // higher replication rate for smoother client motion
-	SetMinNetUpdateFrequency(30.f);
+	SetNetUpdateFrequency(20.f);
+	SetMinNetUpdateFrequency(5.f);
 	SetReplicateMovement(true);
 
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
@@ -122,6 +179,7 @@ AAeyerjiLootPickup::AAeyerjiLootPickup()
 	PickupSphere->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	PickupSphere->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	PickupSphere->OnComponentBeginOverlap.AddDynamic(this, &AAeyerjiLootPickup::HandlePickupSphereOverlap);
+	BoundAutoPickupVolume = PickupSphere;
 
 	LootLabel = CreateDefaultSubobject<UWidgetComponent>(TEXT("LootLabel"));
 	LootLabel->SetupAttachment(Root);
@@ -188,8 +246,22 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromInstance(
 	const FTransform& SpawnTransform,
 	TSubclassOf<AAeyerjiLootPickup> PickupClass)
 {
-	if (!InItemInstance)
+	if (World.GetNetMode() == NM_Client || !IsValid(InItemInstance) || !IsFiniteTransform(SpawnTransform))
 	{
+		return nullptr;
+	}
+	if (!IsValid(InItemInstance->Definition) || !IsValidLootPickupRarity(InItemInstance->Rarity))
+	{
+		AJ_LOG(&World, TEXT("SpawnFromInstance rejected invalid item definition or rarity Item=%s Definition=%s Rarity=%d"),
+			*GetNameSafe(InItemInstance),
+			*GetNameSafe(InItemInstance->Definition.Get()),
+			static_cast<int32>(InItemInstance->Rarity));
+		return nullptr;
+	}
+	if (const UWorld* ItemWorld = InItemInstance->GetWorld(); ItemWorld && ItemWorld != &World)
+	{
+		AJ_LOG(&World, TEXT("SpawnFromInstance rejected cross-world item Item=%s ItemWorld=%s TargetWorld=%s"),
+			*GetNameSafe(InItemInstance), *GetNameSafe(ItemWorld), *GetNameSafe(&World));
 		return nullptr;
 	}
 
@@ -214,13 +286,20 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromInstance(
 
 	InItemInstance->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(InItemInstance->ItemLevel);
 
+	if (!InItemInstance->Rename(nullptr, Pickup, REN_DontCreateRedirectors | REN_NonTransactional))
+	{
+		AJ_LOG(&World, TEXT("SpawnFromInstance failed to reparent item %s to pickup %s"),
+			*GetNameSafe(InItemInstance), *GetNameSafe(Pickup));
+		Pickup->Destroy();
+		return nullptr;
+	}
+
 	Pickup->ItemInstance = InItemInstance;
 	Pickup->ItemDefinition = InItemInstance->Definition;
 	Pickup->ItemLevel = InItemInstance->ItemLevel;
 	Pickup->ItemRarity = InItemInstance->Rarity;
 	Pickup->ApplyDefinitionMesh();
-
-	InItemInstance->Rename(nullptr, Pickup);
+	Pickup->AddReplicatedSubObject(InItemInstance);
 	Pickup->FinishSpawning(SpawnTransform);
 	return Pickup;
 }
@@ -234,7 +313,8 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromDefinition(
 	int32 SeedOverride,
 	TSubclassOf<AAeyerjiLootPickup> PickupClass)
 {
-	if (!Definition)
+	if (World.GetNetMode() == NM_Client || !IsValid(Definition) || !IsFiniteTransform(SpawnTransform)
+		|| !IsValidLootPickupRarity(Rarity))
 	{
 		return nullptr;
 	}
@@ -289,13 +369,14 @@ AAeyerjiLootPickup* AAeyerjiLootPickup::SpawnFromDefinition(
 	}
 
 	Pickup->ItemInstance = Rolled;
+	Pickup->AddReplicatedSubObject(Rolled);
 	Pickup->FinishSpawning(SpawnTransform);
 	return Pickup;
 }
 
 bool AAeyerjiLootPickup::CanInteract_Implementation(AAeyerjiPlayerController* Controller)
 {
-	return IsValid(Controller) && IsValid(ItemInstance)
+	return IsValid(Controller) && Controller->GetWorld() == GetWorld() && IsValid(ItemInstance)
 		&& (!ReservedPlayerState || Controller->PlayerState == ReservedPlayerState);
 }
 
@@ -305,8 +386,56 @@ void AAeyerjiLootPickup::ReserveForPlayerState(APlayerState* PlayerState)
 	{
 		return;
 	}
+	if (PlayerState && (!IsValid(PlayerState) || PlayerState->GetWorld() != GetWorld()))
+	{
+		return;
+	}
+
 	ReservedPlayerState = PlayerState;
 	ForceNetUpdate();
+}
+
+void AAeyerjiLootPickup::ConfigureRuntimeAutoPickup(
+	const bool bEnableAutoPickup,
+	const float InAutoPickupRadius)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	bAutoPickup = bEnableAutoPickup;
+	AutoPickupRadius = FMath::Clamp(
+		FMath::IsFinite(InAutoPickupRadius) ? InAutoPickupRadius : 140.f,
+		1.f,
+		MaxPickupRadius);
+	SanitizeRuntimeSettings();
+	ConfigureVolumes();
+
+	if (!bAutoPickup || !BoundAutoPickupVolume || !ItemInstance)
+	{
+		return;
+	}
+
+	TArray<AActor*> OverlappingActors;
+	BoundAutoPickupVolume->GetOverlappingActors(OverlappingActors, APawn::StaticClass());
+	for (AActor* OverlappingActor : OverlappingActors)
+	{
+		APawn* Pawn = Cast<APawn>(OverlappingActor);
+		AAeyerjiPlayerController* Controller = Pawn
+			? Cast<AAeyerjiPlayerController>(Pawn->GetController())
+			: nullptr;
+		if (!CanPawnLoot(Controller))
+		{
+			continue;
+		}
+
+		AJ_LOG(this, TEXT("[Interaction][InventoryPickup] Runtime auto-pickup accepted Controller=%s Radius=%.1f"),
+			*GetNameSafe(Controller),
+			AutoPickupRadius);
+		ExecutePickup(Controller);
+		return;
+	}
 }
 
 FVector AAeyerjiLootPickup::GetInteractionLocation_Implementation()
@@ -381,9 +510,9 @@ void AAeyerjiLootPickup::ExecutePickup(AAeyerjiPlayerController* Controller)
 		BroadcastPickupEvent(Controller, GrantedInventoryItem);
 		TriggerPickupFX(Controller, VisualConfig);
 
-		if (IsReplicatedSubObjectRegistered(GrantedInventoryItem))
+		if (IsReplicatedSubObjectRegistered(GrantedItem))
 		{
-			RemoveReplicatedSubObject(GrantedInventoryItem);
+			RemoveReplicatedSubObject(GrantedItem);
 		}
 
 		Multicast_HidePickupAfterGranted();
@@ -481,6 +610,11 @@ void AAeyerjiLootPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& O
 
 bool AAeyerjiLootPickup::ReplicateSubobjects(UActorChannel* Channel, FOutBunch* Bunch, FReplicationFlags* RepFlags)
 {
+	if (!Channel || !Bunch || !RepFlags)
+	{
+		return false;
+	}
+
 	bool bWroteSomething = Super::ReplicateSubobjects(Channel, Bunch, RepFlags);
 
 	if (ItemInstance && ItemInstance->GetOuter() == this)
@@ -495,6 +629,7 @@ void AAeyerjiLootPickup::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 
+	SanitizeRuntimeSettings();
 	ConfigureVolumes();
 	ApplyDefinitionMesh();
 	SetLabelFromItem();
@@ -505,6 +640,22 @@ void AAeyerjiLootPickup::OnConstruction(const FTransform& Transform)
 void AAeyerjiLootPickup::BeginPlay()
 {
 	Super::BeginPlay();
+
+	SanitizeRuntimeSettings();
+	if (!IsFiniteTransform(GetActorTransform()))
+	{
+		UE_LOG(LogAeyerji, Error, TEXT("AeyerjiLootPickup BeginPlay rejected non-finite actor transform Actor=%s Authority=%d"),
+			*GetNameSafe(this), HasAuthority() ? 1 : 0);
+		if (HasAuthority())
+		{
+			Destroy();
+		}
+		else
+		{
+			PrepareForPickupRemoval(TEXT("InvalidReplicatedTransform"));
+		}
+		return;
+	}
 
 	ConfigureVolumes();
 	ApplyDefinitionMesh();
@@ -538,6 +689,10 @@ void AAeyerjiLootPickup::BeginPlay()
 	if (ItemInstance)
 	{
 		ItemDefinition = ItemInstance->Definition;
+		if (HasAuthority() && ItemInstance->GetOuter() == this && !IsReplicatedSubObjectRegistered(ItemInstance))
+		{
+			AddReplicatedSubObject(ItemInstance);
+		}
 	}
 
 	ApplyDefinitionMesh();
@@ -572,6 +727,15 @@ void AAeyerjiLootPickup::BeginPlay()
 
 void AAeyerjiLootPickup::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (BoundAutoPickupVolume)
+	{
+		BoundAutoPickupVolume->OnComponentBeginOverlap.RemoveDynamic(this, &AAeyerjiLootPickup::HandlePickupSphereOverlap);
+		BoundAutoPickupVolume = nullptr;
+	}
+	if (ItemInstance && IsReplicatedSubObjectRegistered(ItemInstance))
+	{
+		RemoveReplicatedSubObject(ItemInstance);
+	}
 	PrepareForPickupRemoval(TEXT("EndPlay"));
 	Super::EndPlay(EndPlayReason);
 }
@@ -592,8 +756,16 @@ void AAeyerjiLootPickup::StartDropToGround()
 			bEnableDropMotion ? 1 : 0);
 		return;
 	}
+	if (!IsFiniteVector(GetActorLocation()))
+	{
+		UE_LOG(LogAeyerji, Error, TEXT("[LootPickup][DropMotion] StartDropToGround rejected non-finite actor location Actor=%s"),
+			*GetNameSafe(this));
+		return;
+	}
 
-	// Ditch the tick-based arc/trace: immediately kick the mesh into physics with a small randomized toss.
+	SanitizeRuntimeSettings();
+
+	// Reset all previous motion state before selecting the authored drop mode.
 	bIsDropping = false;
 	bLoggedDropSkip = false;
 	bLoggedFirstTick = false;
@@ -618,9 +790,45 @@ void AAeyerjiLootPickup::StartDropToGround()
 	}
 
 	DropSafetyAnchorLocation = SpawnLoc;
+
+	// A simple physics drop starts at the grounded anchor with no artificial toss velocity.
+	if (bUseSimplePhysicsDrop)
+	{
+		AEYERJI_LOOT_DROP_VERBOSE(TEXT("StartDropToGround simple physics - Start=%s"), *SpawnLoc.ToString());
+		if (!StartPhysicsHandoff(/*bForceImmediate=*/true))
+		{
+			FinalSnapToGround();
+		}
+		return;
+	}
+
+	// If physics handoff is disabled, retain the deterministic replicated arc path.
+	if (!bEnablePhysicsHandoff)
+	{
+		ComputeDropEndpoints();
+		if (!IsFiniteVector(DropStart) || !IsFiniteVector(DropEnd))
+		{
+			FinalSnapToGround();
+			return;
+		}
+
+		ElapsedDropTime = 0.f;
+		RandomSpinYawSpeed = FMath::FRandRange(MinSpinYawSpeed, MaxSpinYawSpeed);
+		bIsDropping = true;
+		bPhysicsHandoffAttempted = true;
+		SetActorTickEnabled(true);
+		return;
+	}
+
+	// Default mode immediately kicks the mesh into physics with a small randomized toss.
 	const float RandomYaw = FMath::FRandRange(-180.f, 180.f);
 	const FVector SideDir = FRotator(0.f, RandomYaw, 0.f).Vector();
 	const FVector LaunchStart = SpawnLoc + (SideDir * SideImpulseDistance) + FVector(0.f, 0.f, UpImpulseHeight);
+	if (!IsFiniteVector(LaunchStart))
+	{
+		FinalSnapToGround();
+		return;
+	}
 
 	SetActorLocation(LaunchStart, false, nullptr, ETeleportType::TeleportPhysics);
 	UpdateLootBeamAnchor();
@@ -637,6 +845,12 @@ void AAeyerjiLootPickup::StartDropToGround()
 void AAeyerjiLootPickup::ComputeDropEndpoints()
 {
 	FVector SpawnLoc = GetActorLocation();
+	if (!IsFiniteVector(SpawnLoc))
+	{
+		DropStart = FVector::ZeroVector;
+		DropEnd = FVector::ZeroVector;
+		return;
+	}
 	FVector SafeSpawnLoc = SpawnLoc;
 	if (TryResolveLootDropHardNavFallback(this, SpawnLoc, SafeSpawnLoc))
 	{
@@ -673,7 +887,8 @@ void AAeyerjiLootPickup::ComputeDropEndpoints()
 	FCollisionObjectQueryParams ObjectParams;
 	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
 
-	const bool bHit = GetWorld()->LineTraceSingleByObjectType(
+	UWorld* World = GetWorld();
+	const bool bHit = World && World->LineTraceSingleByObjectType(
 		Hit,
 		TraceStart,
 		TraceEnd,
@@ -707,6 +922,11 @@ void AAeyerjiLootPickup::ComputeDropEndpoints()
 void AAeyerjiLootPickup::FinalSnapToGround()
 {
 	const FVector Loc = GetActorLocation();
+	if (!IsFiniteVector(Loc))
+	{
+		AbortPhysicsDropToSafeLocation(TEXT("NonFiniteActorLocation"));
+		return;
+	}
 	FVector NavFallbackLocation = Loc;
 	if (TryResolveLootDropHardNavFallback(this, Loc, NavFallbackLocation))
 	{
@@ -724,7 +944,8 @@ void AAeyerjiLootPickup::FinalSnapToGround()
 	FCollisionObjectQueryParams ObjectParams;
 	ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
 
-	const bool bHit = GetWorld()->LineTraceSingleByObjectType(
+	UWorld* World = GetWorld();
+	const bool bHit = World && World->LineTraceSingleByObjectType(
 		Hit,
 		TraceStart,
 		TraceEnd,
@@ -748,7 +969,7 @@ void AAeyerjiLootPickup::FinalSnapToGround()
 bool AAeyerjiLootPickup::TryFindDropSafetyGround(const FVector& DesiredLocation, FVector& OutGroundLocation) const
 {
 	const UWorld* World = GetWorld();
-	if (!World)
+	if (!World || !IsFiniteVector(DesiredLocation))
 	{
 		return false;
 	}
@@ -780,7 +1001,8 @@ bool AAeyerjiLootPickup::TryFindDropSafetyGround(const FVector& DesiredLocation,
 
 	auto IsAcceptableSafetyGround = [&](const FHitResult& Hit, FVector& OutCandidateLocation) -> bool
 	{
-		if (!Hit.bBlockingHit || Hit.ImpactNormal.Z < 0.25f)
+		if (!Hit.bBlockingHit || !IsFiniteVector(Hit.ImpactPoint) || !IsFiniteVector(Hit.ImpactNormal)
+			|| Hit.ImpactNormal.Z < 0.25f)
 		{
 			return false;
 		}
@@ -818,6 +1040,9 @@ bool AAeyerjiLootPickup::TryFindDropSafetyGround(const FVector& DesiredLocation,
 void AAeyerjiLootPickup::FinishPhysicsDropAtLocation(const FVector& FinalLocation, const TCHAR* Reason, const bool bWarn)
 {
 	const FVector CurrentLocation = PreviewMesh ? PreviewMesh->GetComponentLocation() : GetActorLocation();
+	const FVector SafeFinalLocation = IsFiniteVector(FinalLocation)
+		? FinalLocation
+		: (bHasDropSafetyAnchor && IsFiniteVector(DropSafetyAnchorLocation) ? DropSafetyAnchorLocation : FVector::ZeroVector);
 
 	if (PreviewMesh)
 	{
@@ -826,7 +1051,7 @@ void AAeyerjiLootPickup::FinishPhysicsDropAtLocation(const FVector& FinalLocatio
 		PreviewMesh->SetSimulatePhysics(false);
 	}
 
-	SetActorLocationAndRotation(FinalLocation, PrePhysicsActorRotation, false, nullptr, ETeleportType::TeleportPhysics);
+	SetActorLocationAndRotation(SafeFinalLocation, PrePhysicsActorRotation, false, nullptr, ETeleportType::TeleportPhysics);
 
 	if (PreviewMesh)
 	{
@@ -854,14 +1079,14 @@ void AAeyerjiLootPickup::FinishPhysicsDropAtLocation(const FVector& FinalLocatio
 			Reason ? Reason : TEXT("Unknown"),
 			*CurrentLocation.ToString(),
 			bHasDropSafetyAnchor ? *DropSafetyAnchorLocation.ToString() : TEXT("None"),
-			*FinalLocation.ToString());
+			*SafeFinalLocation.ToString());
 	}
 	else
 	{
 		AEYERJI_LOOT_DROP_VERBOSE(TEXT("Physics drop settled Reason=%s Current=%s Final=%s"),
 			Reason ? Reason : TEXT("Unknown"),
 			*CurrentLocation.ToString(),
-			*FinalLocation.ToString());
+			*SafeFinalLocation.ToString());
 	}
 }
 
@@ -880,7 +1105,8 @@ bool AAeyerjiLootPickup::TrySettlePhysicsDropAtCurrentLocation(const TCHAR* Reas
 
 void AAeyerjiLootPickup::AbortPhysicsDropToSafeLocation(const TCHAR* Reason)
 {
-	const FVector AnchorLocation = bHasDropSafetyAnchor ? DropSafetyAnchorLocation : GetActorLocation();
+	const FVector CandidateAnchor = bHasDropSafetyAnchor ? DropSafetyAnchorLocation : GetActorLocation();
+	const FVector AnchorLocation = IsFiniteVector(CandidateAnchor) ? CandidateAnchor : FVector::ZeroVector;
 	FVector SafeLocation = AnchorLocation + FVector(0.f, 0.f, DropSafetyGroundOffset);
 	const bool bFoundGround = TryFindDropSafetyGround(AnchorLocation, SafeLocation);
 
@@ -979,6 +1205,7 @@ void AAeyerjiLootPickup::PrepareForPickupRemoval(const TCHAR* Reason)
 void AAeyerjiLootPickup::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	const float SafeDeltaSeconds = FMath::Clamp(ResolveFiniteFloat(DeltaSeconds, 0.f), 0.f, 0.25f);
 
 	if ((LootLabelText && LootLabelText->IsVisible()) || (LootLabelOutline && LootLabelOutline->IsVisible()))
 	{
@@ -1010,7 +1237,14 @@ void AAeyerjiLootPickup::Tick(float DeltaSeconds)
 
 		// Keep the actor/collision aligned with the simulated mesh so clicks, labels, and outlines stay on the visible ball.
 		const FVector MeshLocation = PreviewMesh->GetComponentLocation();
-		PhysicsHandoffElapsedSeconds += DeltaSeconds;
+		if (!IsFiniteVector(MeshLocation))
+		{
+			AbortPhysicsDropToSafeLocation(TEXT("NonFinitePhysicsLocation"));
+			return;
+		}
+		PhysicsHandoffElapsedSeconds = FMath::Min(
+			PhysicsHandoffElapsedSeconds + SafeDeltaSeconds,
+			MaxDropDurationSeconds + 1.f);
 
 		if (bEnableDropSafetyGuard && bHasDropSafetyAnchor)
 		{
@@ -1095,7 +1329,7 @@ void AAeyerjiLootPickup::Tick(float DeltaSeconds)
 	}
 	else
 	{
-		ElapsedDropTime += DeltaSeconds;
+		ElapsedDropTime = FMath::Min(ElapsedDropTime + SafeDeltaSeconds, MaxDropDurationSeconds);
 	}
 
 	const float AlphaRaw = (DropDuration > KINDA_SMALL_NUMBER)
@@ -1112,11 +1346,16 @@ void AAeyerjiLootPickup::Tick(float DeltaSeconds)
 
 	const float HeightZ = ArcAlpha * ArcHeight;
 	const FVector NewLoc = BaseLoc + FVector(0.f, 0.f, HeightZ);
+	if (!IsFiniteVector(NewLoc))
+	{
+		AbortPhysicsDropToSafeLocation(TEXT("NonFiniteArcLocation"));
+		return;
+	}
 
 	SetActorLocation(NewLoc, true);
 	UpdateLootBeamAnchor();
 
-	const float YawDelta = RandomSpinYawSpeed * DeltaSeconds;
+	const float YawDelta = RandomSpinYawSpeed * SafeDeltaSeconds;
 	AddActorLocalRotation(FRotator(0.f, YawDelta, 0.f));
 
 	if (bEnablePhysicsHandoff && !bPhysicsHandoffStarted && !bPhysicsHandoffAttempted && (Alpha >= PhysicsHandoffAlpha))
@@ -1179,6 +1418,12 @@ bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
 		AEYERJI_LOOT_DROP_VERBOSE(TEXT("StartPhysicsHandoff aborted - PreviewMesh has no StaticMesh"));
 		return false;
 	}
+	if (!IsFiniteVector(GetActorLocation()) || !IsFiniteTransform(PreviewMesh->GetComponentTransform()))
+	{
+		UE_LOG(LogAeyerji, Warning, TEXT("[LootPickup][DropMotion] StartPhysicsHandoff rejected non-finite transform Actor=%s"),
+			*GetNameSafe(this));
+		return false;
+	}
 
 	if (UBodySetup* BodySetup = PreviewMesh->GetBodySetup())
 	{
@@ -1237,12 +1482,12 @@ bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
 	{
 		const FName PhysicsMaterialName = MakeUniqueObjectName(this, UPhysicalMaterial::StaticClass(), TEXT("RuntimePhysicsMaterial"));
 		RuntimePhysicsMaterial = NewObject<UPhysicalMaterial>(this, UPhysicalMaterial::StaticClass(), PhysicsMaterialName);
-		RuntimePhysicsMaterial->Friction = PhysicsFriction;
-		RuntimePhysicsMaterial->Restitution = PhysicsRestitution;
 		RuntimePhysicsMaterial->FrictionCombineMode = EFrictionCombineMode::Multiply;
 		// UE uses the same combine-mode enum for both friction and restitution.
 		RuntimePhysicsMaterial->RestitutionCombineMode = EFrictionCombineMode::Average;
 	}
+	RuntimePhysicsMaterial->Friction = PhysicsFriction;
+	RuntimePhysicsMaterial->Restitution = PhysicsRestitution;
 	PreviewMesh->SetPhysMaterialOverride(RuntimePhysicsMaterial);
 	PreviewMesh->SetSimulatePhysics(true);
 
@@ -1274,6 +1519,11 @@ bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
 		const float LinearSpeed = FMath::FRandRange(PhysicsLinearVelocityMin, PhysicsLinearVelocityMax);
 		const float DownSpeed = FMath::FRandRange(PhysicsDownwardVelocityMin, PhysicsDownwardVelocityMax);
 		const FVector LinearVel = (SideDir * LinearSpeed) + FVector(0.f, 0.f, -DownSpeed);
+		if (!IsFiniteVector(LinearVel))
+		{
+			AbortPhysicsDropToSafeLocation(TEXT("NonFiniteLaunchVelocity"));
+			return false;
+		}
 		PreviewMesh->SetPhysicsLinearVelocity(LinearVel, false, NAME_None);
 
 		const float AngularSpeed = FMath::FRandRange(PhysicsAngularVelocityMin, PhysicsAngularVelocityMax);
@@ -1282,6 +1532,11 @@ bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
 			FMath::FRandRange(-1.f, 1.f),
 			FMath::FRandRange(-1.f, 1.f)).GetSafeNormal();
 		const FVector AngularVelDeg = AngularAxis * AngularSpeed;
+		if (!IsFiniteVector(AngularVelDeg))
+		{
+			AbortPhysicsDropToSafeLocation(TEXT("NonFiniteAngularVelocity"));
+			return false;
+		}
 		PreviewMesh->SetPhysicsAngularVelocityInDegrees(AngularVelDeg, false, NAME_None);
 		PreviewMesh->WakeAllRigidBodies();
 
@@ -1363,23 +1618,38 @@ void AAeyerjiLootPickup::ApplyDefinitionMesh()
 		PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
 
-		const bool bHasOffset = !ItemDefinition->WorldMeshOffset.IsNearlyZero();
-		const bool bHasRotation = !ItemDefinition->WorldMeshRotation.IsNearlyZero();
-		const bool bHasScale = !ItemDefinition->WorldMeshScale.Equals(FVector(1.f));
+		FVector SafeOffset = IsFiniteVector(ItemDefinition->WorldMeshOffset)
+			? ItemDefinition->WorldMeshOffset.BoundToBox(FVector(-MaxDropDistance), FVector(MaxDropDistance))
+			: FVector::ZeroVector;
+		FRotator SafeRotation = ItemDefinition->WorldMeshRotation;
+		if (SafeRotation.ContainsNaN())
+		{
+			SafeRotation = FRotator::ZeroRotator;
+		}
+		SafeRotation.Normalize();
+		FVector SafeScale = IsFiniteVector(ItemDefinition->WorldMeshScale)
+			? ItemDefinition->WorldMeshScale.BoundToBox(FVector(-1000.f), FVector(1000.f))
+			: FVector::OneVector;
+
+		const bool bHasOffset = !SafeOffset.IsNearlyZero();
+		const bool bHasRotation = !SafeRotation.IsNearlyZero();
+		const bool bHasScale = !SafeScale.Equals(FVector(1.f));
 
 		// Respect author-provided offsets; otherwise auto-ground the mesh so its bottom rests at the actor root.
 		FTransform MeshTransform;
 		if (bHasOffset || bHasRotation || bHasScale)
 		{
 			MeshTransform = FTransform(
-				ItemDefinition->WorldMeshRotation,
-				ItemDefinition->WorldMeshOffset,
-				ItemDefinition->WorldMeshScale);
+				SafeRotation,
+				SafeOffset,
+				SafeScale);
 		}
 		else
 		{
 			const FBoxSphereBounds Bounds = NewMesh->GetBounds();
-			const float MinZ = Bounds.Origin.Z - Bounds.BoxExtent.Z;
+			const float MinZ = IsFiniteVector(Bounds.Origin) && IsFiniteVector(Bounds.BoxExtent)
+				? Bounds.Origin.Z - Bounds.BoxExtent.Z
+				: 0.f;
 			const FVector AutoOffset(0.f, 0.f, -MinZ);
 			MeshTransform = FTransform(FRotator::ZeroRotator, AutoOffset, FVector(1.f));
 		}
@@ -1388,13 +1658,19 @@ void AAeyerjiLootPickup::ApplyDefinitionMesh()
 
 		// Keep the pickup volume centered on the visible mesh so cursor traces don't require "pixel-perfect" hits on the sphere.
 		// We intentionally keep the mesh collision disabled so ComplexAsSimple meshes don't cause trace stutter.
-	if (PickupSphere && ActivePickupVolume == PickupSphere && NewMesh)
-	{
-		const FBoxSphereBounds MeshBounds = NewMesh->GetBounds();
-		const FVector CenterInRootSpace = MeshTransform.TransformPosition(MeshBounds.Origin);
-		PickupSphere->SetRelativeLocation(CenterInRootSpace);
-		PickupSphere->SetSphereRadius(FMath::Max(PickupRadius, MeshBounds.SphereRadius * 1.15f)); // slight padding over mesh size
-	}
+		if (PickupSphere && ActivePickupVolume == PickupSphere && NewMesh)
+		{
+			const FBoxSphereBounds MeshBounds = NewMesh->GetBounds();
+			const FVector CenterInRootSpace = MeshTransform.TransformPosition(MeshBounds.Origin);
+			if (IsFiniteVector(CenterInRootSpace))
+			{
+				PickupSphere->SetRelativeLocation(CenterInRootSpace);
+			}
+			const float MeshRadius = FMath::IsFinite(MeshBounds.SphereRadius)
+				? FMath::Clamp(MeshBounds.SphereRadius * 1.15f, 1.f, MaxPickupRadius)
+				: PickupRadius;
+			PickupSphere->SetSphereRadius(FMath::Max(PickupRadius, MeshRadius)); // slight padding over mesh size
+		}
 	}
 	else if (PreviewMesh)
 	{
@@ -1481,9 +1757,14 @@ void AAeyerjiLootPickup::BuildHighlightMeshList(TArray<UMeshComponent*>& OutMesh
 
 		AddMeshIfValid(PreviewMesh);
 
-	for (UMeshComponent* Mesh : AdditionalHighlightMeshes)
+	const int32 HighlightMeshCount = FMath::Min(AdditionalHighlightMeshes.Num(), MaxAdditionalHighlightMeshes);
+	for (int32 Index = 0; Index < HighlightMeshCount; ++Index)
 	{
-		AddMeshIfValid(Mesh);
+		UMeshComponent* Mesh = AdditionalHighlightMeshes[Index];
+		if (Mesh && Mesh->GetOwner() == this)
+		{
+			AddMeshIfValid(Mesh);
+		}
 	}
 }
 
@@ -1582,6 +1863,10 @@ void AAeyerjiLootPickup::UpdateLootBeamAnchor()
 	}
 
 	const FBoxSphereBounds Bounds = PreviewMesh->Bounds;
+	if (!IsFiniteVector(Bounds.Origin) || !IsFiniteVector(Bounds.BoxExtent))
+	{
+		return;
+	}
 	const float MeshTopZ = Bounds.GetBox().Max.Z;
 
 	const FVector Anchor(Bounds.Origin.X, Bounds.Origin.Y, MeshTopZ);
@@ -1699,12 +1984,20 @@ FLinearColor AAeyerjiLootPickup::ResolveBeamColor() const
 {
 	if (const FLinearColor* Found = RarityToBeamColor.Find(ItemRarity))
 	{
-		return *Found;
+		if (FMath::IsFinite(Found->R) && FMath::IsFinite(Found->G)
+			&& FMath::IsFinite(Found->B) && FMath::IsFinite(Found->A))
+		{
+			return *Found;
+		}
 	}
 
 	if (const FLinearColor* Fallback = RarityToBeamColor.Find(EItemRarity::Common))
 	{
-		return *Fallback;
+		if (FMath::IsFinite(Fallback->R) && FMath::IsFinite(Fallback->G)
+			&& FMath::IsFinite(Fallback->B) && FMath::IsFinite(Fallback->A))
+		{
+			return *Fallback;
+		}
 	}
 
 	return FLinearColor::White;
@@ -1738,7 +2031,7 @@ bool AAeyerjiLootPickup::IsOverlappingPawn(APawn* Pawn) const
 
 bool AAeyerjiLootPickup::CanPawnLoot(const AAeyerjiPlayerController* Controller) const
 {
-	if (!Controller)
+	if (!IsValid(Controller) || Controller->GetWorld() != GetWorld())
 	{
 		return false;
 	}
@@ -1750,15 +2043,19 @@ bool AAeyerjiLootPickup::CanPawnLoot(const AAeyerjiPlayerController* Controller)
 	}
 
 	const APawn* Pawn = Controller->GetPawn();
-	if (!Pawn)
+	if (!IsValid(Pawn) || Pawn->GetWorld() != GetWorld() || Pawn->GetController() != Controller)
 	{
 		return false;
 	}
 
 	const FVector PawnLocation = Pawn->GetActorLocation();
 	const FVector PickupCenter = GetPickupNavCenter();
+	if (!IsFiniteVector(PawnLocation) || !IsFiniteVector(PickupCenter))
+	{
+		return false;
+	}
 	const float DistanceSq = FVector::DistSquared2D(PawnLocation, PickupCenter);
-	const float AcceptRadius = FMath::Max(1.f, GetPickupNavRadius());
+	const float AcceptRadius = FMath::Clamp(ResolveFiniteFloat(GetPickupNavRadius(), PickupRadius), 1.f, MaxPickupRadius);
 	const float AcceptRadiusSq = FMath::Square(AcceptRadius);
 
 	const bool bWithinRadius = DistanceSq <= AcceptRadiusSq;
@@ -1779,7 +2076,9 @@ bool AAeyerjiLootPickup::CanPawnLoot(const AAeyerjiPlayerController* Controller)
 
 UAeyerjiItemInstance* AAeyerjiLootPickup::GiveLootToInventory(AAeyerjiPlayerController* Controller, UAeyerjiItemInstance* GrantedItem)
 {
-	if (!Controller || !GrantedItem)
+	if (!HasAuthority() || !IsValid(Controller) || Controller->GetWorld() != GetWorld()
+		|| !IsValid(GrantedItem) || !IsValid(GrantedItem->Definition)
+		|| !IsValidLootPickupRarity(GrantedItem->Rarity))
 	{
 		AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory failed: Controller=%s Item=%s"),
 			*GetNameSafe(Controller),
@@ -1788,7 +2087,7 @@ UAeyerjiItemInstance* AAeyerjiLootPickup::GiveLootToInventory(AAeyerjiPlayerCont
 	}
 
 	APawn* Pawn = Controller->GetPawn();
-	if (!Pawn)
+	if (!IsValid(Pawn) || Pawn->GetWorld() != GetWorld() || Pawn->GetController() != Controller)
 	{
 		AJ_LOG(this, TEXT("[InventoryPickup] GiveLootToInventory failed: %s has no pawn"), *GetNameSafe(Controller));
 		return nullptr;
@@ -1992,20 +2291,25 @@ FVector AAeyerjiLootPickup::GetPickupNavCenter() const
 {
 	if (ActivePickupVolume)
 	{
-		return ActivePickupVolume->GetComponentLocation();
+		const FVector VolumeLocation = ActivePickupVolume->GetComponentLocation();
+		if (IsFiniteVector(VolumeLocation))
+		{
+			return VolumeLocation;
+		}
 	}
 
-	return GetActorLocation();
+	const FVector ActorLocation = GetActorLocation();
+	return IsFiniteVector(ActorLocation) ? ActorLocation : FVector::ZeroVector;
 }
 
 float AAeyerjiLootPickup::GetPickupNavRadius() const
 {
 	if (ActivePickupVolume)
 	{
-		return ActivePickupVolume->Bounds.SphereRadius;
+		return FMath::Clamp(ResolveFiniteFloat(ActivePickupVolume->Bounds.SphereRadius, PickupRadius), 1.f, MaxPickupRadius);
 	}
 
-	return PickupRadius;
+	return FMath::Clamp(ResolveFiniteFloat(PickupRadius, 120.f), 1.f, MaxPickupRadius);
 }
 
 bool AAeyerjiLootPickup::IsHoverTargetComponent(const UPrimitiveComponent* Component) const
@@ -2031,7 +2335,10 @@ bool AAeyerjiLootPickup::IsHoverTargetComponent(const UPrimitiveComponent* Compo
 
 void AAeyerjiLootPickup::ConfigureVolumes()
 {
-	ActivePickupVolume = PickupVolumeOverride ? PickupVolumeOverride : PickupSphere;
+	UShapeComponent* RequestedPickupVolume = IsValid(PickupVolumeOverride) && PickupVolumeOverride->GetOwner() == this
+		? PickupVolumeOverride.Get()
+		: PickupSphere.Get();
+	ActivePickupVolume = RequestedPickupVolume;
 
 	if (ActivePickupVolume)
 	{
@@ -2048,7 +2355,10 @@ void AAeyerjiLootPickup::ConfigureVolumes()
 		PickupSphere->SetSphereRadius(PickupRadius);
 	}
 
-	ActiveAutoPickupVolume = AutoPickupVolumeOverride ? AutoPickupVolumeOverride : ActivePickupVolume;
+	UShapeComponent* RequestedAutoPickupVolume = IsValid(AutoPickupVolumeOverride) && AutoPickupVolumeOverride->GetOwner() == this
+		? AutoPickupVolumeOverride.Get()
+		: ActivePickupVolume.Get();
+	ActiveAutoPickupVolume = RequestedAutoPickupVolume;
 
 	if (ActiveAutoPickupVolume && ActiveAutoPickupVolume != ActivePickupVolume)
 	{
@@ -2059,7 +2369,63 @@ void AAeyerjiLootPickup::ConfigureVolumes()
 
 	if (USphereComponent* AutoSphere = Cast<USphereComponent>(ActiveAutoPickupVolume))
 	{
-		AutoSphere->SetSphereRadius(AutoPickupRadius);
+		const float EffectiveAutoRadius = ActiveAutoPickupVolume == ActivePickupVolume
+			? (bAutoPickup ? FMath::Max(PickupRadius, AutoPickupRadius) : PickupRadius)
+			: AutoPickupRadius;
+		AutoSphere->SetSphereRadius(EffectiveAutoRadius);
+	}
+
+	if (BoundAutoPickupVolume && BoundAutoPickupVolume != ActiveAutoPickupVolume)
+	{
+		BoundAutoPickupVolume->OnComponentBeginOverlap.RemoveDynamic(this, &AAeyerjiLootPickup::HandlePickupSphereOverlap);
+	}
+	BoundAutoPickupVolume = ActiveAutoPickupVolume;
+	if (BoundAutoPickupVolume)
+	{
+		BoundAutoPickupVolume->OnComponentBeginOverlap.AddUniqueDynamic(this, &AAeyerjiLootPickup::HandlePickupSphereOverlap);
+	}
+}
+
+void AAeyerjiLootPickup::SanitizeRuntimeSettings()
+{
+	PickupRadius = FMath::Clamp(ResolveFiniteFloat(PickupRadius, 120.f), 1.f, MaxPickupRadius);
+	AutoPickupRadius = FMath::Clamp(ResolveFiniteFloat(AutoPickupRadius, 140.f), 1.f, MaxPickupRadius);
+	LabelHeightOffset = FMath::Clamp(ResolveFiniteFloat(LabelHeightOffset, 32.f), -MaxDropDistance, MaxDropDistance);
+	BeamBaseZOffset = FMath::Clamp(ResolveFiniteFloat(BeamBaseZOffset, 2.f), -MaxDropDistance, MaxDropDistance);
+
+	DropDuration = FMath::Clamp(ResolveFiniteFloat(DropDuration, 0.6f), 0.f, MaxDropDurationSeconds);
+	ArcHeight = FMath::Clamp(ResolveFiniteFloat(ArcHeight, 120.f), -MaxDropDistance, MaxDropDistance);
+	SideImpulseDistance = FMath::Clamp(ResolveFiniteFloat(SideImpulseDistance, 40.f), -MaxDropDistance, MaxDropDistance);
+	UpImpulseHeight = FMath::Clamp(ResolveFiniteFloat(UpImpulseHeight, 80.f), -MaxDropDistance, MaxDropDistance);
+	SanitizeNonNegativeRange(MinSpinYawSpeed, MaxSpinYawSpeed, MaxDropVelocity);
+	PhysicsHandoffAlpha = FMath::Clamp(ResolveFiniteFloat(PhysicsHandoffAlpha, 0.85f), 0.f, 1.f);
+	SanitizeNonNegativeRange(PhysicsLinearVelocityMin, PhysicsLinearVelocityMax, MaxDropVelocity);
+	SanitizeNonNegativeRange(PhysicsDownwardVelocityMin, PhysicsDownwardVelocityMax, MaxDropVelocity);
+	SanitizeNonNegativeRange(PhysicsAngularVelocityMin, PhysicsAngularVelocityMax, MaxDropVelocity);
+	PhysicsLinearDamping = FMath::Clamp(ResolveFiniteFloat(PhysicsLinearDamping, 0.2f), 0.f, MaxPhysicsDamping);
+	PhysicsAngularDamping = FMath::Clamp(ResolveFiniteFloat(PhysicsAngularDamping, 0.8f), 0.f, MaxPhysicsDamping);
+	PhysicsFriction = FMath::Clamp(ResolveFiniteFloat(PhysicsFriction, 8.f), 0.f, MaxPhysicsFriction);
+	PhysicsRestitution = FMath::Clamp(ResolveFiniteFloat(PhysicsRestitution, 0.f), 0.f, 1.f);
+
+	DropSafetyMaxFallBelowAnchor = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyMaxFallBelowAnchor, 180.f), 0.f, MaxDropDistance);
+	DropSafetyMaxRecoverySnapBelowAnchor = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyMaxRecoverySnapBelowAnchor, 180.f), 0.f, MaxDropDistance);
+	DropSafetyMaxPhysicsSeconds = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyMaxPhysicsSeconds, 5.f), 0.f, MaxDropDurationSeconds);
+	DropSafetyGroundTraceStartHeight = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyGroundTraceStartHeight, 1000.f), 0.f, MaxDropDistance);
+	DropSafetyGroundTraceDistance = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyGroundTraceDistance, 3000.f), 0.f, MaxDropDistance);
+	DropSafetyGroundOffset = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyGroundOffset, 2.f), 0.f, MaxDropDistance);
+	DropSafetyKillZBuffer = FMath::Clamp(
+		ResolveFiniteFloat(DropSafetyKillZBuffer, 250.f), 0.f, MaxDropDistance);
+
+	ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
+	if (!IsValidLootPickupRarity(ItemRarity))
+	{
+		ItemRarity = EItemRarity::Common;
 	}
 }
 

@@ -100,6 +100,10 @@ migration from the old placed `BP_AeyerjiLevelDirector` fields is:
   `Loot.Source.Boss`, matching a `BP_AeyerjiLootTable` pool source tag.
 - `Boss Spawner`, `Boss Gate`, and `Boss Spawn Marker` -> add Actor tags to
   those placed actors, then set them on the boss definition or zone overrides.
+- If streamed/generated map content omits the tagged boss spawner but still
+  supplies a boss class, LevelDirector creates a transient authoritative
+  spawner at the boss marker, teleporter arena endpoint, or boss trigger. The
+  boss remains registered with normal spawner/director death tracking.
 - `Boss Spawn Instigator` / `BP_BossTrigger` -> add an Actor tag to the trigger,
   then set `BossDefinition.BossTriggerActorTag` when Blueprint needs to resolve
   or debug the trigger.

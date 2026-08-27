@@ -1,7 +1,5 @@
 #include "Abilities/RoarCone/GA_AGRoarCone.h"
 
-#include "NativeGameplayTags.h"
-
 namespace AGRoarTags
 {
 	const FGameplayTag& AbilityTag()

@@ -6,6 +6,12 @@
 #include "GameFramework/Actor.h"
 #include "TimerManager.h"
 
+namespace
+{
+	constexpr int32 MaxOutlineTargets = 128;
+	constexpr float MaxOutlinePulseSeconds = 60.f;
+}
+
 // Sets up initial stencil mapping so designers immediately get palette-backed colors.
 UOutlineHighlightComponent::UOutlineHighlightComponent()
 {
@@ -23,10 +29,14 @@ UOutlineHighlightComponent::UOutlineHighlightComponent()
 	RarityIndexToStencil.Add(7, 8); // Celestial
 }
 
-// Nothing to do on begin play beyond the default component behavior, but kept for parity.
-void UOutlineHighlightComponent::BeginPlay()
+void UOutlineHighlightComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	Super::BeginPlay();
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(HighlightPulseHandle);
+	}
+	bPulseActive = false;
+	Super::EndPlay(EndPlayReason);
 }
 
 // Resolve the stencil to write by consulting overrides, falling back to the raw rarity index.
@@ -45,9 +55,11 @@ void UOutlineHighlightComponent::GatherTargets(TArray<UPrimitiveComponent*>& Out
 {
 	OutTargets.Reset();
 
-	for (UPrimitiveComponent* Comp : ExplicitTargets)
+	const int32 ExplicitTargetCount = FMath::Min(ExplicitTargets.Num(), MaxOutlineTargets);
+	for (int32 TargetIndex = 0; TargetIndex < ExplicitTargetCount; ++TargetIndex)
 	{
-		if (IsValid(Comp))
+		UPrimitiveComponent* Comp = ExplicitTargets[TargetIndex];
+		if (IsValid(Comp) && Comp->GetOwner() == GetOwner())
 		{
 			OutTargets.Add(Comp);
 		}
@@ -60,8 +72,10 @@ void UOutlineHighlightComponent::GatherTargets(TArray<UPrimitiveComponent*>& Out
 			TArray<UActorComponent*> OwnerComponents;
 			Owner->GetComponents(OwnerComponents);
 
-			for (UActorComponent* Component : OwnerComponents)
+			const int32 OwnerComponentCount = FMath::Min(OwnerComponents.Num(), MaxOutlineTargets);
+			for (int32 ComponentIndex = 0; ComponentIndex < OwnerComponentCount; ++ComponentIndex)
 			{
+				UActorComponent* Component = OwnerComponents[ComponentIndex];
 				if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(Component))
 				{
 					if (IsValid(Prim))
@@ -134,8 +148,8 @@ void UOutlineHighlightComponent::SetHighlighted(bool bEnable)
 
 void UOutlineHighlightComponent::PulseHighlight(float Duration, float FadeTime, int32 OverrideStencil)
 {
-	const float SafeDuration = FMath::Max(Duration, 0.f);
-	const float SafeFadeTime = FMath::Max(FadeTime, 0.f);
+	const float SafeDuration = FMath::Clamp(FMath::IsFinite(Duration) ? Duration : 0.f, 0.f, MaxOutlinePulseSeconds);
+	const float SafeFadeTime = FMath::Clamp(FMath::IsFinite(FadeTime) ? FadeTime : 0.f, 0.f, MaxOutlinePulseSeconds);
 
 	if ((SafeDuration + SafeFadeTime) <= 0.f)
 	{
@@ -150,7 +164,10 @@ void UOutlineHighlightComponent::PulseHighlight(float Duration, float FadeTime, 
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(HighlightPulseHandle);
-		bHighlightedBeforePulse = bCurrentlyHighlighted;
+		if (!bPulseActive)
+		{
+			bHighlightedBeforePulse = bCurrentlyHighlighted;
+		}
 		bPulseActive = true;
 		SetHighlighted(true);
 

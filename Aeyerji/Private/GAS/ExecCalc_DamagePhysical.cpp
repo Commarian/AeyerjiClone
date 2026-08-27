@@ -48,6 +48,11 @@ namespace
 		static FDamageStatics Statics;
 		return Statics;
 	}
+
+	float FiniteOrDefault(const float Value, const float DefaultValue = 0.f)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
 }
 
 DEFINE_LOG_CATEGORY_STATIC(LogDamagePhysicalCalc, Log, All);
@@ -78,8 +83,8 @@ FAeyerjiDamageRollResult UExecCalc_DamagePhysical::ResolveDamageRoll(const float
 {
 	FAeyerjiDamageRollResult Result;
 
-	const float SafeAverage = FMath::Max(0.f, AverageDamage);
-	const float SafeVariance = FMath::Clamp(VarianceFraction, 0.f, 0.95f);
+	const float SafeAverage = FMath::Max(0.f, FiniteOrDefault(AverageDamage));
+	const float SafeVariance = FMath::Clamp(FiniteOrDefault(VarianceFraction), 0.f, 0.95f);
 
 	Result.DamageBeforeMitigation = SafeAverage;
 	if (bUseVariance)
@@ -89,14 +94,20 @@ FAeyerjiDamageRollResult UExecCalc_DamagePhysical::ResolveDamageRoll(const float
 		Result.DamageBeforeMitigation *= FMath::Lerp(
 			MinimumMultiplier,
 			MaximumMultiplier,
-			FMath::Clamp(DamageRollAlpha, 0.f, 1.f));
+			FMath::Clamp(FiniteOrDefault(DamageRollAlpha), 0.f, 1.f));
 	}
 
 	Result.bWasCritical = bCanCrit
-		&& FMath::Clamp(CritRollAlpha, 0.f, 1.f) < FMath::Clamp(CritChanceFraction, 0.f, 1.f);
+		&& FMath::Clamp(FiniteOrDefault(CritRollAlpha), 0.f, 1.f)
+			< FMath::Clamp(FiniteOrDefault(CritChanceFraction), 0.f, 1.f);
 	if (Result.bWasCritical)
 	{
-		Result.DamageBeforeMitigation *= FMath::Max(1.f, CriticalMultiplier);
+		Result.DamageBeforeMitigation *= FMath::Max(1.f, FiniteOrDefault(CriticalMultiplier, 1.f));
+		if (!FMath::IsFinite(Result.DamageBeforeMitigation))
+		{
+			Result.DamageBeforeMitigation = 0.f;
+			Result.bWasCritical = false;
+		}
 	}
 
 	return Result;
@@ -105,7 +116,8 @@ FAeyerjiDamageRollResult UExecCalc_DamagePhysical::ResolveDamageRoll(const float
 bool UExecCalc_DamagePhysical::ResolveDodge(const bool bCanBeDodged, const float DodgeChanceFraction, const float DodgeRollAlpha)
 {
 	return bCanBeDodged
-		&& FMath::Clamp(DodgeRollAlpha, 0.f, 1.f) < FMath::Clamp(DodgeChanceFraction, 0.f, 1.f);
+		&& FMath::Clamp(FiniteOrDefault(DodgeRollAlpha), 0.f, 1.f)
+			< FMath::Clamp(FiniteOrDefault(DodgeChanceFraction), 0.f, 1.f);
 }
 
 float UExecCalc_DamagePhysical::ResolveArmorPenetration(
@@ -114,9 +126,9 @@ float UExecCalc_DamagePhysical::ResolveArmorPenetration(
 	const float MaximumPenetration)
 {
 	return FMath::Clamp(
-		FMath::Max(0.f, SourcePenetration) + FMath::Max(0.f, SpecPenetration),
+		FMath::Max(0.f, FiniteOrDefault(SourcePenetration)) + FMath::Max(0.f, FiniteOrDefault(SpecPenetration)),
 		0.f,
-		FMath::Max(0.f, MaximumPenetration));
+		FMath::Max(0.f, FiniteOrDefault(MaximumPenetration)));
 }
 
 float UExecCalc_DamagePhysical::ResolveLifeSteal(
@@ -130,8 +142,33 @@ float UExecCalc_DamagePhysical::ResolveLifeSteal(
 		return 0.f;
 	}
 	return FMath::Min(
-		FMath::Max(0.f, ActualDamage) * FMath::Max(0.f, LifeStealFraction),
-		FMath::Max(0.f, MissingHealth));
+		FMath::Max(0.f, FiniteOrDefault(ActualDamage)) * FMath::Max(0.f, FiniteOrDefault(LifeStealFraction)),
+		FMath::Max(0.f, FiniteOrDefault(MissingHealth)));
+}
+
+float UExecCalc_DamagePhysical::ResolveArmorDamageReduction(
+	const float Armor,
+	const float ArmorK,
+	const float ArmorSoftCap,
+	const float ArmorTailSlope,
+	const float ArmorTailCap)
+{
+	const float SafeArmor = FMath::Max(0.f, FiniteOrDefault(Armor));
+	const float SafeK = FMath::Max(FiniteOrDefault(ArmorK, 1000.f), KINDA_SMALL_NUMBER);
+	const float SafeSoftCap = FMath::Max(0.f, FiniteOrDefault(ArmorSoftCap, 1000.f));
+	const float SoftCapDR = FMath::Clamp(SafeSoftCap / (SafeSoftCap + SafeK), 0.f, 1.f);
+	if (SafeArmor <= SafeSoftCap)
+	{
+		return FMath::Clamp(SafeArmor / (SafeArmor + SafeK), 0.f, 1.f);
+	}
+
+	const float SafeTailSlope = FMath::Max(0.f, FiniteOrDefault(ArmorTailSlope));
+	const float SafeTailCap = FMath::Clamp(
+		FMath::Max(SoftCapDR, FiniteOrDefault(ArmorTailCap, SoftCapDR)),
+		0.f,
+		1.f);
+	const float TailDR = SoftCapDR + (SafeArmor - SafeSoftCap) * SafeTailSlope;
+	return FMath::Clamp(FMath::Min(FiniteOrDefault(TailDR, SafeTailCap), SafeTailCap), 0.f, 1.f);
 }
 
 UExecCalc_DamagePhysical::FArmorTuning UExecCalc_DamagePhysical::ResolveArmorTuning()
@@ -153,21 +190,20 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 {
 	const FGameplayEffectSpec& Spec = ExecutionParams.GetOwningSpec();
 
-	static const FGameplayTag DamageTag = FGameplayTag::RequestGameplayTag(TEXT("SetByCaller.Damage.Instant"), /*ErrorIfNotFound=*/false);
-	const float RawMagnitude = DamageTag.IsValid()
-		? Spec.GetSetByCallerMagnitude(DamageTag, /*WarnIfNotFound=*/false, 0.f)
-		: 0.f;
+	const float RawMagnitude = Spec.GetSetByCallerMagnitude(
+		AeyerjiTags::SBC_Damage_Instant,
+		/*WarnIfNotFound=*/false,
+		0.f);
 
-	if (RawMagnitude < 0.f)
+	if (!FMath::IsFinite(RawMagnitude) || RawMagnitude <= KINDA_SMALL_NUMBER)
 	{
-		UE_LOG(LogDamagePhysicalCalc, Warning, TEXT("Execute_Implementation: SetByCaller.Damage.Instant is negative (%.2f). Expected positive; using abs."), RawMagnitude);
-	}
-
-	const float BaseDamage = FMath::Max(FMath::Abs(RawMagnitude), 0.f);
-	if (BaseDamage <= KINDA_SMALL_NUMBER)
-	{
+		UE_LOG(LogDamagePhysicalCalc, Warning,
+			TEXT("Execute_Implementation: rejected non-positive or non-finite SetByCaller.Damage.Instant (%f)."),
+			RawMagnitude);
 		return;
 	}
+
+	const float BaseDamage = RawMagnitude;
 
 	const UAbilitySystemComponent* TargetASC = ExecutionParams.GetTargetAbilitySystemComponent();
 	const AActor* SourceActor = Spec.GetContext().GetOriginalInstigator();
@@ -177,15 +213,12 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 		TargetActor = TargetASC->GetOwnerActor();
 	}
 
-	const FGenericTeamId SourceTeam = AbilityTeamUtils::ResolveTeamId(SourceActor);
-	const FGenericTeamId TargetTeam = AbilityTeamUtils::ResolveTeamId(TargetActor);
-	if (SourceTeam != FGenericTeamId::NoTeam && TargetTeam != FGenericTeamId::NoTeam && SourceTeam == TargetTeam)
+	if (AbilityTeamUtils::AreOnSameTeam(SourceActor, TargetActor))
 	{
 		UE_LOG(LogDamagePhysicalCalc, VeryVerbose,
-			TEXT("DamageCalc: Friendly physical damage suppressed Source=%s Target=%s Team=%u"),
+			TEXT("DamageCalc: Friendly or self physical damage suppressed Source=%s Target=%s"),
 			*GetNameSafe(SourceActor),
-			*GetNameSafe(TargetActor),
-			static_cast<uint8>(SourceTeam.GetId()));
+			*GetNameSafe(TargetActor));
 		return;
 	}
 
@@ -236,12 +269,13 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 		const FAeyerjiCombatLimitsTuning CombatLimits = UAeyerjiStatSettings::Get()
 			? UAeyerjiStatSettings::Get()->CombatLimits
 			: FAeyerjiCombatLimitsTuning();
+		const float MaxDodgeChance = CombatLimits.GetSafeMaxDodgeChance();
 
 		float DodgeChance = 0.f;
 		if (bCanBeDodged)
 		{
 			ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().DodgeChanceDef, EvalParams, DodgeChance);
-			DodgeChance = FMath::Clamp(DodgeChance, 0.f, 1.f);
+		DodgeChance = FMath::Clamp(FiniteOrDefault(DodgeChance), 0.f, MaxDodgeChance);
 		}
 		if (ResolveDodge(bCanBeDodged, DodgeChance, FMath::FRand()))
 		{
@@ -260,30 +294,34 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 
 		float PhysicalDamageBonus = 0.f;
 		ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().PhysicalDamageBonusDef, EvalParams, PhysicalDamageBonus);
+		PhysicalDamageBonus = FiniteOrDefault(PhysicalDamageBonus);
 		const float DamageAfterPhysicalBonus = BaseDamage * FMath::Max(0.f, 1.f + PhysicalDamageBonus);
 
 		float AttackDamageVariance = 0.f;
 		ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().AttackDamageVarianceDef, EvalParams, AttackDamageVariance);
-		AttackDamageVariance = FMath::Clamp(AttackDamageVariance, 0.f, 0.95f);
 		if (AeyerjiTags::SBC_Damage_Variance.GetTag().IsValid())
 		{
 			AttackDamageVariance = Spec.GetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_Variance, /*WarnIfNotFound=*/false, AttackDamageVariance);
 		}
+		AttackDamageVariance = FMath::Clamp(FiniteOrDefault(AttackDamageVariance), 0.f, 0.95f);
 
 		float CritChance = 0.f;
 		ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().CritChanceDef, EvalParams, CritChance);
-		CritChance = FMath::Clamp(CritChance, 0.f, FMath::Max(0.f, CombatLimits.MaxCritChance));
+		CritChance = FMath::Clamp(
+			FiniteOrDefault(CritChance),
+			0.f,
+			FMath::Max(0.f, FiniteOrDefault(CombatLimits.MaxCritChance)));
 
 		float CriticalDamageMultiplier = 2.f;
 		ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().CriticalDamageMultiplierDef, EvalParams, CriticalDamageMultiplier);
-		CriticalDamageMultiplier = FMath::Clamp(
-			CriticalDamageMultiplier,
-			1.f,
-			FMath::Max(1.f, CombatLimits.MaxCriticalDamageMultiplier));
 		if (AeyerjiTags::SBC_Damage_CriticalMultiplier.GetTag().IsValid())
 		{
 			CriticalDamageMultiplier = Spec.GetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_CriticalMultiplier, /*WarnIfNotFound=*/false, CriticalDamageMultiplier);
 		}
+		CriticalDamageMultiplier = FMath::Clamp(
+			FiniteOrDefault(CriticalDamageMultiplier, 1.f),
+			1.f,
+			FMath::Max(1.f, FiniteOrDefault(CombatLimits.MaxCriticalDamageMultiplier, 1.f)));
 
 		const FAeyerjiDamageRollResult DamageRoll = ResolveDamageRoll(
 			DamageAfterPhysicalBonus,
@@ -297,10 +335,10 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 
 		float ArmorValue = 0.f;
 		ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().ArmorDef, EvalParams, ArmorValue);
-		ArmorValue = FMath::Max(0.f, ArmorValue);
+		ArmorValue = FMath::Max(0.f, FiniteOrDefault(ArmorValue));
 
 		const float ArmorShred = Spec.GetSetByCallerMagnitude(AeyerjiTags::SBC_ArmorShred, /*WarnIfNotFound=*/false, 0.f);
-		ArmorValue = FMath::Max(0.f, ArmorValue - FMath::Max(0.f, ArmorShred));
+		ArmorValue = FMath::Max(0.f, ArmorValue - FMath::Max(0.f, FiniteOrDefault(ArmorShred)));
 
 		float SourceArmorPenetration = 0.f;
 		ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().ArmorPenetrationDef, EvalParams, SourceArmorPenetration);
@@ -308,18 +346,21 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 		const float ArmorPenetration = ResolveArmorPenetration(
 			SourceArmorPenetration,
 			SpecArmorPenetration,
-			CombatLimits.MaxArmorPenetration);
+			FiniteOrDefault(CombatLimits.MaxArmorPenetration));
 
 		const FArmorTuning ArmorTuning = ResolveArmorTuning();
 		const float DamageReduction = ComputeArmorDR(ArmorValue, ArmorTuning);
 		const float EffectiveDR = DamageReduction * (1.f - FMath::Clamp(ArmorPenetration, 0.f, 1.f));
-		FinalDamage = DamageRoll.DamageBeforeMitigation * (1.f - EffectiveDR);
+		FinalDamage = FiniteOrDefault(DamageRoll.DamageBeforeMitigation * (1.f - EffectiveDR));
 
 		float LifeSteal = 0.f;
 		if (bCanLifeSteal)
 		{
 			ExecutionParams.AttemptCalculateCapturedAttributeMagnitude(DamageStatics().LifeStealDef, EvalParams, LifeSteal);
-			LifeSteal = FMath::Clamp(LifeSteal, 0.f, FMath::Max(0.f, CombatLimits.MaxLifeSteal));
+			LifeSteal = FMath::Clamp(
+				FiniteOrDefault(LifeSteal),
+				0.f,
+				FMath::Max(0.f, FiniteOrDefault(CombatLimits.MaxLifeSteal)));
 		}
 
 		if (bCanStagger && FinalDamage > KINDA_SMALL_NUMBER)
@@ -332,10 +373,14 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 				AeyerjiTags::SBC_Damage_StaggerMultiplier,
 				/*WarnIfNotFound=*/false,
 				1.f);
-			StaggerDamage = FinalDamage
-				* FMath::Max(0.f, StaggerPower)
-				* FMath::Max(0.f, StaggerMultiplier)
-				* (1.f - FMath::Clamp(StaggerResistance, 0.f, FMath::Max(0.f, CombatLimits.MaxStaggerResistance)));
+			StaggerDamage = FiniteOrDefault(
+				FinalDamage
+				* FMath::Max(0.f, FiniteOrDefault(StaggerPower))
+				* FMath::Max(0.f, FiniteOrDefault(StaggerMultiplier))
+				* (1.f - FMath::Clamp(
+					FiniteOrDefault(StaggerResistance),
+					0.f,
+					FMath::Max(0.f, FiniteOrDefault(CombatLimits.MaxStaggerResistance)))));
 		}
 
 		if (Result)
@@ -379,13 +424,10 @@ void UExecCalc_DamagePhysical::Execute_Implementation(const FGameplayEffectCusto
 
 float UExecCalc_DamagePhysical::ComputeArmorDR(float Armor, const FArmorTuning& Tuning)
 {
-	const float ClampedArmor = FMath::Max(0.f, Armor);
-	if (ClampedArmor <= Tuning.ArmorSoftCap)
-	{
-		const float Denominator = ClampedArmor + FMath::Max(Tuning.ArmorK, KINDA_SMALL_NUMBER);
-		return FMath::Clamp(ClampedArmor / Denominator, 0.f, 1.f);
-	}
-
-	const float TailDR = 0.5f + (ClampedArmor - Tuning.ArmorSoftCap) * Tuning.ArmorTailSlope;
-	return FMath::Clamp(FMath::Min(TailDR, Tuning.ArmorTailCap), 0.f, 1.f);
+	return ResolveArmorDamageReduction(
+		Armor,
+		Tuning.ArmorK,
+		Tuning.ArmorSoftCap,
+		Tuning.ArmorTailSlope,
+		Tuning.ArmorTailCap);
 }

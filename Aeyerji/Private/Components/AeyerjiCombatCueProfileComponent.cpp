@@ -15,6 +15,43 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/PlayerController.h"
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+namespace
+{
+	constexpr float MaxCueScalar = 100.f;
+	constexpr float MaxCueDistance = 10000000.f;
+
+	float FiniteCueScalar(const float Value, const float DefaultValue, const float MinValue, const float MaxValue)
+	{
+		return FMath::Clamp(FMath::IsFinite(Value) ? Value : DefaultValue, MinValue, MaxValue);
+	}
+
+	bool IsFiniteCueVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
+	FVector FiniteCueVector(const FVector& Value, const FVector& DefaultValue = FVector::ZeroVector)
+	{
+		return IsFiniteCueVector(Value) ? Value : DefaultValue;
+	}
+
+	FRotator FiniteCueRotator(const FRotator& Value)
+	{
+		return FMath::IsFinite(Value.Pitch) && FMath::IsFinite(Value.Yaw) && FMath::IsFinite(Value.Roll)
+			? Value.GetNormalized()
+			: FRotator::ZeroRotator;
+	}
+
+	FVector FiniteCueScale(const FVector& Value)
+	{
+		const FVector SafeValue = FiniteCueVector(Value, FVector::OneVector);
+		return FVector(
+			FMath::Clamp(SafeValue.X, -MaxCueScalar, MaxCueScalar),
+			FMath::Clamp(SafeValue.Y, -MaxCueScalar, MaxCueScalar),
+			FMath::Clamp(SafeValue.Z, -MaxCueScalar, MaxCueScalar));
+	}
+}
+
 const FAeyerjiCombatCuePresentation* FAeyerjiCombatCueProfileRow::FindPresentation(
 	EAeyerjiCombatTextResultType CueType) const
 {
@@ -69,13 +106,15 @@ bool UAeyerjiCombatCueProfileComponent::PlayCombatCuePresentation(
 	bool bHandled = false;
 	if (Presentation->Sound)
 	{
-		const float MinPitch = FMath::Max(0.01f, FMath::Min(Presentation->PitchRange.X, Presentation->PitchRange.Y));
-		const float MaxPitch = FMath::Max(MinPitch, FMath::Max(Presentation->PitchRange.X, Presentation->PitchRange.Y));
+		const float PitchX = FiniteCueScalar(Presentation->PitchRange.X, 1.f, 0.01f, 4.f);
+		const float PitchY = FiniteCueScalar(Presentation->PitchRange.Y, 1.f, 0.01f, 4.f);
+		const float MinPitch = FMath::Min(PitchX, PitchY);
+		const float MaxPitch = FMath::Max(PitchX, PitchY);
 		UGameplayStatics::PlaySoundAtLocation(
 			this,
 			Presentation->Sound,
 			Location,
-			FMath::Max(0.f, Presentation->VolumeMultiplier),
+			FiniteCueScalar(Presentation->VolumeMultiplier, 1.f, 0.f, MaxCueScalar),
 			FMath::RandRange(MinPitch, MaxPitch));
 		bHandled = true;
 	}
@@ -102,8 +141,8 @@ bool UAeyerjiCombatCueProfileComponent::PlayCombatCuePresentation(
 				Presentation->Effect,
 				AttachComponent,
 				Presentation->AttachSocket,
-				Presentation->LocationOffset,
-				Presentation->RotationOffset,
+				FiniteCueVector(Presentation->LocationOffset),
+				FiniteCueRotator(Presentation->RotationOffset),
 				EAttachLocation::KeepRelativeOffset,
 				true,
 				true,
@@ -117,7 +156,7 @@ bool UAeyerjiCombatCueProfileComponent::PlayCombatCuePresentation(
 				Presentation->Effect,
 				Location,
 				Rotation,
-				Presentation->EffectScale,
+				FiniteCueScale(Presentation->EffectScale),
 				true,
 				true,
 				ENCPoolMethod::AutoRelease,
@@ -153,38 +192,40 @@ FVector UAeyerjiCombatCueProfileComponent::ResolvePresentationLocation(
 	const FGameplayCueParameters& Parameters) const
 {
 	FVector Location = FVector::ZeroVector;
-	if (Presentation.bUseCueLocation && !Parameters.Location.IsNearlyZero())
+	if (Presentation.bUseCueLocation && IsFiniteCueVector(Parameters.Location) && !Parameters.Location.IsNearlyZero())
 	{
 		Location = Parameters.Location;
 	}
 	else if (GetOwner())
 	{
-		Location = GetOwner()->GetActorLocation();
+		Location = FiniteCueVector(GetOwner()->GetActorLocation());
 		if (ACharacter* CharacterOwner = Cast<ACharacter>(GetOwner()))
 		{
 			if (USkeletalMeshComponent* Mesh = CharacterOwner->GetMesh())
 			{
 				if (!Presentation.AttachSocket.IsNone() && Mesh->DoesSocketExist(Presentation.AttachSocket))
 				{
-					Location = Mesh->GetSocketLocation(Presentation.AttachSocket);
+					Location = FiniteCueVector(Mesh->GetSocketLocation(Presentation.AttachSocket), Location);
 				}
 			}
 		}
 	}
 
-	return Location + Presentation.LocationOffset;
+	const FVector Result = Location + FiniteCueVector(Presentation.LocationOffset);
+	return FiniteCueVector(Result, Location);
 }
 
 FRotator UAeyerjiCombatCueProfileComponent::ResolvePresentationRotation(
 	const FAeyerjiCombatCuePresentation& Presentation,
 	const FGameplayCueParameters& Parameters) const
 {
-	FRotator Rotation = Presentation.RotationOffset;
-	if (!Parameters.Normal.IsNearlyZero())
+	const FRotator RotationOffset = FiniteCueRotator(Presentation.RotationOffset);
+	FRotator Rotation = RotationOffset;
+	if (IsFiniteCueVector(Parameters.Normal) && !Parameters.Normal.IsNearlyZero())
 	{
-		Rotation = Parameters.Normal.Rotation() + Presentation.RotationOffset;
+		Rotation = Parameters.Normal.GetSafeNormal().Rotation() + RotationOffset;
 	}
-	return Rotation;
+	return FiniteCueRotator(Rotation);
 }
 
 bool UAeyerjiCombatCueProfileComponent::PlayLocalPlayerFeedback(
@@ -209,21 +250,23 @@ bool UAeyerjiCombatCueProfileComponent::PlayLocalPlayerFeedback(
 	{
 		if (Presentation.bPlayCameraShakeInWorld)
 		{
-			const float InnerRadius = FMath::Max(0.f, Presentation.WorldShakeInnerRadius);
-			const float OuterRadius = FMath::Max(InnerRadius, Presentation.WorldShakeOuterRadius);
+			const float InnerRadius = FiniteCueScalar(
+				Presentation.WorldShakeInnerRadius, 0.f, 0.f, MaxCueDistance);
+			const float OuterRadius = FMath::Max(InnerRadius, FiniteCueScalar(
+				Presentation.WorldShakeOuterRadius, InnerRadius, 0.f, MaxCueDistance));
 			UGameplayStatics::PlayWorldCameraShake(
 				this,
 				Presentation.CameraShake,
 				Location,
 				InnerRadius,
 				OuterRadius,
-				FMath::Max(0.f, Presentation.WorldShakeFalloff));
+				FiniteCueScalar(Presentation.WorldShakeFalloff, 1.f, 0.f, MaxCueScalar));
 		}
 		else if (PlayerController->PlayerCameraManager)
 		{
 			PlayerController->PlayerCameraManager->StartCameraShake(
 				Presentation.CameraShake,
-				FMath::Max(0.f, Presentation.CameraShakeScale),
+				FiniteCueScalar(Presentation.CameraShakeScale, 1.f, 0.f, MaxCueScalar),
 				Presentation.CameraShakePlaySpace,
 				Rotation);
 		}
@@ -244,7 +287,7 @@ bool UAeyerjiCombatCueProfileComponent::PlayLocalPlayerFeedback(
 			Location,
 			Rotation,
 			Presentation.bLoopForceFeedback,
-			FMath::Max(0.f, Presentation.ForceFeedbackIntensity),
+			FiniteCueScalar(Presentation.ForceFeedbackIntensity, 1.f, 0.f, MaxCueScalar),
 			0.f,
 			nullptr,
 			true);

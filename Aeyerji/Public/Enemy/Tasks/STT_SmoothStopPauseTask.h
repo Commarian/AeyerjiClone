@@ -26,9 +26,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SmoothStop")
     float PauseTime = 0.40f;
 
-    // If true, restore original MaxWalkSpeed on ExitState (the next state may also set speed).
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SmoothStop")
-    bool bRestoreSpeedOnExit = false;
+    // Retained for old assets; native behavior now always restores speed to prevent a zero-speed leak.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SmoothStop", meta=(DeprecatedProperty, DeprecationMessage="Speed is always restored on exit."))
+    bool bRestoreSpeedOnExit = true;
 
     // Optional easing exponent applied to the decel alpha (1.0 = linear, 2.0 = ease-in, 0.5 = ease-out)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="SmoothStop")

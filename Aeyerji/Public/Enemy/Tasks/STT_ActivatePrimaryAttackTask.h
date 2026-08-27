@@ -8,7 +8,6 @@
 #include "GameplayTagContainer.h"
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "STT_ActivatePrimaryAttackTask.generated.h"
-#pragma once
 
 class UAbilitySystemComponent;
 struct FGameplayEventData;

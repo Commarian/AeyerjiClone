@@ -1,99 +1,15 @@
-M_GruntAttrs
-Intent: Baseline melee foot soldier for packs and early encounters.
-Notes: Balanced speed and damage, low armor, short reach; good tuning baseline.
-Use: Filler enemies or wave padding around elites.
+Enemy attribute notes have moved to the canonical balance documentation.
 
-M_BruteAttrs
-Intent: Slow, heavy bruiser that anchors the front line.
-Notes: Very high HP and armor, short melee reach, heavy single hits.
-Use: Force players to kite or burn down a sturdy target.
+Human-readable policy and workflow:
+  Source/Aeyerji/Docs/CombatBalance.md
 
-M_SkirmisherAttrs
-Intent: Fast harasser that darts in and out.
-Notes: Low HP, high run speed, quick attacks, low damage per hit.
-Use: Pressure backlines and punish slow players.
+Generated source values, hit budgets, projections, and asset mappings:
+  Source/Aeyerji/Docs/EnemyBalanceMatrix.generated.md
 
-M_BerserkerAttrs
-Intent: Aggressive damage dealer that snowballs if ignored.
-Notes: High attack speed and damage, low armor, moderate HP.
-Use: Glass cannon melee threat.
+Machine-readable design contract:
+  Source/Aeyerji/Data/EnemyBalanceTargets.json
 
-M_TankAttrs
-Intent: Damage sponge that blocks lanes.
-Notes: Extreme HP/armor, very slow, low damage.
-Use: Soak player bursts while other enemies attack.
-
-M_AssassinAttrs
-Intent: Hit-and-run burst assassin.
-Notes: Very high speed, narrow attack arc, low HP, high DPS spikes.
-Use: Flanks and deletes isolated targets.
-
-M_BrawlerAttrs
-Intent: Crowd brawler with wide swings.
-Notes: Moderate HP/armor, wide attack angle, steady pace.
-Use: Disrupts groups and pins players.
-
-M_GuardianAttrs
-Intent: Defensive escort that protects key units.
-Notes: High armor, moderate HP, slower attacks, reliable reach.
-Use: Bodyguard for casters or bosses.
-
-M_DuelistAttrs
-Intent: Precision melee fighter focused on single targets.
-Notes: Fast attacks, narrow angle, moderate damage, agile.
-Use: Dangerous in 1v1, weaker vs groups.
-
-M_CleaverAttrs
-Intent: Heavy sweeping attacker for crowd control.
-Notes: Wide attack arc, high damage per hit, slow cooldown.
-Use: Punish clumped players.
-
-M_ReaverAttrs
-Intent: Relentless chaser with sustained pressure.
-Notes: Above-average damage, moderate speed and armor.
-Use: Keeps pressure on fleeing targets.
-
-M_PackHunterAttrs
-Intent: Swarm unit that overwhelms by volume.
-Notes: Very fast, very low HP, extremely high attack speed, low damage.
-Use: Comes in packs; dangerous only in groups.
-
-M_EnforcerAttrs
-Intent: Reliable midline bruiser.
-Notes: Solid HP/armor, dependable damage, moderate speed.
-Use: General-purpose melee threat.
-
-M_BulwarkAttrs
-Intent: Fortress unit that refuses to die.
-Notes: Extreme HP/armor, very slow, minimal damage.
-Use: Forces repositioning and target prioritization.
-
-M_VanguardAttrs
-Intent: Aggressive spearhead that starts engagements.
-Notes: Fast approach, good damage, moderate armor, larger patrol.
-Use: Leads packs and closes distance quickly.
-
-R_RangedAttrs
-Intent: Baseline ranged shooter for general encounters.
-Notes: Balanced range and damage, moderate speed, standard projectile speed.
-Use: Default ranged pack member.
-
-R_CasterAttrs
-Intent: Spellcaster backliner with ability focus.
-Notes: High mana and range, slower attacks, fragile armor.
-Use: Ability-driven threat behind melee screen.
-
-R_SniperAttrs
-Intent: Long-range precision threat.
-Notes: Very high range and damage, slow attack cadence, low HP.
-Use: Punishes stationary targets.
-
-R_BombardierAttrs
-Intent: Area pressure artillery.
-Notes: Wide attack angle, high damage, slow projectiles, moderate HP.
-Use: Controls space and punishes clustering.
-
-R_SupportAttrs
-Intent: Utility backliner that enables others.
-Notes: Higher mana and armor, low damage, faster cooldowns.
-Use: Buff, debuff, or heal support style.
+Do not add parallel tuning notes to this file. Update the contract or the human
+documentation, then run:
+  python Scripts/validate_enemy_balance.py --write
+  python Scripts/validate_enemy_balance.py --check

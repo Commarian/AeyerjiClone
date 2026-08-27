@@ -34,6 +34,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend")
 	void RefreshCurrentState();
 
+	/**
+	 * Retries profile submission when seamless travel finally assigns the local PlayerState.
+	 * The controller calls this from its possession/PlayerState replication hooks so submission
+	 * does not depend on an unrelated later lobby snapshot.
+	 */
+	void NotifyLocalPlayerStateReady(AAeyerjiPlayerState* PlayerState);
+
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Frontend")
 	const FAeyerjiFrontendSnapshot& GetFrontendSnapshot() const { return FrontendSnapshot; }
 
@@ -51,6 +58,10 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Session")
 	bool LeaveCurrentParty();
+
+	/** Opens the provider invite overlay for the retained online party, when supported. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Session")
+	bool OpenPartyInviteOverlay();
 
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Frontend|Lobby")
 	bool SetReady(bool bReady);
@@ -94,5 +105,14 @@ private:
 
 	TWeakObjectPtr<AAeyerjiGameState> BoundGameState;
 	TWeakObjectPtr<AAeyerjiPlayerState> BoundPlayerState;
+
+	/**
+	 * Tracks the asynchronous profile submission made for the current local PlayerState.
+	 * Joining creates a new PlayerState, so the same resolved profile must be submitted once again.
+	 */
+	TWeakObjectPtr<AAeyerjiPlayerState> ProfileSubmissionPlayerState;
+	int64 ProfileSubmissionRevision = 0;
+	bool bProfileSubmissionPending = false;
+
 	FDelegateHandle PostLoadMapHandle;
 };

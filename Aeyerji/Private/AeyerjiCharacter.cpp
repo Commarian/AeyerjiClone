@@ -87,14 +87,67 @@ AAeyerjiCharacter::AAeyerjiCharacter(
 void AAeyerjiCharacter::OnConstruction(const FTransform& Transform)
 {
   Super::OnConstruction(Transform);
+  CaptureBaseCollisionCapsuleSize();
   RefreshCollisionCapsuleSize();
   WarnOnScaledRootCapsule();
 }
 
 void AAeyerjiCharacter::BeginPlay() {
   Super::BeginPlay();
+  CaptureBaseCollisionCapsuleSize();
   RefreshCollisionCapsuleSize();
   WarnOnScaledRootCapsule();
+}
+
+void AAeyerjiCharacter::SetArchetypeCollisionCapsuleSize(
+    const float CapsuleRadius,
+    const float CapsuleHalfHeight)
+{
+  CaptureBaseCollisionCapsuleSize();
+
+  if (!FMath::IsFinite(CapsuleRadius) || !FMath::IsFinite(CapsuleHalfHeight)
+      || CapsuleRadius <= KINDA_SMALL_NUMBER || CapsuleHalfHeight <= KINDA_SMALL_NUMBER)
+  {
+    ClearArchetypeCollisionCapsuleSize();
+    return;
+  }
+
+  ArchetypeCollisionCapsuleRadius = FMath::Max(1.f, CapsuleRadius);
+  ArchetypeCollisionCapsuleHalfHeight = FMath::Max(ArchetypeCollisionCapsuleRadius, CapsuleHalfHeight);
+  RefreshCollisionCapsuleSize();
+}
+
+void AAeyerjiCharacter::ClearArchetypeCollisionCapsuleSize()
+{
+  ArchetypeCollisionCapsuleRadius = 0.f;
+  ArchetypeCollisionCapsuleHalfHeight = 0.f;
+  RefreshCollisionCapsuleSize();
+}
+
+void AAeyerjiCharacter::CaptureBaseCollisionCapsuleSize()
+{
+  if (bHasCapturedBaseCollisionCapsuleSize)
+  {
+    return;
+  }
+
+  const UCapsuleComponent* Capsule = GetCapsuleComponent();
+  if (!Capsule)
+  {
+    return;
+  }
+
+  const float Radius = Capsule->GetUnscaledCapsuleRadius();
+  const float HalfHeight = Capsule->GetUnscaledCapsuleHalfHeight();
+  if (!FMath::IsFinite(Radius) || !FMath::IsFinite(HalfHeight)
+      || Radius <= KINDA_SMALL_NUMBER || HalfHeight <= KINDA_SMALL_NUMBER)
+  {
+    return;
+  }
+
+  BaseCollisionCapsuleRadius = Radius;
+  BaseCollisionCapsuleHalfHeight = HalfHeight;
+  bHasCapturedBaseCollisionCapsuleSize = true;
 }
 
 void AAeyerjiCharacter::RefreshCollisionCapsuleSize()
@@ -105,10 +158,18 @@ void AAeyerjiCharacter::RefreshCollisionCapsuleSize()
     return;
   }
 
-  const float DesiredRadius =
-      (CollisionCapsuleRadius > 0.f) ? CollisionCapsuleRadius : Capsule->GetUnscaledCapsuleRadius();
-  const float DesiredHalfHeight =
-      (CollisionCapsuleHalfHeight > 0.f) ? CollisionCapsuleHalfHeight : Capsule->GetUnscaledCapsuleHalfHeight();
+  const float FallbackRadius = bHasCapturedBaseCollisionCapsuleSize
+      ? BaseCollisionCapsuleRadius
+      : Capsule->GetUnscaledCapsuleRadius();
+  const float FallbackHalfHeight = bHasCapturedBaseCollisionCapsuleSize
+      ? BaseCollisionCapsuleHalfHeight
+      : Capsule->GetUnscaledCapsuleHalfHeight();
+  const float DesiredRadius = (ArchetypeCollisionCapsuleRadius > 0.f)
+      ? ArchetypeCollisionCapsuleRadius
+      : ((CollisionCapsuleRadius > 0.f) ? CollisionCapsuleRadius : FallbackRadius);
+  const float DesiredHalfHeight = (ArchetypeCollisionCapsuleHalfHeight > 0.f)
+      ? ArchetypeCollisionCapsuleHalfHeight
+      : ((CollisionCapsuleHalfHeight > 0.f) ? CollisionCapsuleHalfHeight : FallbackHalfHeight);
 
   if (!FMath::IsNearlyEqual(Capsule->GetUnscaledCapsuleRadius(), DesiredRadius)
       || !FMath::IsNearlyEqual(Capsule->GetUnscaledCapsuleHalfHeight(), DesiredHalfHeight))
@@ -259,95 +320,24 @@ void AAeyerjiCharacter::Multicast_PlayAbilityMontageByPath_Implementation(FSoftO
       *GetNameSafe(AnimInstance));
 }
 
-/*void AAeyerjiCharacter::InitialiseAbilitySystem()
-{
-        if (bASCInitialised || !AbilitySystemAeyerji) return;
-        bASCInitialised = true;
-        AbilitySystemAeyerji->InitAbilityActorInfo(GetOwner() ? GetOwner() :
-this,
-                                                                                           /*Avatar=#1#this);
-        if (HasAuthority())
-                AddStartupAbilities();
-        BindDeathEvent();
-        //UE_LOG(LogTemp, Log, TEXT("Initialised AbilitySystemComponent for
-%s"), *GetName()); OnAbilitySystemReady.Broadcast();
-}*/
-/* --------------------------- ASC init for players --------------------------
- */
-/*void AAeyerjiCharacter::PossessedBy(AController* NewController)
-{
-        Super::PossessedBy(NewController);
-        InitialiseAbilitySystem();
-}*/
 /* --------------------------- Startup GAS wiring --------------------------- */
 void AAeyerjiCharacter::AddStartupAbilities() {
   AJ_LOG(this, TEXT("AddStartupAbilities - HasAuthority: %d"), HasAuthority());
-  if (AbilitySystemAeyerji == nullptr)
+  if (!HasAuthority() || AbilitySystemAeyerji == nullptr)
     return;
-  bool bGrantedAnyAbility = false;
   for (TSubclassOf<UGameplayAbility> AbilityClass : DefaultAbilities) {
-    if (*AbilityClass) {
+    if (*AbilityClass && !AbilitySystemAeyerji->FindAbilitySpecFromClass(AbilityClass)) {
       FGameplayAbilitySpec Spec(AbilityClass, CharacterLevel);
       AbilitySystemAeyerji->GiveAbility(Spec);
-      bGrantedAnyAbility = true;
     }
   }
   // Passive Death GA so every pawn can die/respawn
   TSubclassOf<UGameplayAbility> DeathClass = DeathAbilityClass ? DeathAbilityClass : TSubclassOf<UGameplayAbility>(UGA_Death::StaticClass());
-  if (DeathClass)
+  if (DeathClass && !AbilitySystemAeyerji->FindAbilitySpecFromClass(DeathClass))
   {
     AbilitySystemAeyerji->GiveAbility(FGameplayAbilitySpec(DeathClass, 1));
   }
 }
-/*
-void AAeyerjiCharacter::InitAttributes() const
-{
-        if (!AbilitySystemAeyerji)
-        {
-                //UE_LOG(LogTemp, Warning, TEXT("%s:
-AAeyerjiCharacter::InitAttributes() Cannot initialize attributes -
-AbilitySystemAeyerji is null"), *GetName()); return;
-        }
-        if (!DefaultAttributesGE)
-        {
-                //UE_LOG(LogTemp, Warning, TEXT("%s:
-AAeyerjiCharacter::InitAttributes() DefaultAttributesGE not set in character
-BP"), *GetName()); return;
-        }
-        FGameplayEffectContextHandle Cxt =
-AbilitySystemAeyerji->MakeEffectContext(); Cxt.AddSourceObject(this);
-        FGameplayEffectSpecHandle SpecHandle =
-AbilitySystemAeyerji->MakeOutgoingSpec(DefaultAttributesGE, CharacterLevel,
-Cxt); if (SpecHandle.IsValid())
-        {
-                FActiveGameplayEffectHandle EffectHandle =
-AbilitySystemAeyerji->ApplyGameplayEffectSpecToSelf(*SpecHandle.Data.Get()); if
-(EffectHandle.IsValid())
-                {
-                        //UE_LOG(LogTemp, Log, TEXT("%s: Successfully applied
-DefaultAttributesGE (level %d)"), *GetName(), CharacterLevel);
-                        // Verify attribute values were set correctly
-                        if (const UAeyerjiAttributeSet* AttrSet =
-AbilitySystemAeyerji->GetSet<UAeyerjiAttributeSet>())
-                        {
-                                //UE_LOG(LogTemp, Log, TEXT("%s: Attributes
-initialized - HP=%.1f/%.1f, Mana=%.1f/%.1f"), *GetName(), AttrSet->GetHP(),
-AttrSet->GetHPMax(), AttrSet->GetMana(), AttrSet->GetManaMax());
-                        }
-                }
-                else
-                {
-                        //UE_LOG(LogTemp, Warning, TEXT("%s: Failed to apply
-DefaultAttributesGE"), *GetName());
-                }
-        }
-        else
-        {
-                //UE_LOG(LogTemp, Warning, TEXT("%s: Invalid DefaultAttributesGE
-spec"), *GetName());
-        }
-}
-*/
 void AAeyerjiCharacter::BindDeathEvent() {
   if (!HasAuthority())
     return; // server only
@@ -713,6 +703,18 @@ void AAeyerjiCharacter::ClearCrowdControlStateForDeath()
   const bool bHadStunState = bStunStateApplied;
   const bool bHadStunVisual = ActiveStunOverheadEffect != nullptr;
 
+  // Death bypasses ClearStunState, but player-controller input ignores are stacked.
+  // Release the exact pair owned by this stun before discarding the tracking flag so
+  // a respawned player cannot inherit blocked movement or camera/look input.
+  if (bStunIgnoredControllerInput)
+  {
+    if (APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+    {
+      PlayerController->SetIgnoreMoveInput(false);
+      PlayerController->SetIgnoreLookInput(false);
+    }
+  }
+
   bStunStateApplied = false;
   bStaggerStateApplied = false;
   bStunShouldRestoreMovement = false;
@@ -868,7 +870,18 @@ void AAeyerjiCharacter::EnsurePrimaryAttributeSetRegistered() {
   }
 }
 
-void AAeyerjiCharacter::OnDeath_Implementation() {
+void AAeyerjiCharacter::OnDeath_Implementation(AActor* Killer, float DamageTaken) {
+  static_cast<void>(Killer);
+  static_cast<void>(DamageTaken);
+}
+
+bool AAeyerjiCharacter::PrepareDeathPresentation(
+    AActor* Killer,
+    FRotator& OutFacingRotation)
+{
+  static_cast<void>(Killer);
+  OutFacingRotation = GetActorRotation();
+  return false;
 }
 
 /* ----------------------------- Death plumbing ----------------------------- */
@@ -960,6 +973,10 @@ void AAeyerjiCharacter::ApplyDeathStateInternal(
     DetachDestroyAttachedActors();
   }
 
+  // Presentation visibility is independent of component lifetime. Pooled enemies retain
+  // their component for reuse, but a dead actor must never retain a zero-health bar.
+  SetFloatingWidgetsPresentationVisible(false);
+
   if (Options.bRemoveFloatingWidgets)
   {
     RemoveFloatingWidgets();
@@ -1011,7 +1028,11 @@ void AAeyerjiCharacter::MulticastResetDeathStateForReuse_Implementation()
   ResetDeathStateForReuseInternal();
 }
 
-void AAeyerjiCharacter::MulticastOnDeath_Implementation(AActor *Killer, float DamageTaken)
+void AAeyerjiCharacter::MulticastOnDeath_Implementation(
+    AActor* Killer,
+    float DamageTaken,
+    bool bApplyFacingRotation,
+    FRotator FacingRotation)
 
 {
 
@@ -1020,6 +1041,13 @@ void AAeyerjiCharacter::MulticastOnDeath_Implementation(AActor *Killer, float Da
   {
 
     return;
+  }
+
+  // Movement replication is not ordered against this RPC. Apply the server-resolved
+  // yaw here before Blueprint spawns any detached death geometry from our transform.
+  if (bApplyFacingRotation)
+  {
+    SetActorRotation(FacingRotation, ETeleportType::None);
   }
 
   BP_OnDeath(Killer, DamageTaken);
@@ -1041,6 +1069,20 @@ void AAeyerjiCharacter::RemoveFloatingWidgets()
     {
 
       Component->DestroyComponent();
+    }
+  }
+}
+
+void AAeyerjiCharacter::SetFloatingWidgetsPresentationVisible(const bool bVisible)
+{
+  TInlineComponentArray<UAeyerjiFloatingStatusBarComponent *>
+      FloatingStatusComponents(this);
+
+  for (UAeyerjiFloatingStatusBarComponent *Component : FloatingStatusComponents)
+  {
+    if (Component)
+    {
+      Component->SetStatusBarPresentationVisible(bVisible);
     }
   }
 }
@@ -1159,9 +1201,25 @@ void AAeyerjiCharacter::RestartControllerLogicForReuse()
 {
   if (UCharacterMovementComponent *MovementComponent = GetCharacterMovement())
   {
+    // Pool/death Blueprint hooks may deactivate the component or detach its updated primitive.
+    // A living checkout must restore the complete CharacterMovement contract, not only MOVE_Walking.
+    MovementComponent->Activate(true);
+    if (UCapsuleComponent *Capsule = GetCapsuleComponent();
+        Capsule && MovementComponent->UpdatedComponent.Get() != Capsule)
+    {
+      MovementComponent->SetUpdatedComponent(Capsule);
+    }
     MovementComponent->SetComponentTickEnabled(true);
     MovementComponent->SetMovementMode(MOVE_Walking);
     MovementComponent->StopMovementImmediately();
+
+    if (UAeyerjiCharacterMovementComponent *AeyerjiMovement =
+            Cast<UAeyerjiCharacterMovementComponent>(MovementComponent))
+    {
+      // Transient gameplay effects are cleared immediately before reuse. Refresh the cached
+      // root tag now so a prior checkout cannot retain a stale movement-blocked cache entry.
+      AeyerjiMovement->ForceRootedStateRefresh();
+    }
   }
 
   if (AAIController *AIController = Cast<AAIController>(GetController()))
@@ -1190,6 +1248,9 @@ void AAeyerjiCharacter::ResetDeathStateForReuseInternal()
   if (HasAuthority())
   {
     UnregisterCorpseFromCleanup();
+    // Pooled actors can be checked out before their normal possession/init path has registered
+    // the default attribute set. Register it before writing numeric bases to avoid a GAS ensure.
+    EnsurePrimaryAttributeSetRegistered();
   }
 
   bHasAppliedDeathState = false;
@@ -1200,7 +1261,8 @@ void AAeyerjiCharacter::ResetDeathStateForReuseInternal()
   SetActorHiddenInGame(false);
   SetActorTickEnabled(true);
 
-  if (UAbilitySystemComponent *ASC = GetAbilitySystemComponent())
+  if (UAbilitySystemComponent *ASC = GetAbilitySystemComponent();
+      ASC && ASC->GetSet<UAeyerjiAttributeSet>())
   {
     ASC->SetLooseGameplayTagCount(AeyerjiTags::State_Dead, 0);
     ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(),
@@ -1215,6 +1277,10 @@ void AAeyerjiCharacter::ResetDeathStateForReuseInternal()
   {
     AttributeSetAeyerji->ResetDeathStateForReuse();
   }
+
+  // Restore retained pooled status bars only after HP and other live attributes have reset,
+  // preventing a one-frame zero-health presentation during checkout.
+  SetFloatingWidgetsPresentationVisible(true);
 
   ClearStunState();
   ClearStaggerState();
@@ -1339,8 +1405,11 @@ void AAeyerjiCharacter::HandleOutOfHealth(AActor *Victim, AActor *Killer, float 
   ensureMsgf(Victim == this || !Victim,
              TEXT("HandleOutOfHealth expected self victim but got %s"),
              *GetNameSafe(Victim));
+  FRotator DeathFacingRotation = GetActorRotation();
+  const bool bApplyDeathFacingRotation =
+      PrepareDeathPresentation(Killer, DeathFacingRotation);
   BP_OnDeath(Killer, DamageTaken);
-  OnDeath_Implementation();
+  OnDeath_Implementation(Killer, DamageTaken);
   const FAeyerjiDeathStateOptions DeathOptions = BuildDeathStateOptionsForOutOfHealth();
   ApplyDeathState(DeathOptions);
   if (HasAuthority() && AbilitySystemAeyerji)
@@ -1367,12 +1436,12 @@ void AAeyerjiCharacter::HandleOutOfHealth(AActor *Victim, AActor *Killer, float 
     }
   }
   if (HasAuthority()) {
-    MulticastOnDeath(Killer, DamageTaken);
+    MulticastOnDeath(
+        Killer,
+        DamageTaken,
+        bApplyDeathFacingRotation,
+        DeathFacingRotation);
   }
-}
-void AAeyerjiCharacter::OnRep_Controller() {
-  Super::OnRep_Controller();
-  // InitialiseAbilitySystem();
 }
 void AAeyerjiCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason) {
   DestroyStunOverheadEffect();

@@ -175,6 +175,12 @@ struct AEYERJI_API FLootMultiDropConfig
 	TArray<FLootMultiDropBucket> Buckets;
 };
 
+/** Returns whether the supplied rarity value is a valid Aeyerji item-rarity enum entry. */
+AEYERJI_API bool IsValidLootDropRarity(EItemRarity Rarity);
+
+/** Returns whether a rolled result contains the minimum safe data required by reward presentation and pickup spawning. */
+AEYERJI_API bool IsUsableLootDropResult(const FLootDropResult& Result);
+
 /** DataTable row for per-actor loot contexts + multi-drop configs (row name keyed however you prefer, e.g. BP class name). */
 USTRUCT(BlueprintType)
 struct AEYERJI_API FLootActorDropRow : public FTableRowBase

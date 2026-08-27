@@ -10,6 +10,24 @@
 #include "Systems/LootTable.h"
 #include "UObject/Package.h"
 
+namespace
+{
+	constexpr int32 MaxGeneratedAffixes = 64;
+	constexpr int32 MaxAffixPoolEntriesToInspect = 4096;
+
+	bool IsValidGeneratedRarity(const EItemRarity Rarity)
+	{
+		const UEnum* Enum = StaticEnum<EItemRarity>();
+		return Enum && Enum->IsValidEnumValue(static_cast<int64>(Rarity));
+	}
+
+	bool IsValidGeneratedSlot(const EEquipmentSlot Slot)
+	{
+		const UEnum* Enum = StaticEnum<EEquipmentSlot>();
+		return Enum && Enum->IsValidEnumValue(static_cast<int64>(Slot));
+	}
+}
+
 UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	UObject* WorldContext,
 	UItemDefinition* Definition,
@@ -18,7 +36,7 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	int32 SeedOverride,
 	EEquipmentSlot SlotOverride)
 {
-	if (!Definition)
+	if (!IsValid(Definition) || !IsValidGeneratedRarity(Rarity))
 	{
 		return nullptr;
 	}
@@ -38,6 +56,12 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	int32 MinAffixes = 0;
 	int32 MaxAffixes = 0;
 	Definition->GetAffixCountRange(Rarity, MinAffixes, MaxAffixes);
+	MinAffixes = FMath::Clamp(MinAffixes, 0, MaxGeneratedAffixes);
+	MaxAffixes = FMath::Clamp(MaxAffixes, 0, MaxGeneratedAffixes);
+	if (MinAffixes > MaxAffixes)
+	{
+		Swap(MinAffixes, MaxAffixes);
+	}
 
 	const UAeyerjiLootTable* CachedTable = nullptr;
 	if (WorldContext)
@@ -58,9 +82,11 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	{
 		if (const FRarityScalingRow* RarityRow = CachedTable->FindRarityScaling(Rarity))
 		{
-			const int32 Bonus = FMath::Max(0, RarityRow->BonusAffixes);
-			MinAffixes = FMath::Max(0, MinAffixes + Bonus);
-			MaxAffixes = FMath::Max(MinAffixes, MaxAffixes + Bonus);
+			const int32 Bonus = FMath::Clamp(RarityRow->BonusAffixes, 0, MaxGeneratedAffixes);
+			MinAffixes = static_cast<int32>(FMath::Clamp<int64>(
+				static_cast<int64>(MinAffixes) + Bonus, 0, MaxGeneratedAffixes));
+			MaxAffixes = static_cast<int32>(FMath::Clamp<int64>(
+				static_cast<int64>(MaxAffixes) + Bonus, MinAffixes, MaxGeneratedAffixes));
 		}
 	}
 
@@ -73,10 +99,11 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 		AffixCount = RNG.RandRange(MinAffixes, MaxAffixes);
 	}
 
+	const EEquipmentSlot SafeSlotOverride = IsValidGeneratedSlot(SlotOverride) ? SlotOverride : Definition->DefaultSlot;
 	const EEquipmentSlot FinalSlot =
-		(SlotOverride == EEquipmentSlot::Assault && Definition->DefaultSlot != EEquipmentSlot::Assault)
+		(SafeSlotOverride == EEquipmentSlot::Assault && Definition->DefaultSlot != EEquipmentSlot::Assault)
 			? Definition->DefaultSlot
-			: SlotOverride;
+			: SafeSlotOverride;
 
 	TArray<UItemAffixDefinition*> ChosenAffixes;
 	TArray<const FAffixTier*> ChosenTiers;
@@ -84,14 +111,24 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 	FGameplayTagContainer ChosenExclusionTags;
 	TSet<const UItemAffixDefinition*> ChosenAffixDefinitions;
 
-	for (UItemAffixDefinition* GuaranteedAffix : Definition->GuaranteedAffixes)
+	const int32 GuaranteedAffixCount = FMath::Min(Definition->GuaranteedAffixes.Num(), MaxAffixPoolEntriesToInspect);
+	for (int32 GuaranteedIndex = 0; GuaranteedIndex < GuaranteedAffixCount
+		&& ChosenAffixes.Num() < MaxGeneratedAffixes; ++GuaranteedIndex)
 	{
+		UItemAffixDefinition* GuaranteedAffix = Definition->GuaranteedAffixes[GuaranteedIndex];
 		if (!GuaranteedAffix)
 		{
 			continue;
 		}
 
 		if (!GuaranteedAffix->IsAllowedFor(Definition->ItemCategory, FinalSlot))
+		{
+			continue;
+		}
+		if (ChosenAffixDefinitions.Contains(GuaranteedAffix)
+			|| (!GuaranteedAffix->ExclusionTags.IsEmpty() && GuaranteedAffix->ExclusionTags.HasAny(ChosenAffixTags))
+			|| (!ChosenExclusionTags.IsEmpty() && !GuaranteedAffix->AffixTags.IsEmpty()
+				&& ChosenExclusionTags.HasAny(GuaranteedAffix->AffixTags)))
 		{
 			continue;
 		}
@@ -109,7 +146,8 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 		ChosenAffixDefinitions.Add(GuaranteedAffix);
 	}
 
-	if (AffixCount > 0)
+	const int32 OptionalAffixCount = FMath::Min(AffixCount, MaxGeneratedAffixes - ChosenAffixes.Num());
+	if (OptionalAffixCount > 0)
 	{
 		TArray<UItemAffixDefinition*> OptionalAffixes;
 		TArray<const FAffixTier*> OptionalTiers;
@@ -118,7 +156,7 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 			Definition->OptionalAffixPool,
 			ClampedItemLevel,
 			FinalSlot,
-			AffixCount,
+			OptionalAffixCount,
 			RNG,
 			ChosenAffixTags,
 			ChosenExclusionTags,
@@ -130,7 +168,7 @@ UAeyerjiItemInstance* UItemGenerator::RollItemInstance(
 		ChosenTiers.Append(OptionalTiers);
 	}
 
-	UObject* Outer = WorldContext ? WorldContext : GetTransientPackage();
+	UObject* Outer = IsValid(WorldContext) ? WorldContext : GetTransientPackage();
 	const FName InstanceName = MakeUniqueObjectName(Outer, UAeyerjiItemInstance::StaticClass(), TEXT("AeyerjiItemInstance"));
 	UAeyerjiItemInstance* NewInstance = NewObject<UAeyerjiItemInstance>(Outer, UAeyerjiItemInstance::StaticClass(), InstanceName);
 	if (!NewInstance)
@@ -173,16 +211,20 @@ void UItemGenerator::ChooseAffixes(
 	OutAffixes.Reset();
 	OutTiers.Reset();
 
-	if (!Definition || AffixCount <= 0)
+	if (!IsValid(Definition) || AffixCount <= 0)
 	{
 		return;
 	}
 
 	const int32 ClampedItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
 
+	AffixCount = FMath::Clamp(AffixCount, 0, MaxGeneratedAffixes);
 	TArray<UItemAffixDefinition*> Pool;
-	for (UItemAffixDefinition* Candidate : SourcePool)
+	Pool.Reserve(FMath::Min(SourcePool.Num(), MaxAffixPoolEntriesToInspect));
+	const int32 SourceCount = FMath::Min(SourcePool.Num(), MaxAffixPoolEntriesToInspect);
+	for (int32 SourceIndex = 0; SourceIndex < SourceCount; ++SourceIndex)
 	{
+		UItemAffixDefinition* Candidate = SourcePool[SourceIndex];
 		if (!Candidate)
 		{
 			continue;

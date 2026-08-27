@@ -2,7 +2,7 @@
     {
         "Name":  "AeyerjiAttributeSet.ManaMax",
         "BaseValue":  0,
-        "MinValue":  1,
+        "MinValue":  0,
         "MaxValue":  1000000,
         "DerivedAttributeInfo":  "",
         "bCanStack":  false
@@ -17,7 +17,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.HP",
-        "BaseValue":  300.0,
+        "BaseValue":  60.0,
         "MinValue":  0,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",
@@ -25,7 +25,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.HPMax",
-        "BaseValue":  150.0,
+        "BaseValue":  60.0,
         "MinValue":  1,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",
@@ -33,7 +33,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.RunSpeed",
-        "BaseValue":  336,
+        "BaseValue":  480,
         "MinValue":  50,
         "MaxValue":  3000,
         "DerivedAttributeInfo":  "",
@@ -65,7 +65,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.AttackDamage",
-        "BaseValue":  45.0,
+        "BaseValue":  35.0,
         "MinValue":  0,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",

@@ -23,4 +23,12 @@ class AEYERJI_API UGA_AGGravitonPull : public UGA_AeyerjiTargetedEffectBase
 
 public:
 	UGA_AGGravitonPull();
+
+protected:
+	/** Pulls validated enemies toward the caster after the shared damage pass succeeds. */
+	virtual void OnTargetedAbilityAppliedNative(
+		const FGameplayAbilityActorInfo& ActorInfo,
+		const FAeyerjiAbilityResolvedConfig& Config,
+		const TArray<AActor*>& Targets,
+		FVector TargetLocation) const override;
 };

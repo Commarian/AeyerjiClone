@@ -8,6 +8,7 @@
 #include "Abilities/AeyerjiAbilityTuning.h"
 #include "GAS/AeyerjiDamageRules.h"
 #include "GameplayTagContainer.h"
+#include "TimerManager.h"
 
 #include "GA_AeyerjiBase.generated.h"
 
@@ -26,7 +27,6 @@ class FAeyerjiAbilityCooldownReductionTest;
  * functionality to work across the board
 
  */
-
 UCLASS(Abstract)
 
 class AEYERJI_API UGA_AeyerjiBase : public UGameplayAbility
@@ -74,6 +74,29 @@ public:
       float CapsuleInflation = 0.f) const;
 
 protected:
+  /**
+   * Delays legacy Blueprint-only activation until the configured cast impact time.
+   * Native subclasses that override ActivateAbility keep ownership of their own impact flow.
+   */
+  virtual void ActivateAbility(const FGameplayAbilitySpecHandle Handle,
+                               const FGameplayAbilityActorInfo* ActorInfo,
+                               const FGameplayAbilityActivationInfo ActivationInfo,
+                               const FGameplayEventData* TriggerEventData) override;
+
+  /** Clears any timer and replicated cast lock owned by this ability instance. */
+  virtual void EndAbility(const FGameplayAbilitySpecHandle Handle,
+                          const FGameplayAbilityActorInfo* ActorInfo,
+                          const FGameplayAbilityActivationInfo ActivationInfo,
+                          bool bReplicateEndAbility,
+                          bool bWasCancelled) override;
+
+  /** Rejects a second action-bar ability while another server-authoritative cast is winding up. */
+  virtual bool CanActivateAbility(const FGameplayAbilitySpecHandle Handle,
+                                  const FGameplayAbilityActorInfo* ActorInfo,
+                                  const FGameplayTagContainer* SourceTags = nullptr,
+                                  const FGameplayTagContainer* TargetTags = nullptr,
+                                  FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
+
   // Common helper: true if owner has State.Dead
 
   bool IsOwnerDead(const FGameplayAbilityActorInfo *ActorInfo) const;
@@ -93,6 +116,14 @@ protected:
       const FGameplayAbilityActivationInfo &ActivationInfo,
 
       bool bEndAbilityOnFailure);
+
+  /** Resolves an explicit impact delay or defaults to the midpoint of the configured montage. */
+  float CalculateAbilityImpactDelay(const FAeyerjiAbilityResolvedConfig& Config) const;
+
+  /** Plays the configured montage and owns the replicated movement/primary-attack cast lock until EndAbility. */
+  void BeginAbilityCastPresentation(const FGameplayAbilityActorInfo& ActorInfo,
+                                    const FAeyerjiAbilityResolvedConfig& Config,
+                                    float ImpactDelaySeconds);
 
   bool TeleportCharacterSafely(
 
@@ -147,9 +178,18 @@ protected:
   virtual const FGameplayTagContainer* GetCooldownTags() const override;
 
 private:
+  void ContinueDeferredBlueprintActivation(FGameplayAbilitySpecHandle Handle,
+                                           const FGameplayAbilityActorInfo* ActorInfo,
+                                           FGameplayAbilityActivationInfo ActivationInfo,
+                                           FGameplayEventData TriggerEventData,
+                                           bool bHasTriggerEventData);
+  void RemoveOwnedAbilityCastLock(const FGameplayAbilityActorInfo* ActorInfo);
+
 #if WITH_DEV_AUTOMATION_TESTS
   friend class FAeyerjiAbilityCooldownReductionTest;
 #endif
 
   mutable FGameplayTagContainer RuntimeCooldownTags;
+  FTimerHandle DeferredBlueprintActivationTimerHandle;
+  bool bOwnsAbilityCastLock = false;
 };

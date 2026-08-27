@@ -6,8 +6,8 @@
 #include "GameFramework/GameModeBase.h"
 #include "AeyerjiGameMode.generated.h"
 
-UCLASS(minimalapi)
-class AAeyerjiGameMode : public AGameModeBase
+UCLASS()
+class AEYERJI_API AAeyerjiGameMode : public AGameModeBase
 {
     GENERATED_BODY()
 

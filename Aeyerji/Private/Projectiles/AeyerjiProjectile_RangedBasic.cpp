@@ -16,6 +16,8 @@ AAeyerjiProjectile_RangedBasic::AAeyerjiProjectile_RangedBasic()
 	PrimaryActorTick.bCanEverTick = false;
 	bReplicates = true;
 	SetReplicateMovement(true);
+	SetNetUpdateFrequency(30.f);
+	SetMinNetUpdateFrequency(15.f);
 
 	CollisionComponent = CreateDefaultSubobject<USphereComponent>(TEXT("Collision"));
 	CollisionComponent->InitSphereRadius(16.f);
@@ -63,17 +65,6 @@ void AAeyerjiProjectile_RangedBasic::InitializeProjectile(UGA_PrimaryRangedBasic
 	//        InitialSpeed,
 	//        StationaryTolerance,
 	//        HasAuthority() ? TEXT("Yes") : TEXT("No"));
-	CachedSourceTags.Reset();
-	if (SourceActor.IsValid())
-	{
-		for (const FName& Tag : SourceActor->Tags)
-		{
-			if (Tag != NAME_None)
-			{
-				CachedSourceTags.AddUnique(Tag);
-			}
-		}
-	}
 	SpawnLocation = GetActorLocation();
 
 	if (CollisionComponent)
@@ -91,14 +82,15 @@ void AAeyerjiProjectile_RangedBasic::InitializeProjectile(UGA_PrimaryRangedBasic
 		}
 	}
 
-	if (MaxLifetime > 0.f)
+	const float SafeLifetime = FMath::IsFinite(MaxLifetime) ? FMath::Max(0.f, MaxLifetime) : 6.f;
+	if (SafeLifetime > KINDA_SMALL_NUMBER)
 	{
-		SetLifeSpan(MaxLifetime);
+		SetLifeSpan(SafeLifetime);
 	}
 
 	if (ProjectileMovement)
 	{
-		const float Speed = FMath::Max(InitialSpeed, 1.f);
+		const float Speed = FMath::IsFinite(InitialSpeed) ? FMath::Max(InitialSpeed, 1.f) : 1.f;
 		ProjectileMovement->InitialSpeed = Speed;
 		ProjectileMovement->MaxSpeed = Speed;
 		// Start with world overlap then restore blocking after a short grace based on speed.
@@ -175,15 +167,6 @@ void AAeyerjiProjectile_RangedBasic::BeginPlay()
 
 		if (SourceActor.IsValid())
 		{
-			CachedSourceTags.Reset();
-			for (const FName& Tag : SourceActor->Tags)
-			{
-				if (Tag != NAME_None)
-				{
-					CachedSourceTags.AddUnique(Tag);
-				}
-			}
-
 			if (CollisionComponent)
 			{
 				CollisionComponent->IgnoreActorWhenMoving(SourceActor.Get(), /*bShouldIgnore=*/true);
@@ -266,12 +249,12 @@ void AAeyerjiProjectile_RangedBasic::HandleImpact(AActor* OtherActor, const FHit
 	const AActor* SourceForTeamCheck = GetSourceActorForTeamCheck();
 
 	// Extra grace in case we spawn inside/near the shooter (scaled-up elites).
-	if (SelfCollisionGraceDistance > 0.f)
+	if (FMath::IsFinite(SelfCollisionGraceDistance) && SelfCollisionGraceDistance > 0.f)
 	{
 		const float DistSqFromSpawn = FVector::DistSquared(SpawnLocation, GetActorLocation());
 		if (DistSqFromSpawn <= FMath::Square(SelfCollisionGraceDistance))
 		{
-			if (OtherActor == SourceActor.Get() || OtherActor == GetInstigator() || OtherActor == GetOwner() || SharesTagWithSource(OtherActor))
+			if (OtherActor == SourceActor.Get() || OtherActor == GetInstigator() || OtherActor == GetOwner())
 			{
 				// UE_LOG(LogRangedProjectile,
 				//        Log,
@@ -295,7 +278,7 @@ void AAeyerjiProjectile_RangedBasic::HandleImpact(AActor* OtherActor, const FHit
 	}
 
 	// Grace for world geometry when spawned very close to it (e.g., muzzle inside floor/wall).
-	if (SelfCollisionGraceDistance > 0.f)
+	if (FMath::IsFinite(SelfCollisionGraceDistance) && SelfCollisionGraceDistance > 0.f)
 	{
 		const float DistSqFromSpawn = FVector::DistSquared(SpawnLocation, GetActorLocation());
 		if (DistSqFromSpawn <= FMath::Square(SelfCollisionGraceDistance))
@@ -328,17 +311,6 @@ void AAeyerjiProjectile_RangedBasic::HandleImpact(AActor* OtherActor, const FHit
 		{
 			IgnoreActorAndResumeFlight(OtherActor, Hit);
 		}
-		return;
-	}
-
-	if (SharesTagWithSource(OtherActor))
-	{
-		// UE_LOG(LogRangedProjectile,
-		//        Log,
-		//        TEXT("HandleImpact: shared-tag ignore Actor=%s Projectile=%s"),
-		//        *GetNameSafe(OtherActor),
-		//        *GetNameSafe(this));
-		IgnoreActorAndResumeFlight(OtherActor, Hit);
 		return;
 	}
 
@@ -471,7 +443,9 @@ void AAeyerjiProjectile_RangedBasic::IgnoreActorAndResumeFlight(AActor* ActorToI
 	}
 
 	// Recover a forward direction either from the existing velocity, trace data, or actor forward vector.
-	FVector ResumeDirection = ProjectileMovement->Velocity.GetSafeNormal();
+	FVector ResumeDirection = ProjectileMovement->Velocity.ContainsNaN()
+		? FVector::ZeroVector
+		: ProjectileMovement->Velocity.GetSafeNormal();
 	if (ResumeDirection.IsNearlyZero() && Hit.TraceStart != Hit.TraceEnd)
 	{
 		ResumeDirection = (Hit.TraceEnd - Hit.TraceStart).GetSafeNormal();
@@ -486,9 +460,10 @@ void AAeyerjiProjectile_RangedBasic::IgnoreActorAndResumeFlight(AActor* ActorToI
 		return;
 	}
 
-	const float ResumeSpeed = ProjectileMovement->Velocity.IsNearlyZero()
+	const float RawResumeSpeed = ProjectileMovement->Velocity.IsNearlyZero()
 		? FMath::Max(ProjectileMovement->InitialSpeed, 1.f)
 		: ProjectileMovement->Velocity.Size();
+	const float ResumeSpeed = FMath::IsFinite(RawResumeSpeed) ? FMath::Max(1.f, RawResumeSpeed) : 1.f;
 
 	// Nudge the projectile slightly forward so it is no longer penetrating the ignored actor.
 	const FVector TeleportOffset = ResumeDirection * FMath::Max(CollisionComponent ? CollisionComponent->GetScaledSphereRadius() : 16.f, 4.f);
@@ -519,9 +494,15 @@ void AAeyerjiProjectile_RangedBasic::SuppressWorldCollisionForGrace(float Overri
 	if (UWorld* World = GetWorld())
 	{
 		// Restore after a short window so we don't tunnel through far geometry.
-		const float SpeedForCalc = FMath::Max(ProjectileMovement ? ProjectileMovement->InitialSpeed : 800.f, 1.f);
-		const float AutoDelay = FMath::Clamp(SelfCollisionGraceDistance / SpeedForCalc, 0.05f, 0.25f);
-		const float RestoreDelay = (OverrideDelaySeconds > 0.f) ? OverrideDelaySeconds : AutoDelay;
+		const float RawSpeedForCalc = ProjectileMovement ? ProjectileMovement->InitialSpeed : 800.f;
+		const float SpeedForCalc = FMath::IsFinite(RawSpeedForCalc) ? FMath::Max(RawSpeedForCalc, 1.f) : 800.f;
+		const float SafeGraceDistance = FMath::IsFinite(SelfCollisionGraceDistance)
+			? FMath::Max(0.f, SelfCollisionGraceDistance)
+			: 0.f;
+		const float AutoDelay = FMath::Clamp(SafeGraceDistance / SpeedForCalc, 0.05f, 0.25f);
+		const float RestoreDelay = (FMath::IsFinite(OverrideDelaySeconds) && OverrideDelaySeconds > 0.f)
+			? OverrideDelaySeconds
+			: AutoDelay;
 		World->GetTimerManager().SetTimer(WorldCollisionRestoreHandle, this, &AAeyerjiProjectile_RangedBasic::RestoreWorldCollision, RestoreDelay, /*bLoop=*/false);
 	}
 }
@@ -555,24 +536,6 @@ const AActor* AAeyerjiProjectile_RangedBasic::GetSourceActorForTeamCheck() const
 	}
 
 	return GetOwner();
-}
-
-bool AAeyerjiProjectile_RangedBasic::SharesTagWithSource(const AActor* OtherActor) const
-{
-	if (!OtherActor)
-	{
-		return false;
-	}
-
-	for (const FName& Tag : CachedSourceTags)
-	{
-		if (Tag != NAME_None && OtherActor->ActorHasTag(Tag))
-		{
-			return true;
-		}
-	}
-
-	return false;
 }
 
 void AAeyerjiProjectile_RangedBasic::ApplyCollisionResponseOverrides() const

@@ -2,6 +2,8 @@
 
 #include "AbilitySystemComponent.h"
 
+#include "Animation/AnimMontage.h"
+
 #include "AeyerjiCharacter.h"
 
 #include "Attributes/AeyerjiAttributeSet.h"
@@ -13,9 +15,11 @@
 #include "Engine/World.h"
 
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Controller.h"
 #include "GAS/GE_AeyerjiAbilityCooldown.h"
 #include "GAS/GE_AeyerjiAbilityCostMana.h"
 #include "MouseNavBlueprintLibrary.h"
+#include "TimerManager.h"
 
 #include "GameplayTagContainer.h"
 
@@ -36,6 +40,259 @@ UGA_AeyerjiBase::UGA_AeyerjiBase()
   NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerInitiated;
   NetSecurityPolicy = EGameplayAbilityNetSecurityPolicy::ServerOnlyExecution;
   bServerRespectsRemoteAbilityCancellation = true;
+}
+
+void UGA_AeyerjiBase::ActivateAbility(
+    const FGameplayAbilitySpecHandle Handle,
+    const FGameplayAbilityActorInfo* ActorInfo,
+    const FGameplayAbilityActivationInfo ActivationInfo,
+    const FGameplayEventData* TriggerEventData)
+{
+  if (!ActorInfo || !ActorInfo->AvatarActor.IsValid() || IsOwnerDead(ActorInfo))
+  {
+    EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+    return;
+  }
+
+  const UClass* RuntimeClass = GetClass();
+  const bool bIsBlueprintGenerated = RuntimeClass
+      && RuntimeClass->HasAnyClassFlags(CLASS_CompiledFromBlueprint);
+  const UClass* FirstNativeParent = RuntimeClass;
+  while (FirstNativeParent
+      && FirstNativeParent->HasAnyClassFlags(CLASS_CompiledFromBlueprint))
+  {
+    FirstNativeParent = FirstNativeParent->GetSuperClass();
+  }
+
+  // Only classes whose first native parent is this base use the generic Blueprint
+  // deferral. Native subclasses retain their own activation timing even when the
+  // granted class is a Blueprint child and their implementation calls Super.
+  if (!bIsBlueprintGenerated || FirstNativeParent != StaticClass())
+  {
+    Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
+    return;
+  }
+
+  FAeyerjiAbilityResolvedConfig Config;
+  if (!GetAbilityResolvedConfig(
+          ActorInfo->AbilitySystemComponent.Get(),
+          ResolveAbilityRank(Handle, ActorInfo),
+          Config)
+      || Config.Visuals.Montage.IsNull())
+  {
+    Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
+    return;
+  }
+
+  const float ImpactDelaySeconds = CalculateAbilityImpactDelay(Config);
+  BeginAbilityCastPresentation(*ActorInfo, Config, ImpactDelaySeconds);
+  if (ImpactDelaySeconds <= KINDA_SMALL_NUMBER)
+  {
+    Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
+    return;
+  }
+
+  UWorld* World = ActorInfo->AvatarActor->GetWorld();
+  if (!World)
+  {
+    Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
+    return;
+  }
+
+  const bool bHasTriggerEventData = TriggerEventData != nullptr;
+  const FGameplayEventData TriggerEventDataCopy = bHasTriggerEventData
+      ? *TriggerEventData
+      : FGameplayEventData();
+
+  FTimerDelegate ActivationDelegate;
+  ActivationDelegate.BindWeakLambda(
+      this,
+      [this, Handle, ActivationInfo, TriggerEventDataCopy, bHasTriggerEventData]()
+      {
+        ContinueDeferredBlueprintActivation(
+            Handle,
+            GetCurrentActorInfo(),
+            ActivationInfo,
+            TriggerEventDataCopy,
+            bHasTriggerEventData);
+      });
+  World->GetTimerManager().SetTimer(
+      DeferredBlueprintActivationTimerHandle,
+      ActivationDelegate,
+      ImpactDelaySeconds,
+      false);
+}
+
+void UGA_AeyerjiBase::EndAbility(
+    const FGameplayAbilitySpecHandle Handle,
+    const FGameplayAbilityActorInfo* ActorInfo,
+    const FGameplayAbilityActivationInfo ActivationInfo,
+    const bool bReplicateEndAbility,
+    const bool bWasCancelled)
+{
+  const FGameplayAbilityActorInfo* EffectiveActorInfo = ActorInfo
+      ? ActorInfo
+      : GetCurrentActorInfo();
+  if (EffectiveActorInfo && EffectiveActorInfo->AvatarActor.IsValid())
+  {
+    if (UWorld* World = EffectiveActorInfo->AvatarActor->GetWorld())
+    {
+      World->GetTimerManager().ClearTimer(DeferredBlueprintActivationTimerHandle);
+    }
+  }
+
+  RemoveOwnedAbilityCastLock(EffectiveActorInfo);
+  Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+}
+
+bool UGA_AeyerjiBase::CanActivateAbility(
+    const FGameplayAbilitySpecHandle Handle,
+    const FGameplayAbilityActorInfo* ActorInfo,
+    const FGameplayTagContainer* SourceTags,
+    const FGameplayTagContainer* TargetTags,
+    FGameplayTagContainer* OptionalRelevantTags) const
+{
+  const UAbilitySystemComponent* ASC = GetAeyerjiAbilitySystem(ActorInfo);
+  if (ASC && ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_Casting))
+  {
+    if (OptionalRelevantTags)
+    {
+      OptionalRelevantTags->AddTag(AeyerjiTags::State_Ability_Casting);
+    }
+    return false;
+  }
+
+  return Super::CanActivateAbility(Handle, ActorInfo, SourceTags, TargetTags, OptionalRelevantTags);
+}
+
+float UGA_AeyerjiBase::CalculateAbilityImpactDelay(const FAeyerjiAbilityResolvedConfig& Config) const
+{
+  if (FMath::IsFinite(Config.Visuals.ImpactDelaySeconds)
+      && Config.Visuals.ImpactDelaySeconds >= 0.f)
+  {
+    return Config.Visuals.ImpactDelaySeconds;
+  }
+
+  if (Config.Visuals.Montage.IsNull())
+  {
+    return 0.f;
+  }
+
+  UAnimMontage* Montage = Config.Visuals.Montage.Get();
+  if (!Montage)
+  {
+    Montage = Config.Visuals.Montage.LoadSynchronous();
+  }
+  if (!Montage)
+  {
+    return 0.f;
+  }
+
+  const float PlayRate = FMath::IsFinite(Config.Visuals.MontagePlayRate)
+      ? FMath::Max(0.01f, Config.Visuals.MontagePlayRate)
+      : 1.f;
+  return FMath::Max(0.f, Montage->GetPlayLength() * 0.5f / PlayRate);
+}
+
+void UGA_AeyerjiBase::BeginAbilityCastPresentation(
+    const FGameplayAbilityActorInfo& ActorInfo,
+    const FAeyerjiAbilityResolvedConfig& Config,
+    const float ImpactDelaySeconds)
+{
+  AAeyerjiCharacter* Character = Cast<AAeyerjiCharacter>(ActorInfo.AvatarActor.Get());
+  if (!Character || !Character->HasAuthority())
+  {
+    return;
+  }
+
+  if (ImpactDelaySeconds > KINDA_SMALL_NUMBER)
+  {
+    if (UAbilitySystemComponent* ASC = ActorInfo.AbilitySystemComponent.Get())
+    {
+      FGameplayTagContainer PrimaryAttackTags;
+      PrimaryAttackTags.AddTag(AeyerjiTags::Ability_Primary);
+      ASC->CancelAbilities(&PrimaryAttackTags);
+
+      if (AeyerjiTags::State_Ability_Casting.GetTag().IsValid())
+      {
+        ASC->AddLooseGameplayTag(
+            AeyerjiTags::State_Ability_Casting,
+            1,
+            EGameplayTagReplicationState::TagOnly);
+        bOwnsAbilityCastLock = true;
+      }
+    }
+
+    if (AController* Controller = Character->GetController())
+    {
+      Controller->StopMovement();
+    }
+    if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+    {
+      Movement->StopMovementImmediately();
+    }
+  }
+
+  if (!Config.Visuals.Montage.IsNull())
+  {
+    UE_LOG(
+        LogTemp,
+        Display,
+        TEXT("AbilityCast: playing %s for %s; impact in %.3fs."),
+        *Config.Visuals.Montage.ToSoftObjectPath().ToString(),
+        *Config.AbilityTag.ToString(),
+        ImpactDelaySeconds);
+    Character->Multicast_PlayAbilityMontageByPath(
+        Config.Visuals.Montage.ToSoftObjectPath(),
+        Config.Visuals.MontagePlayRate);
+  }
+}
+
+void UGA_AeyerjiBase::ContinueDeferredBlueprintActivation(
+    const FGameplayAbilitySpecHandle Handle,
+    const FGameplayAbilityActorInfo* ActorInfo,
+    const FGameplayAbilityActivationInfo ActivationInfo,
+    const FGameplayEventData TriggerEventData,
+    const bool bHasTriggerEventData)
+{
+  if (!IsActive())
+  {
+    return;
+  }
+  if (!ActorInfo || !ActorInfo->AvatarActor.IsValid() || IsOwnerDead(ActorInfo))
+  {
+    EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+    return;
+  }
+
+  Super::ActivateAbility(
+      Handle,
+      ActorInfo,
+      ActivationInfo,
+      bHasTriggerEventData ? &TriggerEventData : nullptr);
+}
+
+void UGA_AeyerjiBase::RemoveOwnedAbilityCastLock(const FGameplayAbilityActorInfo* ActorInfo)
+{
+  if (!bOwnsAbilityCastLock)
+  {
+    return;
+  }
+
+  if (ActorInfo)
+  {
+    if (UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get())
+    {
+      if (ASC->GetTagCount(AeyerjiTags::State_Ability_Casting) > 0)
+      {
+        ASC->RemoveLooseGameplayTag(
+            AeyerjiTags::State_Ability_Casting,
+            1,
+            EGameplayTagReplicationState::TagOnly);
+      }
+    }
+  }
+  bOwnsAbilityCastLock = false;
 }
 
 AAeyerjiCharacter *UGA_AeyerjiBase::GetAeyerjiCharacter(
@@ -115,12 +372,13 @@ void UGA_AeyerjiBase::EvaluateAbilityCostAndCooldown(const UAbilitySystemCompone
   FAeyerjiAbilityResolvedConfig Config;
   if (GetAbilityResolvedConfig(ASC, AbilityRank, Config))
   {
-    OutManaCost = FMath::Max(0.f, Config.Cost.ManaCost);
-    OutCooldown = FMath::Max(0.f, Config.Cost.Cooldown);
+    OutManaCost = FMath::IsFinite(Config.Cost.ManaCost) ? FMath::Max(0.f, Config.Cost.ManaCost) : 0.f;
+    OutCooldown = FMath::IsFinite(Config.Cost.Cooldown) ? FMath::Max(0.f, Config.Cost.Cooldown) : 0.f;
     if (ASC && OutCooldown > 0.f)
     {
+      const float RawCooldownReduction = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetCooldownReductionAttribute());
       const float CooldownReduction = FMath::Clamp(
-          ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetCooldownReductionAttribute()),
+          FMath::IsFinite(RawCooldownReduction) ? RawCooldownReduction : 0.f,
           0.f,
           0.40f);
       OutCooldown = ResolveCooldownWithReduction(OutCooldown, CooldownReduction);
@@ -134,7 +392,11 @@ void UGA_AeyerjiBase::EvaluateAbilityCostAndCooldown(const UAbilitySystemCompone
 
 float UGA_AeyerjiBase::ResolveCooldownWithReduction(const float BaseCooldown, const float CooldownReduction)
 {
-  return FMath::Max(0.f, BaseCooldown) * (1.f - FMath::Clamp(CooldownReduction, 0.f, 0.40f));
+  const float SafeBaseCooldown = FMath::IsFinite(BaseCooldown) ? FMath::Max(0.f, BaseCooldown) : 0.f;
+  const float SafeReduction = FMath::IsFinite(CooldownReduction)
+      ? FMath::Clamp(CooldownReduction, 0.f, 0.40f)
+      : 0.f;
+  return SafeBaseCooldown * (1.f - SafeReduction);
 }
 
 FGameplayTag UGA_AeyerjiBase::ResolveAbilityTag() const
@@ -164,7 +426,8 @@ FGameplayTag UGA_AeyerjiBase::ResolveAbilityTag() const
       }
     }
 
-    if (Depth > BestDepth)
+    if (Depth > BestDepth
+        || (Depth == BestDepth && (!BestTag.IsValid() || TagString < BestTag.ToString())))
     {
       BestDepth = Depth;
       BestTag = Tag;
@@ -285,12 +548,14 @@ void UGA_AeyerjiBase::ApplyAbilitySetByCallerToSpec(FGameplayEffectSpecHandle& S
 
   if (AeyerjiTags::SBC_Cost_Mana.GetTag().IsValid())
   {
-    Spec->SetSetByCallerMagnitude(AeyerjiTags::SBC_Cost_Mana, -FMath::Abs(InManaCost));
+    const float SafeManaCost = FMath::IsFinite(InManaCost) ? FMath::Abs(InManaCost) : 0.f;
+    Spec->SetSetByCallerMagnitude(AeyerjiTags::SBC_Cost_Mana, -SafeManaCost);
   }
 
   if (AeyerjiTags::SBC_CooldownSeconds.GetTag().IsValid())
   {
-    Spec->SetSetByCallerMagnitude(AeyerjiTags::SBC_CooldownSeconds, FMath::Max(0.f, InCooldown));
+    const float SafeCooldown = FMath::IsFinite(InCooldown) ? FMath::Max(0.f, InCooldown) : 0.f;
+    Spec->SetSetByCallerMagnitude(AeyerjiTags::SBC_CooldownSeconds, SafeCooldown);
   }
 }
 
@@ -346,18 +611,20 @@ bool UGA_AeyerjiBase::CheckCost(const FGameplayAbilitySpecHandle Handle, const F
   if (EvaluatedManaCost > 0.f)
   {
     const FGameplayAttribute ManaAttr = UAeyerjiAttributeSet::GetManaAttribute();
-    if (ASC->HasAttributeSetForAttribute(ManaAttr))
+    if (!ASC->HasAttributeSetForAttribute(ManaAttr))
     {
-      const float CurrentMana = ASC->GetNumericAttribute(ManaAttr);
-      if (CurrentMana + KINDA_SMALL_NUMBER < EvaluatedManaCost)
-      {
-        return false;
-      }
+      return false;
+    }
+
+    const float CurrentMana = ASC->GetNumericAttribute(ManaAttr);
+    if (!FMath::IsFinite(CurrentMana) || CurrentMana + KINDA_SMALL_NUMBER < EvaluatedManaCost)
+    {
+      return false;
     }
   }
 
   // If a cost GE exists, skip Super::CheckCost to avoid evaluating it without SetByCaller.
-  if (GetCostGameplayEffect() != nullptr)
+  if (GetCostGameplayEffect() != nullptr && EvaluatedManaCost > 0.f)
   {
     return true;
   }
@@ -544,7 +811,8 @@ bool UGA_AeyerjiBase::TeleportCharacterSafely(
 
 {
 
-  if (!Character)
+  if (!Character || !Character->HasAuthority()
+      || DesiredLocation.ContainsNaN() || DesiredRotation.ContainsNaN())
 
   {
 
@@ -555,12 +823,15 @@ bool UGA_AeyerjiBase::TeleportCharacterSafely(
   FVector TargetLocation = DesiredLocation;
   const float DefaultTraceHeight = 200.f;
   const float DefaultTraceDepth = 300.f;
+  const float SafeGroundTraceDistance = FMath::IsFinite(GroundTraceDistance)
+      ? FMath::Max(0.f, GroundTraceDistance)
+      : 0.f;
   const float TraceHeight =
-      GroundTraceDistance > 0.f ? GroundTraceDistance : DefaultTraceHeight;
+	  SafeGroundTraceDistance > 0.f ? SafeGroundTraceDistance : DefaultTraceHeight;
   const float TraceDepth =
-      GroundTraceDistance > 0.f ? GroundTraceDistance : DefaultTraceDepth;
-  const float AdditionalOffset =
-      FMath::Max(2.f, CapsuleInflation);
+	  SafeGroundTraceDistance > 0.f ? SafeGroundTraceDistance : DefaultTraceDepth;
+  const float SafeCapsuleInflation = FMath::IsFinite(CapsuleInflation) ? FMath::Max(0.f, CapsuleInflation) : 0.f;
+  const float AdditionalOffset = FMath::Max(2.f, SafeCapsuleInflation);
 
   if (!UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
           Character,
@@ -582,7 +853,7 @@ bool UGA_AeyerjiBase::TeleportCharacterSafely(
           Character,
           TargetLocation,
           Character,
-          CapsuleInflation))
+          SafeCapsuleInflation))
 
   {
 

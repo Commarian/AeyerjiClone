@@ -17,7 +17,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.HP",
-        "BaseValue":  450,
+        "BaseValue":  55,
         "MinValue":  0,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",
@@ -25,7 +25,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.HPMax",
-        "BaseValue":  450,
+        "BaseValue":  55,
         "MinValue":  1,
         "MaxValue":  10000000,
         "DerivedAttributeInfo":  "",
@@ -33,7 +33,7 @@
     },
     {
         "Name":  "AeyerjiAttributeSet.RunSpeed",
-        "BaseValue":  504,
+        "BaseValue":  720,
         "MinValue":  50,
         "MaxValue":  3000,
         "DerivedAttributeInfo":  "",

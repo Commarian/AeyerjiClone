@@ -25,6 +25,7 @@ class AAeyerjiGameState;
 class AAeyerjiPlayerState;
 class UW_EndRunScreen;
 class UW_AeyerjiMissionHUD;
+class UW_AeyerjiMinimap;
 class UUserWidget;
 class UAeyerjiCameraOcclusionFadeComponent;
 class UAeyerjiViewDistanceCullComponent;
@@ -102,6 +103,11 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
+	/** Prevents engine restart callbacks from replacing the explicit player-pawn camera target. */
+	virtual void AutoManageActiveCameraTarget(AActor* SuggestedTarget) override;
+
+	/** Restores the local camera after a spawn or respawn because this controller deliberately disables UE's automatic camera-target management. */
+	void RestoreLocalCameraToPossessedPawn();
 
 	/** Rebinds any live inventory bag widgets to the currently possessed player pawn. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Inventory")
@@ -249,6 +255,18 @@ public:
 	/** Z-order used when the controller adds the mission HUD to the viewport. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD", meta=(DisplayName="Mission HUD Z Order"))
 	int32 MissionHUDZOrder = 25;
+
+	/** Enables the controller-owned local minimap during gameplay world-flow phases. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD|Minimap")
+	bool bEnableMinimap = true;
+
+	/** Optional designer subclass; when unset the fully functional native placeholder minimap is used. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD|Minimap", meta=(DisplayName="Minimap Widget Class"))
+	TSubclassOf<UW_AeyerjiMinimap> MinimapWidgetClass = nullptr;
+
+	/** Z-order used when the controller adds the local minimap to the viewport. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD|Minimap", meta=(DisplayName="Minimap Z Order"))
+	int32 MinimapZOrder = 20;
 
 	/** Local HUD state: true while the player is standing inside the extraction portal countdown. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
@@ -510,9 +528,12 @@ protected:
 	void ShowEndRunScreen(const FAeyerjiRunResults& Results);
 	void HideEndRunScreen(bool bRestoreGameplayInput);
 	void EnsureMainMenuWidget(bool bAllowCreate);
+	bool ShouldPresentMainMenu() const;
 	void ResetMainMenuWidgetInstance();
 	void HideMainMenuWidget();
 	void EnsureMissionHUD();
+	void EnsureMinimap();
+	void HideMinimap();
 	void ApplyCurrentObjectiveStateFromGameState();
 	void ApplyCurrentSurvivalRoundStateFromGameState();
 	void ApplyCurrentSurvivalUpgradeOfferFromGameState();
@@ -562,6 +583,12 @@ protected:
 	void EnsureMouseActorChase(AActor* TargetActor);
 	void StartMouseGroundMove(const FVector& Goal, bool bSpawnCursorFX);
 	void UpdateMouseGroundMove(const FVector& Goal);
+	/**
+	 * Stops the currently active primary attack when a new hostile is explicitly selected.
+	 * GAS still decides whether the current phase is cancellable, so committed hit windows
+	 * cannot be interrupted by a late retarget.
+	 */
+	void CancelPrimaryAttackForRetarget(AActor* NewTarget);
 	bool TriggerPrimaryAttackAbility(UAbilitySystemComponent* ASC, AActor* ExplicitTarget);
 	FGameplayAbilitySpecHandle FindPrimaryAttackAbilityHandle(UAbilitySystemComponent* ASC) const;
 	void OnDropItemPressed(const FInputActionValue& Val);
@@ -616,15 +643,25 @@ protected:
 	void IssueMoveRPC(const FVector& Goal);
 	void IssueMoveRPC(AActor* Target);
 	UFUNCTION(Server, Reliable)
-	void Server_ActivatePrimaryAttackOnActor(AActor* TargetActor);
+	void Server_ActivatePrimaryAttackOnActor(AActor* TargetActor, uint32 CommandSerial);
+	/** Confirms whether authority accepted the one-click attack request before its command is consumed. */
+	UFUNCTION(Client, Reliable)
+	void Client_PrimaryAttackActivationResult(AActor* TargetActor, uint32 CommandSerial, bool bActivated);
+	/** Mirrors a local primary-attack retarget cancellation on the authority. */
+	UFUNCTION(Server, Reliable)
+	void Server_CancelPrimaryAttackForRetarget(AActor* NewTarget);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
 	void ServerMoveToLocation(const FVector& Goal);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
 	void ServerMoveToActor   (AActor* Target, const float AcceptanceRadius = 15.f);
+	/** Sequenced held-cursor sample. Loss is acceptable because a newer sample supersedes it. */
+	UFUNCTION(Server, Unreliable)
+	void Server_UpdateCursorFollowGoal(FVector_NetQuantize10 Goal, uint32 UpdateId);
+	/** Reliably commits the last held-cursor endpoint without stopping the resulting path. */
 	UFUNCTION(Server, Reliable)
-	void Server_UpdateCursorFollowGoal(const FVector& Goal);
+	void Server_EndCursorFollow(FVector_NetQuantize10 FinalGoal, uint32 UpdateId);
 	UFUNCTION(Server, Reliable)
-	void Server_ResetCursorFollowTurnRate();
+	void Server_ResetCursorFollowTurnRate(uint32 UpdateId);
 	UFUNCTION(Server, Reliable)
 	void Server_ApplyCursorFollowTurnRate(const FVector& Goal);
 
@@ -646,6 +683,8 @@ protected:
 	// Cached targeting
 	UPROPERTY() FVector CachedGoal = FVector::ZeroVector;
 	TWeakObjectPtr<AActor> CachedTarget;
+	/** Last hostile selected for a primary attack; prevents a same-target click from cancelling combo input. */
+	TWeakObjectPtr<AActor> LastPrimaryAttackTarget;
 
 	// Pending move state for client prediction
 	FVector PendingMoveGoal = FVector::ZeroVector;
@@ -667,6 +706,12 @@ protected:
 	FVector LastCursorFollowRepathGoal = FVector::ZeroVector;
 	double LastCursorFollowClientDiagTime = -1.0;
 	double LastCursorFollowServerDiagTime = -1.0;
+	double LastCursorFollowNetworkSendTime = -1.0;
+	FVector LastCursorFollowNetworkGoal = FVector::ZeroVector;
+	uint32 NextCursorFollowUpdateId = 0;
+	uint32 LastReceivedCursorFollowUpdateId = 0;
+	bool bHasCursorFollowNetworkGoal = false;
+	bool bHasReceivedCursorFollowUpdateId = false;
 	double CursorFollowHoldStartTime = -1.0;
 	FVector CursorFollowHoldStartGoal = FVector::ZeroVector;
 	bool bCursorFollowHoldPrimed = false;
@@ -685,6 +730,7 @@ protected:
 		TWeakObjectPtr<AActor> IssuedMoveTarget;
 		FVector GroundGoal = FVector::ZeroVector;
 		bool bAttackCommitted = false;
+		bool bAwaitingServerAttackResult = false;
 		uint32 CommandSerial = 0;
 		double LastAttackAttemptTime = -1.0;
 	};
@@ -738,6 +784,18 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
 	float CursorFollowRepathInterval = 0.025f;
+
+	/** Maximum held-cursor network update rate; local cursor smoothing still runs every frame. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement|Networking", meta=(ClampMin="0.016"))
+	float CursorFollowNetworkUpdateInterval = 0.05f;
+
+	/** Sends a recovery sample even if cursor movement remains below the distance threshold. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement|Networking", meta=(ClampMin="0.05"))
+	float CursorFollowNetworkHeartbeatInterval = 0.20f;
+
+	/** Minimum cursor displacement that merits another network sample. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement|Networking", meta=(ClampMin="1.0", Units="cm"))
+	float CursorFollowNetworkGoalDistance = 45.f;
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Movement")
 	float CursorFollowGoalInterpSpeed = 22.f;
@@ -882,7 +940,7 @@ protected:
 	/** Applies or clears temporary melee rotation locking based on active melee phase tags. */
 	void UpdatePrimaryMeleeRotationLock();
 
-	/** Returns true if any primary melee phase tag is active on the ASC. */
+	/** Returns true only while an active primary-melee spec owns a primary-melee phase tag on the ASC. */
 	bool HasActivePrimaryMeleePhaseTag(const UAbilitySystemComponent* ASC) const;
 
 	/** Temporarily freezes movement-driven/controller-driven yaw changes during melee. */
@@ -1002,6 +1060,12 @@ public:
     float AvoidanceMaxGoalDistanceFactor = 1.15f;
 
 private:
+    /**
+     * Keeps the player view controller-owned when Blueprint defaults are loaded or a pawn is
+     * replaced. The respawn flow explicitly selects the newly possessed pawn as the view target.
+     */
+    void DisableAutomaticCameraTargetManagement();
+
     bool HasShowLootMapping(const UInputMappingContext* Context) const;
     void EnsureShowLootBinding();
 
@@ -1056,6 +1120,10 @@ private:
 	/** Lazily-created mission/objective HUD widget owned by this controller. */
 	UPROPERTY(Transient)
 	TObjectPtr<UW_AeyerjiMissionHUD> MissionHUDWidget = nullptr;
+
+	/** Local-only minimap widget; it reads replicated actor state without creating new network traffic. */
+	UPROPERTY(Transient)
+	TObjectPtr<UW_AeyerjiMinimap> MinimapWidget = nullptr;
 
 	/** Local start time used to animate the extraction countdown HUD after the server notifies us. */
 	double ExtractionCountdownStartTimeSeconds = -1.0;

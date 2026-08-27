@@ -56,6 +56,69 @@ public:
     UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Overlay")
     int32 OverlayZOrder = 0;
 
+    /** When enabled, Overlay mode derives the bar width from the owning actor's collision size so smaller enemies receive shorter bars. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Overlay|Sizing")
+    bool bScaleOverlayWidthWithOwnerSize = true;
+
+    /** The owner diameter in cm that should render at the floating widget's authored width; a standard 42 cm capsule radius is 84 cm across. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Overlay|Sizing", meta=(ClampMin="1.0", Units="cm", EditCondition="bScaleOverlayWidthWithOwnerSize"))
+    float OverlayReferenceOwnerDiameter = 84.f;
+
+    /** Smallest allowed width multiplier, preserving readability for physically tiny enemies. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Overlay|Sizing", meta=(ClampMin="0.05", EditCondition="bScaleOverlayWidthWithOwnerSize"))
+    float OverlayMinWidthScale = 0.60f;
+
+    /** Largest allowed width multiplier, preventing unusually large enemies from creating impractically wide UI. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Overlay|Sizing", meta=(ClampMin="0.05", EditCondition="bScaleOverlayWidthWithOwnerSize"))
+    float OverlayMaxWidthScale = 1.75f;
+
+    /** Optional artistic multiplier applied after physical-size calculation; leave at one for direct physical scaling. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Overlay|Sizing", meta=(ClampMin="0.05", EditCondition="bScaleOverlayWidthWithOwnerSize"))
+    float OverlayWidthScaleMultiplier = 1.f;
+
+    /** Draws Max-HP-based divisions on floating health bars. HUD mode is intentionally left unsegmented. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks")
+    bool bEnableHealthChunkDivisions = true;
+
+    /** When enabled, a floating bar is segmented only while its ASC owns any tag in HealthChunkEligibilityTags. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(EditCondition="bEnableHealthChunkDivisions"))
+    bool bRequireAnyHealthChunkEligibilityTag = true;
+
+    /**
+     * Any matching owned gameplay tag enables chunks. Defaults cover standard elites,
+     * elite role archetypes, mini-bosses, and bosses; normal mob roles are intentionally absent.
+     */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(EditCondition="bEnableHealthChunkDivisions && bRequireAnyHealthChunkEligibilityTag"))
+    FGameplayTagContainer HealthChunkEligibilityTags;
+
+    /** Ideal number of health chunks. Chunk HP is rounded to a clean value near this target. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(ClampMin="1", ClampMax="16", EditCondition="bEnableHealthChunkDivisions"))
+    int32 TargetHealthChunkCount = 12;
+
+    /** Preferred lower bound used when choosing between adjacent clean chunk sizes. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(ClampMin="1", ClampMax="16", EditCondition="bEnableHealthChunkDivisions"))
+    int32 MinPreferredHealthChunkCount = 10;
+
+    /** Preferred upper bound used when choosing between adjacent clean chunk sizes. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(ClampMin="1", ClampMax="16", EditCondition="bEnableHealthChunkDivisions"))
+    int32 MaxPreferredHealthChunkCount = 14;
+
+    /** Absolute separator-count safety limit, independent of enemy rank or Max HP. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(ClampMin="1", ClampMax="32", EditCondition="bEnableHealthChunkDivisions"))
+    int32 MaxHealthChunkCount = 16;
+
+    /** Width of each health-chunk separator in widget-space pixels. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(ClampMin="0.25", ClampMax="8.0", EditCondition="bEnableHealthChunkDivisions"))
+    float HealthChunkSeparatorThickness = 1.f;
+
+    /** Space left above and below each separator so the authored health-bar frame remains visible. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(ClampMin="0.0", ClampMax="8.0", EditCondition="bEnableHealthChunkDivisions"))
+    float HealthChunkSeparatorVerticalInset = 1.f;
+
+    /** Tint applied to every generated health-chunk separator. */
+    UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|Health Chunks", meta=(EditCondition="bEnableHealthChunkDivisions"))
+    FLinearColor HealthChunkSeparatorColor = FLinearColor(0.01f, 0.01f, 0.01f, 0.9f);
+
     // ---- World widget cosmetics ----
     UPROPERTY(EditAnywhere, Category="Aeyerji|StatusBar|World")
     bool bFaceCamera = true;
@@ -113,11 +176,37 @@ public:
     UFUNCTION(BlueprintCallable, Category="Aeyerji|StatusBar")
     UUserWidget* GetStatusBarWidget() const;
 
+    /**
+     * Immediately hides or restores the local status-bar presentation without destroying
+     * this component. Pooled enemies use this on death/reuse so corpse lifetime cannot
+     * leave a zero-health bar visible or permanently remove the reusable status-bar source.
+     */
+    UFUNCTION(BlueprintCallable, Category="Aeyerji|StatusBar")
+    void SetStatusBarPresentationVisible(bool bVisible);
+
+    /** Returns whether this source currently permits its local status-bar presentation. */
+    bool IsStatusBarPresentationVisible() const { return bStatusBarPresentationVisible; }
+
     // Accessors used by overlay manager
     TSubclassOf<UW_AeyerjiStatusBar> GetStatusBarWidgetClass() const { return StatusBarWidgetClass; }
     const FVector& GetWorldOffset() const { return WorldOffset; }
     const FVector2D& GetOverlayPixelOffset() const { return OverlayPixelOffset; }
     int32 GetOverlayZOrder() const { return OverlayZOrder; }
+    bool ShouldScaleOverlayWidthWithOwnerSize() const { return bScaleOverlayWidthWithOwnerSize; }
+    float GetOverlayReferenceOwnerDiameter() const { return OverlayReferenceOwnerDiameter; }
+    float GetOverlayMinWidthScale() const { return OverlayMinWidthScale; }
+    float GetOverlayMaxWidthScale() const { return OverlayMaxWidthScale; }
+    float GetOverlayWidthScaleMultiplier() const { return OverlayWidthScaleMultiplier; }
+    bool ShouldShowHealthChunkDivisions() const { return bEnableHealthChunkDivisions && Mode != EStatusBarMode::HUD; }
+    bool ShouldRequireAnyHealthChunkEligibilityTag() const { return bRequireAnyHealthChunkEligibilityTag; }
+    const FGameplayTagContainer& GetHealthChunkEligibilityTags() const { return HealthChunkEligibilityTags; }
+    int32 GetTargetHealthChunkCount() const { return TargetHealthChunkCount; }
+    int32 GetMinPreferredHealthChunkCount() const { return MinPreferredHealthChunkCount; }
+    int32 GetMaxPreferredHealthChunkCount() const { return MaxPreferredHealthChunkCount; }
+    int32 GetMaxHealthChunkCount() const { return MaxHealthChunkCount; }
+    float GetHealthChunkSeparatorThickness() const { return HealthChunkSeparatorThickness; }
+    float GetHealthChunkSeparatorVerticalInset() const { return HealthChunkSeparatorVerticalInset; }
+    const FLinearColor& GetHealthChunkSeparatorColor() const { return HealthChunkSeparatorColor; }
     const FGameplayAttribute& GetHealthAttr() const { return HealthAttr; }
     const FGameplayAttribute& GetMaxHealthAttr() const { return MaxHealthAttr; }
     const FGameplayAttribute& GetManaAttr() const { return ManaAttr; }
@@ -175,6 +264,7 @@ private:
     void UnbindFromRunStateChanges();
 
     bool bStatusBarInitialized = false;
+    bool bStatusBarPresentationVisible = true;
     FTimerHandle RunStateBindRetryTimer;
     TWeakObjectPtr<AAeyerjiGameState> BoundGameState;
 };

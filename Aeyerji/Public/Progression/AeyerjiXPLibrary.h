@@ -43,7 +43,7 @@ public:
                                            float DifficultyMinMultiplier = 1.f,
                                            float DifficultyMaxMultiplier = 1.f);
 
-    /** Set the Base XP value on an actor's Reward AttributeSet. */
+	/** Set the Base XP value on an actor's Reward AttributeSet; only authority may mutate it. */
     UFUNCTION(BlueprintCallable, Category="Aeyerji|XP")
     static void SetBaseXPOnActor(AActor* Actor, float BaseXP);
 

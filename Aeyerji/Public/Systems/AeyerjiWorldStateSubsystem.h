@@ -224,12 +224,15 @@ public:
 	FAeyerjiWorldStateChangedNativeSignature OnWorldStateChangedNative;
 
 protected:
+	/** Loads the shared global-persistent lane during authoritative subsystem initialization. */
 	UPROPERTY(EditDefaultsOnly, Config, Category="Aeyerji|World State|Persistence")
 	bool bAutoLoadPersistentState = true;
 
+	/** Debounces shared global-persistent writes through the save manager after mutations. */
 	UPROPERTY(EditDefaultsOnly, Config, Category="Aeyerji|World State|Persistence")
 	bool bAutoSavePersistentState = true;
 
+	/** Quiet period before a dirty shared-world snapshot is committed; zero saves immediately. */
 	UPROPERTY(EditDefaultsOnly, Config, Category="Aeyerji|World State|Persistence", meta=(ClampMin="0.0"))
 	float AutoSaveDelaySeconds = 2.0f;
 

@@ -16,6 +16,14 @@
 
 namespace
 {
+constexpr int32 MaxArchetypeRuntimeEntries = 64;
+
+bool CanMutateArchetypeSource(const AActor* Owner)
+{
+	const UWorld* World = Owner ? Owner->GetWorld() : nullptr;
+	return Owner && (!World || !World->IsGameWorld() || Owner->HasAuthority());
+}
+
 template <typename TArchetypeData>
 void ValidateArchetypeInternal(bool& bValidated, const TArchetypeData& Data, const FString& DebugName)
 {
@@ -39,6 +47,16 @@ void ValidateArchetypeInternal(bool& bValidated, const TArchetypeData& Data, con
 	if (Data.bWarnIfMissingGrantedTags && Data.GrantedTags.IsEmpty() && !Data.ArchetypeTag.IsValid())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Enemy archetype %s has no GrantedTags"), *DebugName);
+	}
+
+	if (Data.CapsuleOverrides.bOverrideCapsuleSize
+		&& Data.CapsuleOverrides.CapsuleHalfHeight < Data.CapsuleOverrides.CapsuleRadius)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("Enemy archetype %s capsule half-height %.2f is smaller than radius %.2f; half-height will be raised to the radius."),
+			*DebugName,
+			Data.CapsuleOverrides.CapsuleHalfHeight,
+			Data.CapsuleOverrides.CapsuleRadius);
 	}
 }
 
@@ -70,12 +88,19 @@ void ApplyGrantedTagsInternal(const TArchetypeData& Data, UAbilitySystemComponen
 {
 	if (Data.ArchetypeTag.IsValid())
 	{
-		ASC.AddLooseGameplayTag(Data.ArchetypeTag);
+		// Archetype identity drives client presentation such as elite/boss health chunks.
+		ASC.AddLooseGameplayTag(
+			Data.ArchetypeTag,
+			1,
+			EGameplayTagReplicationState::TagOnly);
 	}
 
 	if (!Data.GrantedTags.IsEmpty())
 	{
-		ASC.AddLooseGameplayTags(Data.GrantedTags);
+		ASC.AddLooseGameplayTags(
+			Data.GrantedTags,
+			1,
+			EGameplayTagReplicationState::TagOnly);
 	}
 }
 
@@ -106,9 +131,11 @@ void GrantAbilitiesInternal(const TArchetypeData& Data, UAbilitySystemComponent&
 		return;
 	}
 
-	const int32 ClampedLevel = FMath::Max(1, Data.AbilityLevel);
-	for (const TSubclassOf<UGameplayAbility>& AbilityClass : Data.GrantedAbilities)
+	const int32 ClampedLevel = FMath::Clamp(Data.AbilityLevel, 1, 1000);
+	const int32 AbilityCount = FMath::Min(Data.GrantedAbilities.Num(), MaxArchetypeRuntimeEntries);
+	for (int32 Index = 0; Index < AbilityCount; ++Index)
 	{
+		const TSubclassOf<UGameplayAbility>& AbilityClass = Data.GrantedAbilities[Index];
 		if (!*AbilityClass)
 		{
 			continue;
@@ -131,9 +158,13 @@ void ApplyInitEffectsInternal(const TArchetypeData& Data, UAbilitySystemComponen
 		return;
 	}
 
-	const float ClampedLevel = FMath::Max(0.01f, Data.EffectLevel);
-	for (const TSubclassOf<UGameplayEffect>& EffectClass : Data.InitGameplayEffects)
+	const float ClampedLevel = FMath::IsFinite(Data.EffectLevel)
+		? FMath::Clamp(Data.EffectLevel, 0.01f, 1000.f)
+		: 1.f;
+	const int32 EffectCount = FMath::Min(Data.InitGameplayEffects.Num(), MaxArchetypeRuntimeEntries);
+	for (int32 Index = 0; Index < EffectCount; ++Index)
 	{
+		const TSubclassOf<UGameplayEffect>& EffectClass = Data.InitGameplayEffects[Index];
 		if (!EffectClass)
 		{
 			continue;
@@ -157,13 +188,15 @@ void SyncResourceValuesToCurrentMax(UAbilitySystemComponent& ASC)
 
 	if (HPAttr.IsValid() && HPMaxAttr.IsValid())
 	{
-		const float MaxHP = FMath::Max(0.f, ASC.GetNumericAttribute(HPMaxAttr));
+		const float RawMaxHP = ASC.GetNumericAttribute(HPMaxAttr);
+		const float MaxHP = FMath::IsFinite(RawMaxHP) ? FMath::Max(0.f, RawMaxHP) : 0.f;
 		ASC.SetNumericAttributeBase(HPAttr, MaxHP);
 	}
 
 	if (ManaAttr.IsValid() && ManaMaxAttr.IsValid())
 	{
-		const float MaxMana = FMath::Max(0.f, ASC.GetNumericAttribute(ManaMaxAttr));
+		const float RawMaxMana = ASC.GetNumericAttribute(ManaMaxAttr);
+		const float MaxMana = FMath::IsFinite(RawMaxMana) ? FMath::Max(0.f, RawMaxMana) : 0.f;
 		ASC.SetNumericAttributeBase(ManaAttr, MaxMana);
 	}
 }
@@ -181,8 +214,10 @@ void AddTraitComponentsInternal(const TArchetypeData& Data, AActor* Owner)
 		return;
 	}
 
-	for (const TSubclassOf<UAeyerjiEnemyTraitComponent>& TraitClass : Data.TraitComponents)
+	const int32 TraitCount = FMath::Min(Data.TraitComponents.Num(), MaxArchetypeRuntimeEntries);
+	for (int32 Index = 0; Index < TraitCount; ++Index)
 	{
+		const TSubclassOf<UAeyerjiEnemyTraitComponent>& TraitClass = Data.TraitComponents[Index];
 		if (!*TraitClass)
 		{
 			continue;
@@ -240,14 +275,17 @@ void ApplyMeshOverridesInternal(const TArchetypeData& Data, AEnemyParentNative* 
 		MeshComp->SetAnimInstanceClass(MeshOverrides.AnimClass);
 	}
 
-	if (MeshOverrides.bOverrideRelativeTransform)
+	if (MeshOverrides.bOverrideRelativeTransform && MeshOverrides.RelativeTransform.IsValid())
 	{
 		MeshComp->SetRelativeTransform(MeshOverrides.RelativeTransform);
 	}
 
 	if (!MeshOverrides.MaterialOverrides.IsEmpty())
 	{
-		const int32 MaxIndex = MeshOverrides.MaterialOverrides.Num();
+		const int32 MaxIndex = FMath::Min3(
+			MeshOverrides.MaterialOverrides.Num(),
+			MeshComp->GetNumMaterials(),
+			MaxArchetypeRuntimeEntries);
 		for (int32 Index = 0; Index < MaxIndex; ++Index)
 		{
 			if (MeshOverrides.MaterialOverrides[Index].IsNull())
@@ -261,6 +299,26 @@ void ApplyMeshOverridesInternal(const TArchetypeData& Data, AEnemyParentNative* 
 			}
 		}
 	}
+}
+
+template <typename TArchetypeData>
+void ApplyCapsuleOverridesInternal(const TArchetypeData& Data, AEnemyParentNative* Enemy)
+{
+	if (!Enemy)
+	{
+		return;
+	}
+
+	const FAeyerjiEnemyCapsuleOverrides& CapsuleOverrides = Data.CapsuleOverrides;
+	if (!CapsuleOverrides.bOverrideCapsuleSize)
+	{
+		Enemy->ClearArchetypeCollisionCapsuleSize();
+		return;
+	}
+
+	Enemy->SetArchetypeCollisionCapsuleSize(
+		CapsuleOverrides.CapsuleRadius,
+		CapsuleOverrides.CapsuleHalfHeight);
 }
 } // namespace
 
@@ -383,6 +441,11 @@ void UAeyerjiEnemyArchetypeComponent::ApplyArchetype()
 
 void UAeyerjiEnemyArchetypeComponent::SetArchetypeData(UAeyerjiEnemyArchetypeData* NewData, bool bApplyImmediately)
 {
+	if (!CanMutateArchetypeSource(GetOwner()))
+	{
+		return;
+	}
+
 	ArchetypeData = NewData;
 	ArchetypeLibrary = nullptr;
 	ArchetypeTag = FGameplayTag();
@@ -408,6 +471,11 @@ void UAeyerjiEnemyArchetypeComponent::SetArchetypeData(UAeyerjiEnemyArchetypeDat
 
 void UAeyerjiEnemyArchetypeComponent::SetArchetypeFromLibrary(UAeyerjiEnemyArchetypeLibrary* NewLibrary, const FGameplayTag& NewTag, bool bApplyImmediately)
 {
+	if (!CanMutateArchetypeSource(GetOwner()))
+	{
+		return;
+	}
+
 	ArchetypeLibrary = NewLibrary;
 	ArchetypeTag = NewTag;
 	ArchetypeData = nullptr;
@@ -455,6 +523,8 @@ void UAeyerjiEnemyArchetypeComponent::ApplyArchetypeVisuals(bool bAllowInEditor,
 		return;
 	}
 
+	ApplyArchetypeCollisionOverrides(bAllowInEditor);
+
 	if (World->GetNetMode() == NM_DedicatedServer)
 	{
 		return;
@@ -476,6 +546,36 @@ void UAeyerjiEnemyArchetypeComponent::ApplyArchetypeVisuals(bool bAllowInEditor,
 		ApplyMeshOverrides(*DataAsset);
 	}
 	bVisualsApplied = true;
+}
+
+void UAeyerjiEnemyArchetypeComponent::ApplyArchetypeCollisionOverrides(const bool bAllowInEditor)
+{
+	AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(GetOwner());
+	const UWorld* World = Enemy ? Enemy->GetWorld() : nullptr;
+	if (!Enemy || !World)
+	{
+		return;
+	}
+
+	if (!bAllowInEditor && !(World->IsGameWorld() || World->WorldType == EWorldType::PIE))
+	{
+		return;
+	}
+
+	const FAeyerjiEnemyArchetypeEntry* LibraryEntry = ResolveArchetypeEntry(true);
+	const UAeyerjiEnemyArchetypeData* DataAsset = LibraryEntry ? nullptr : ResolveArchetypeData(true);
+	if (LibraryEntry)
+	{
+		ApplyCapsuleOverrides(*LibraryEntry);
+	}
+	else if (DataAsset)
+	{
+		ApplyCapsuleOverrides(*DataAsset);
+	}
+	else
+	{
+		Enemy->ClearArchetypeCollisionCapsuleSize();
+	}
 }
 
 const UAeyerjiEnemyArchetypeData* UAeyerjiEnemyArchetypeComponent::GetArchetypeData() const
@@ -718,4 +818,14 @@ void UAeyerjiEnemyArchetypeComponent::ApplyMeshOverrides(const UAeyerjiEnemyArch
 void UAeyerjiEnemyArchetypeComponent::ApplyMeshOverrides(const FAeyerjiEnemyArchetypeEntry& Data)
 {
 	ApplyMeshOverridesInternal(Data, Cast<AEnemyParentNative>(GetOwner()));
+}
+
+void UAeyerjiEnemyArchetypeComponent::ApplyCapsuleOverrides(const UAeyerjiEnemyArchetypeData& Data)
+{
+	ApplyCapsuleOverridesInternal(Data, Cast<AEnemyParentNative>(GetOwner()));
+}
+
+void UAeyerjiEnemyArchetypeComponent::ApplyCapsuleOverrides(const FAeyerjiEnemyArchetypeEntry& Data)
+{
+	ApplyCapsuleOverridesInternal(Data, Cast<AEnemyParentNative>(GetOwner()));
 }

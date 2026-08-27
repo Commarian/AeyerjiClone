@@ -25,7 +25,7 @@ public:
 
 	/** World tier treated as the Normal baseline for tuning and legacy alpha calculations. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Difficulty", meta=(ClampMin="0", ClampMax="999"))
-	int32 NormalWorldTier = 100;
+	int32 NormalWorldTier = 167;
 
 	/** Global baseline enemy level curve evaluated from the player's current level. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Difficulty")
@@ -101,6 +101,9 @@ public:
 
 	/** Clamps a gameplay level against the shared tuning cap. */
 	static int32 ClampGameplayLevel(int32 InLevel);
+
+	/** Converts an arbitrary floating-point attribute value into a finite, globally clamped gameplay level. */
+	static int32 FloatToGameplayLevel(float InLevel);
 
 	/** Converts the authoritative world tier into the legacy slider representation. */
 	static float WorldTierToDifficultySlider(int32 WorldTier);

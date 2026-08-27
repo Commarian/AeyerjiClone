@@ -26,6 +26,7 @@ public:
 	AAeyerjiSurvivalDefenseObjectiveActor();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	// Replication for upgrade stats
@@ -123,10 +124,18 @@ public:
 	UFUNCTION(BlueprintAuthorityOnly, Category="Survival|Defense|Upgrades")
 	void ResetSurvivalUpgrades();
 
+	/** Restores health, collision, and presentation for a fresh survival run (server only). */
+	UFUNCTION(BlueprintAuthorityOnly, Category="Survival|Defense")
+	void ResetObjectiveForNewRun();
+
 protected:
 	/** Blueprint hook for cosmetic destruction responses. Runs where HandleObjectiveOutOfHealth executes. */
 	UFUNCTION(BlueprintImplementableEvent, Category="Survival|Defense")
 	void BP_OnObjectiveDestroyed(AActor* InstigatorActor, float DamageTaken);
+
+	/** Blueprint hook for restoring destruction cosmetics when a new run begins. */
+	UFUNCTION(BlueprintImplementableEvent, Category="Survival|Defense")
+	void BP_OnObjectiveReset();
 
 	UFUNCTION()
 	void HandleObjectiveOutOfHealth(AActor* VictimActor, AActor* InstigatorActor, float DamageTaken);
@@ -136,6 +145,7 @@ protected:
 
 	void InitializeObjectiveAttributes();
 	void ApplyDestroyedPresentation();
+	void ApplyActivePresentation();
 
 	UPROPERTY(ReplicatedUsing=OnRep_ObjectiveDestroyed, VisibleAnywhere, BlueprintReadOnly, Category="Survival|Defense")
 	bool bObjectiveDestroyed = false;

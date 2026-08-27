@@ -190,7 +190,7 @@ The browser page needs a scrollable list of rows. The easiest maintainable setup
 
 The lobby page presents `FAeyerjiLobbySnapshot`. The server owns every value in that snapshot; Blueprint only displays it and sends requests through the inherited wrapper functions.
 
-- [ ] Finish the four fixed roster-slot layout.
+- [x] Finish the four fixed roster-slot layout.
   - Keep `MemberSlot_1` through `MemberSlot_4` and their six named `Text_*_N` children from the native-shell handoff section. Arrange and style them in the Designer.
   - Do not add a roster loop or visibility graph. Native code collapses unused slots, fills supplied member values by array position, and shows each populated slot.
 - [x] Project lobby snapshots and local-control state natively.
@@ -247,7 +247,7 @@ Run the small PIE checks while assembling; leave Steam testing until the widget 
 - [ ] Profile revision: a changed member profile clears that member's readiness.
 - [ ] Excursion validation: undefined, locked, and minimum-level tiers cannot launch.
 - [ ] Join-in-progress: browser filtering and server rejection block Launching/InGameplay parties.
-- [ ] Steam (separate accounts): discovery excludes unrelated App ID 480 lobbies, direct join works, invite acceptance works, and leave/destroy returns offline.
+- [ ] Steam (separate accounts): run the project-specific procedure in `SteamTwoAccountTest.md`; verify `Backend=STEAM LAN=0`, bidirectional discovery/join, invite acceptance, launch travel, and leave/destroy.
 - [ ] Steam recovery: host loss, network failure, and travel failure show localized feedback and allow returning to the menu.
 - [ ] Exact handoff: the selected activity/tier logged in `[LobbyLaunch]` matches the frozen gameplay `[RiftRun][Activity]` snapshot.
 

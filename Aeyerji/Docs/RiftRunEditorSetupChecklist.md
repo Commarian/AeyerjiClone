@@ -4,6 +4,68 @@ This is the remaining Editor/content work required to make the current C++ Great
 
 The current content audit was performed against `/Game/Levels/NeonMap` and its referenced assets on 2026-07-11.
 
+## Before the next Rift pacing test
+
+Complete this short gate before launching another run. The later sections remain the full production checklist; this section contains only the work required to exercise the new encounter lifecycle safely.
+
+### Required blockers
+
+- [x] Restart the Editor after the latest C++ build so the new SpawnRegion, EncounterDirector, and enemy reveal properties are loaded.
+- [x] Open `/Game/Levels/NeonMap` and assign **Rift Progression Index** to every eligible `BP_AeyerjiSpawnRegion`.
+  - Use `0` for the first route area, then increase toward the boss route.
+  - With ten sequential regions, `0` through `9` is the simplest first pass.
+  - Regions that are lateral alternatives may share an index.
+  - Regions carrying `Rift.Excluded` do not participate and do not need a route index.
+  - Do not leave any eligible region at `-1`; the run will intentionally fail validation.
+- [x] Open the `BP_AeyerjiEncounterDirector` class defaults or its assigned `EncounterDirectorDefinition` and verify these resolved values:
+  - **Rift Region Staging Distance** = `6500`.
+  - **Rift Ambient Enemy Fraction** = `0.33`.
+  - **Rift Reveal Batch Size** = `3`.
+  - **Rift Reveal Batch Interval** = `0.15`.
+  - **Rift Reveal Duration Seconds** = `1.0`.
+  - **Rift Ground Reveal Weight** = `0.75`.
+  - **Rift Sky Reveal Weight** = `0.25`.
+  - **Rift Prewarm Actors Per Tick** = `2`.
+  - **Rift Prewarm Work Milliseconds Per Tick** = `4`.
+  - **Rift Prewarm Replication Settle Seconds** = `1.0`.
+  - **Rift Enemy Wake Distance** = `8000`.
+  - **Rift Enemy Sleep Distance** = `10000`.
+  - **Rift Maximum Awake Enemies** = `48`.
+- [x] Confirm the assigned EncounterDirector definition still contains at least one valid fallback **Spawn Group**, or assign **Rift Encounter Group** explicitly on every eligible region.
+- [x] Compile and save `BP_AeyerjiSpawnRegion`, `BP_AeyerjiEncounterDirector`, the LevelDirector Blueprint, and `NeonMap`.
+- [x] Reimport `/Game/Systems/Rifts/RiftTierTable` from `Source/Aeyerji/Data/Rifts/GreaterRiftTiers.csv` if the six newer multiplier/level columns have not already appeared in the DataTable.
+
+### Reveal presentation: recommended, but not a blocker
+
+- [ ] Implement **BP On Encounter Reveal** in the enemy Blueprint if you want to judge the actual emergence presentation now.
+- [ ] Handle `GroundEmergence` and `SkyDrop` cosmetically using the supplied duration.
+- [ ] Leave collision, damage, AI, movement, perception, and StateTree activation alone; native code controls those.
+
+You may test without this Blueprint event. Reinforcements will appear visibly locked in place for one second and then become active, which is sufficient to validate networking and pacing before montages or Niagara are authored.
+
+### Only required when testing the complete run
+
+- [ ] Finish the boss-arena respawn `PlayerStart` and `Boss Arena Respawn Player Start Tag` before testing death inside the boss phase.
+- [ ] Configure the three Rift loot source pools before treating a no-loot completion as an encounter-system failure:
+  - `Loot.Source.Rift.Base`
+  - `Loot.Source.Rift.Timed`
+  - `Loot.Source.Rift.Flawless`
+- [ ] Confirm both Steam test profiles reach the applied/verified profile state before beginning the two-client acceptance test.
+
+### First retest scope
+
+For the first run, stop after validating these points:
+
+1. Loading remains visible until `[RiftRun][Prewarm] Complete`.
+2. The log reports the intended full inactive pool and no validation failure for a missing progression index.
+3. Approaching a region at roughly `6500 cm` produces the ambient attractor pack.
+4. Reaching roughly `2500 cm`, damaging an attractor, or entering combat reveals the remaining enemies in batches.
+5. No `[RiftPool] Emergency runtime construction` warning occurs.
+6. Moving forward does not open a new pack behind the highest progression index.
+7. Backtracking wakes existing enemies instead of creating replacements.
+
+If those seven checks pass, proceed to the complete solo and two-client smoke-test gates near the end of this document.
+
 ## Already verified
 
 - [x] C++ now reads all Greater Rift tiers from one `UDataTable` using `FAeyerjiRiftTierRow`.
@@ -12,6 +74,8 @@ The current content audit was performed against `/Game/Levels/NeonMap` and its r
 - [x] The source-controlled import file is `Source/Aeyerji/Data/Rifts/GreaterRiftTiers.csv`.
 - [x] Per-tier DataAsset classes, the Rift scaling DataAsset class, and the Rift population-profile dependency have been removed from C++.
 - [x] `BP_AeyerjiLevelDirector` and `BP_AeyerjiEncounterDirector` are present and the LevelDirector references `NeonMapZoneRun`.
+- [x] C++ now freezes and prewarms the exact full Rift population during `TransitionLoading`; gameplay is not released until prewarm completes.
+- [x] C++ owns the `Planned -> Staged -> Revealing -> Active -> Retired` region lifecycle, monotonic progression frontier, finite skipped-budget transfer, reveal lock, and region-aware AI sleeping.
 - [x] `BossDefMap1` references `BP_AeyerjiLinkedTeleporter_Boss`.
 - [x] `BossTargetPointA`, `BossTargetPointB`, `BossSpawnPoint`, and `EndRunPortalSpawn` are present in `NeonMap` with matching Actor Tags.
 - [x] `NeonMapZoneRun` has a boss definition, extraction portal class, and extraction spawn-point tag.
@@ -98,12 +162,16 @@ If you assign elites or tougher roles more than one point, reduce the enemy budg
 - [x] Keep the existing world-population `AeyerjiSpawnerGroup` configured as the shared spawning/pooling executor if `World Population Spawner Actor Tag` already resolves it. C++ creates a runtime executor if it is absent.
 - [x] Ensure `Encounter Director Definition` resolves the intended `Spawn Groups`; these groups supply GR enemy composition.
 
-The LevelDirector no longer resolves individual encounters by tag. The server automatically discovers every valid `AAeyerjiSpawnRegion`, orders it by stable actor path for deterministic planning, and uses the region's bounds for distance and spawn placement.
+The LevelDirector no longer resolves individual encounters by tag. The server automatically discovers every valid `AAeyerjiSpawnRegion`, orders it by **Rift Progression Index** and then stable actor path, and uses the region's bounds for distance and spawn placement. A missing progression index now rejects the run before gameplay.
 
 ## 5. Review the existing SpawnRegions and encounter composition
 
 Do not add tags to normal regions. For each existing `BP_AeyerjiSpawnRegion`:
 
+- [ ] Assign **Rift Progression Index** on every ordinary Rift anchor in `NeonMap`.
+  - Start at `0` near the party entry and increase toward the boss route.
+  - Equal indices are allowed for lateral/parallel anchors.
+  - Do not leave any eligible region at `-1`; launch validation rejects missing indices.
 - [x] Confirm **Region Bounds** cover navigable ground and do not overlap inaccessible nav islands.
 - [ ] Set **Rift Encounter Group** on each ordinary anchor when it needs authored composition. Empty uses the Encounter Director Definition's fallback pool.
 - [x] Keep **Region Weight** positive. C++ divides the tier's enemy budget across regions using these weights.
@@ -113,9 +181,33 @@ Do not add tags to normal regions. For each existing `BP_AeyerjiSpawnRegion`:
 - [x] Do not enable collision on `Region Bounds`. Authority measures player distance to the box directly every EncounterDirector update.
 - [x] Confirm the selected regions have a nav path back to the playable route.
 
-The nearest viable unopened anchor to a living participant is reserved atomically. A periodic server pressure check can also reserve one when live enemy pressure is low. Once reserved, an anchor cannot activate again through either path. Spawn attempts require NavMesh, the configured safety distance from every living player, and preferably an occluded location; unsafe anchors defer rather than spawning beside players.
+Only regions at or ahead of the monotonic party frontier may stage. The pressure evaluator selects the next forward authored index, not an arbitrary nearest rear anchor. If the party skips unopened lower-index regions, their exact reserved enemies are transferred to still-unopened forward regions; already activated enemies left behind remain alive and progress-bearing.
 
-In `BP_AeyerjiEncounterDirector` or its definition, review **Rift Minimum Spawn Distance From Players** (default `1200 cm`), **Rift Pressure Evaluation Interval** (`2 s`), **Rift Minimum Active Enemy Pressure** (`8`), and **Rift Prefer Hidden Spawn Locations**.
+In `BP_AeyerjiEncounterDirector` or its definition, review:
+
+- **Rift Region Staging Distance**: `6500 cm`.
+- Tier row **Region Activation Distance**: `2500 cm`, used for reinforcement reveal.
+- **Rift Ambient Enemy Fraction**: `0.33` (normally 4 of a 12-enemy region).
+- **Rift Reveal Batch Size**: `3`.
+- **Rift Reveal Batch Interval**: `0.15 s`.
+- **Rift Reveal Duration Seconds**: `1.0 s`.
+- **Rift Ground Reveal Weight / Rift Sky Reveal Weight**: `0.75 / 0.25`.
+- **Rift Prewarm Replication Settle Seconds**: `1.0 s`; keep actors relevant and awake-but-hidden long enough for connected clients to receive initial actor channels.
+- **Rift Enemy Wake Distance / Sleep Distance**: `8000 / 10000 cm`.
+- **Rift Maximum Awake Enemies**: `48`.
+- **Rift Minimum Spawn Distance From Players**: `1200 cm`.
+- **Rift Pressure Evaluation Interval**: `2 s`.
+- **Rift Minimum Active Enemy Pressure**: `8`.
+
+### Enemy reveal presentation
+
+- [ ] In every Rift enemy Blueprint that needs an entrance, implement **BP On Encounter Reveal**.
+- [ ] Switch on `RevealStyle`:
+  - `GroundEmergence`: play the authored climb/emergence montage, Niagara, and ground effect.
+  - `SkyDrop`: play the authored fall/drop presentation and impact effect.
+  - `Immediate`: requires no entrance animation.
+- [ ] Fit presentation to the supplied `RevealDurationSeconds`.
+- [ ] Do not enable collision, damage, targeting, movement, perception, or StateTree logic in Blueprint. C++ owns the one-second lock and unlocks even when no Blueprint animation is implemented.
 
 ### Weighted progress and composition authoring
 
@@ -236,14 +328,21 @@ Run this in order after the Editor setup above is saved and all affected Bluepri
 ### Solo
 
 - [ ] Enter `NeonMap` through normal world flow without console intervention.
+- [ ] Confirm the loading overlay remains until `[RiftRun][Prewarm] Complete` reports the full inactive planned population.
+- [ ] Confirm gameplay starts with `FreshSpawnsDuringGameplay=0`; any `[RiftPool] Emergency runtime construction` line fails the normal-run pool acceptance gate.
 - [ ] Confirm the run logs `[RiftRun][Activity]` with the frozen Activity Level and selected Excursion Tier (zero for Standard).
-- [ ] Confirm `[RiftRun][EncounterPlan] Ready` reports the intended anchor count, finite effective budget, and at least 120 reserved progress for a target of 100.
+- [ ] Confirm `[RiftRun][EncounterPlan]` reports every anchor's authored progression index, finite effective budget, and at least 120 reserved progress for a target of 100.
 - [ ] Confirm a level-1 Standard Rift produces level-1 enemies and a level-10 Tier-1 Excursion produces level-10 enemies.
 - [ ] Confirm a level-50 player in Tier 1 produces level-20 enemies, and gaining a level mid-run does not change later enemy levels.
-- [ ] Confirm no Rift enemy spawns before a living player comes within the tier's activation distance of a region.
+- [ ] At roughly `6500 cm`, confirm the region presents its combat-ready attractor pack without constructing actors during gameplay.
+- [ ] At roughly `2500 cm`, or after damaging/engaging an attractor, confirm the remaining enemies reveal three at a time every `0.15 s`.
+- [ ] Confirm revealing enemies remain noninteractive for the supplied reveal duration even when the Blueprint has no montage.
 - [ ] Confirm an ordinary group never appears within **Rift Minimum Spawn Distance From Players** and unsafe anchors log a deferred/rejected activation.
 - [ ] Approach multiple anchors and verify proximity and timer activation cannot reserve the same anchor twice.
-- [ ] Reach 100%, verify unused regions stop activating and already-accepted queues/enemies remain alive and pursuing.
+- [ ] Move forward past an unopened lower index and verify its finite budget transfers forward without a rear pack appearing.
+- [ ] Backtrack and verify existing left-behind enemies wake; no new rear region stages.
+- [ ] Confirm at most 48 ordinary Rift enemies are awake while distant enemies pause AI/perception/movement and become dormant.
+- [ ] Reach 100%, verify unused regions stop activating and already-accepted queues/enemies remain alive.
 - [ ] Enter the boss arena, die once, respawn at the arena PlayerStart, and verify Legion retains its current health.
 - [ ] Kill Legion and verify extraction appears only after results and rewards finalize.
 - [ ] Collect private base pickups and claim the bonus cache once.
@@ -251,7 +350,10 @@ Run this in order after the Editor setup above is saved and all affected Bluepri
 
 ### Two clients
 
+- [ ] Verify all planned pooled actors are constructed on both clients before the loading overlay clears.
 - [ ] Verify either client can activate a nearby region and simultaneous proximity checks consume it once.
+- [ ] Verify the same four-attractor/reinforcement sequence is observed on both Steam clients.
+- [ ] Verify a returning client sees the same sleeping enemies wake rather than replacement actors spawning.
 - [ ] Verify only the leader can select/retry tiers.
 - [ ] Verify the common tier cap uses the lower participant unlock.
 - [ ] Verify both players can enter through endpoint A independently.

@@ -1,0 +1,486 @@
+{
+    "SchemaVersion": 2,
+    "Benchmark": {
+        "Level": 1,
+        "NormalWorldTier": 167,
+        "PlayerSource": "PlayerAttributes/M_AstralGuardianAttrs.json",
+        "PlayerDataTableAsset": "/Game/Player/M_AstralGuardianAttrs.M_AstralGuardianAttrs",
+        "DamageAttribute": "AeyerjiAttributeSet.AttackDamage",
+        "PlayerHealthAttribute": "AeyerjiAttributeSet.HPMax",
+        "PlayerArmorAttribute": "AeyerjiAttributeSet.Armor",
+        "DamageVariance": 0.125,
+        "DamageType": "Physical",
+        "Armor": {
+            "K": 1000.0,
+            "SoftCap": 1000.0,
+            "TailSlope": 0.00001,
+            "TailCap": 0.52
+        },
+        "LevelCheckpoints": [
+            1,
+            10,
+            25,
+            50
+        ]
+    },
+    "RuntimeDefaults": {
+        "EliteHealthMultiplier": 4.0,
+        "EliteDamageMultiplier": 1.35,
+        "EliteRangeMultiplier": 1.5
+    },
+    "MovementDefaults": {
+        "WalkSpeedAttribute": "AeyerjiAttributeSet.WalkSpeed",
+        "SprintSpeedAttribute": "AeyerjiAttributeSet.RunSpeed",
+        "EngagementWalkSpeed": 300.0,
+        "SprintDurationSeconds": 1.5,
+        "SprintRecoverySeconds": 5.0,
+        "SprintDistanceBuffer": 250.0,
+        "SpeedBlendRate": 900.0
+    },
+    "RuntimeAssets": {
+        "EnemyScalingSource": "EnemyScaling.json",
+        "EnemyScalingDataTableAsset": "/Game/Enemy/EnemyAttrsScalingTable.EnemyAttrsScalingTable",
+        "ArchetypeLibraryAsset": "/Game/Enemy/AeyerjiEnemyArchetypeLibrary.AeyerjiEnemyArchetypeLibrary",
+        "DifficultyTuningAsset": "/Game/Attributes/AeyerjiDifficultyTuning.AeyerjiDifficultyTuning",
+        "SpawnerClass": "/Game/Levels/Director/BP_AeyerjiSpawnerGroup.BP_AeyerjiSpawnerGroup_C",
+        "EnemyControllerClass": "/Game/Systems/EnemyAIController/EnemyAIAeyerji.EnemyAIAeyerji_C",
+        "EnemyStateTreeAsset": "/Game/AI/StateTree/STEnemyGeneral.STEnemyGeneral"
+    },
+    "Validation": {
+        "RequiredCombatAttributes": [
+            "AeyerjiAttributeSet.HP",
+            "AeyerjiAttributeSet.HPMax",
+            "AeyerjiAttributeSet.Armor",
+            "AeyerjiAttributeSet.AttackDamage",
+            "AeyerjiAttributeSet.AttackSpeed",
+            "AeyerjiAttributeSet.RunSpeed",
+            "AeyerjiAttributeSet.WalkSpeed",
+            "AeyerjiAttributeSet.XP"
+        ]
+    },
+    "RoleProfiles": {
+        "Fodder": {
+            "TargetNominalHits": {
+                "Min": 1,
+                "Max": 2
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.01,
+                "MaxPlayerHealthFractionPerHit": 0.06
+            }
+        },
+        "Standard": {
+            "TargetNominalHits": {
+                "Min": 2,
+                "Max": 2
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.03,
+                "MaxPlayerHealthFractionPerHit": 0.07
+            }
+        },
+        "Specialist": {
+            "TargetNominalHits": {
+                "Min": 2,
+                "Max": 3
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.03,
+                "MaxPlayerHealthFractionPerHit": 0.08
+            }
+        },
+        "Durable": {
+            "TargetNominalHits": {
+                "Min": 3,
+                "Max": 4
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.03,
+                "MaxPlayerHealthFractionPerHit": 0.07
+            }
+        },
+        "GlassElite": {
+            "TargetNominalHits": {
+                "Min": 8,
+                "Max": 8
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.10,
+                "MaxPlayerHealthFractionPerHit": 0.13
+            }
+        },
+        "BalancedElite": {
+            "TargetNominalHits": {
+                "Min": 10,
+                "Max": 12
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.08,
+                "MaxPlayerHealthFractionPerHit": 0.13
+            }
+        },
+        "TankElite": {
+            "TargetNominalHits": {
+                "Min": 13,
+                "Max": 15
+            },
+            "ThreatReviewBand": {
+                "MinPlayerHealthFractionPerHit": 0.04,
+                "MaxPlayerHealthFractionPerHit": 0.08
+            }
+        }
+    },
+    "Enemies": [
+        {
+            "Id": "M_Assassin",
+            "DisplayName": "Assassin",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 38,
+            "TargetRunSpeed": 960,
+            "Source": "EnemyAttributes/M_AssassinAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_AssassinAttrs.M_AssassinAttrs",
+            "GameplayTag": null,
+            "Intent": "Fast, fragile melee threat that trades durability for burst and mobility."
+        },
+        {
+            "Id": "M_Berserker",
+            "DisplayName": "Berserker",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 55,
+            "TargetRunSpeed": 720,
+            "Source": "EnemyAttributes/M_BerserkerAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_BerserkerAttrs.M_BerserkerAttrs",
+            "GameplayTag": null,
+            "Intent": "Aggressive melee damage dealer that must be answered quickly."
+        },
+        {
+            "Id": "M_Brawler",
+            "DisplayName": "Brawler",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Durable",
+            "EliteBaseId": null,
+            "TargetHP": 70,
+            "TargetRunSpeed": 600,
+            "Source": "EnemyAttributes/M_BrawlerAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_BrawlerAttrs.M_BrawlerAttrs",
+            "GameplayTag": null,
+            "Intent": "Durable crowd fighter with wide, steady melee pressure."
+        },
+        {
+            "Id": "M_Brute",
+            "DisplayName": "Brute",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Durable",
+            "EliteBaseId": null,
+            "TargetHP": 80,
+            "TargetRunSpeed": 480,
+            "Source": "EnemyAttributes/M_BruteAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_BruteAttrs.M_BruteAttrs",
+            "GameplayTag": null,
+            "Intent": "Slow, hard-hitting front-line enemy with above-average durability."
+        },
+        {
+            "Id": "M_Bulwark",
+            "DisplayName": "Bulwark",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Durable",
+            "EliteBaseId": null,
+            "TargetHP": 85,
+            "TargetRunSpeed": 350,
+            "Source": "EnemyAttributes/M_BulwarkAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_BulwarkAttrs.M_BulwarkAttrs",
+            "GameplayTag": "Enemy.Role.Mob.Melee.Bulwark",
+            "Intent": "Low-damage defensive trash enemy that takes three to four basic hits."
+        },
+        {
+            "Id": "M_Cleaver",
+            "DisplayName": "Cleaver",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 60,
+            "TargetRunSpeed": 500,
+            "Source": "EnemyAttributes/M_CleaverAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_CleaverAttrs.M_CleaverAttrs",
+            "GameplayTag": null,
+            "Intent": "Slow sweeping attacker that punishes clumped players."
+        },
+        {
+            "Id": "M_Duelist",
+            "DisplayName": "Duelist",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 50,
+            "TargetRunSpeed": 700,
+            "Source": "EnemyAttributes/M_DuelistAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_DuelistAttrs.M_DuelistAttrs",
+            "GameplayTag": null,
+            "Intent": "Agile single-target fighter with narrow, frequent attacks."
+        },
+        {
+            "Id": "M_Enforcer",
+            "DisplayName": "Enforcer",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Durable",
+            "EliteBaseId": null,
+            "TargetHP": 70,
+            "TargetRunSpeed": 580,
+            "Source": "EnemyAttributes/M_EnforcerAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_EnforcerAttrs.M_EnforcerAttrs",
+            "GameplayTag": null,
+            "Intent": "Reliable armored melee unit with steady mid-line pressure."
+        },
+        {
+            "Id": "M_Grunt",
+            "DisplayName": "Grunt",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Standard",
+            "EliteBaseId": null,
+            "TargetHP": 44,
+            "TargetRunSpeed": 480,
+            "Source": "EnemyAttributes/M_GruntAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_GruntAttrs.M_GruntAttrs",
+            "GameplayTag": "Enemy.Role.Mob.Melee.Grunt",
+            "Intent": "Baseline melee pack unit and the reference point for standard trash."
+        },
+        {
+            "Id": "M_GruntElite",
+            "DisplayName": "Grunt Elite",
+            "RuntimeStatus": "Live",
+            "Tier": "Elite",
+            "Family": "Melee",
+            "RoleProfile": "BalancedElite",
+            "EliteBaseId": "M_Grunt",
+            "TargetHP": 60,
+            "TargetRunSpeed": 480,
+            "Source": "EnemyAttributes/M_GruntEliteAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_GruntEliteAttrs.M_GruntEliteAttrs",
+            "GameplayTag": "Enemy.Role.Elite.Melee.Grunt",
+            "Intent": "Balanced elite whose base table is promoted once by the canonical elite package."
+        },
+        {
+            "Id": "M_Guardian",
+            "DisplayName": "Guardian",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Durable",
+            "EliteBaseId": null,
+            "TargetHP": 85,
+            "TargetRunSpeed": 520,
+            "Source": "EnemyAttributes/M_GuardianAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_GuardianAttrs.M_GuardianAttrs",
+            "GameplayTag": null,
+            "Intent": "Defensive escort that survives longer while protecting priority units."
+        },
+        {
+            "Id": "M_PackHunter",
+            "DisplayName": "Pack Hunter",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Fodder",
+            "EliteBaseId": null,
+            "TargetHP": 30,
+            "TargetRunSpeed": 900,
+            "Source": "EnemyAttributes/M_PackHunterAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_PackHunterAttrs.M_PackHunterAttrs",
+            "GameplayTag": null,
+            "Intent": "Low-health swarm unit whose threat comes from numbers and attack rate."
+        },
+        {
+            "Id": "M_Reaver",
+            "DisplayName": "Reaver",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 55,
+            "TargetRunSpeed": 680,
+            "Source": "EnemyAttributes/M_ReaverAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_ReaverAttrs.M_ReaverAttrs",
+            "GameplayTag": null,
+            "Intent": "Relentless chaser with sustained melee pressure."
+        },
+        {
+            "Id": "M_Skirmisher",
+            "DisplayName": "Skirmisher",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Standard",
+            "EliteBaseId": null,
+            "TargetHP": 40,
+            "TargetRunSpeed": 840,
+            "Source": "EnemyAttributes/M_SkirmisherAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_SkirmisherAttrs.M_SkirmisherAttrs",
+            "GameplayTag": null,
+            "Intent": "Fast standard enemy that pressures movement rather than absorbing attacks."
+        },
+        {
+            "Id": "M_Tank",
+            "DisplayName": "Tank",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Durable",
+            "EliteBaseId": null,
+            "TargetHP": 80,
+            "TargetRunSpeed": 400,
+            "Source": "EnemyAttributes/M_TankAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_TankAttrs.M_TankAttrs",
+            "GameplayTag": null,
+            "Intent": "Durable lane blocker that deals comparatively low damage."
+        },
+        {
+            "Id": "M_Vanguard",
+            "DisplayName": "Vanguard",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Melee",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 55,
+            "TargetRunSpeed": 720,
+            "Source": "EnemyAttributes/M_VanguardAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/M_VanguardAttrs.M_VanguardAttrs",
+            "GameplayTag": null,
+            "Intent": "Aggressive spearhead that closes distance and starts engagements."
+        },
+        {
+            "Id": "R_Archer",
+            "DisplayName": "Archer",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Ranged",
+            "RoleProfile": "Standard",
+            "EliteBaseId": null,
+            "TargetHP": 44,
+            "TargetRunSpeed": 500,
+            "Source": "EnemyAttributes/R_Archer.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/R_ArcherAttrs.R_ArcherAttrs",
+            "GameplayTag": "Enemy.Role.Mob.Ranged.Archer",
+            "Intent": "Baseline ranged pack unit and the reference point for ranged trash."
+        },
+        {
+            "Id": "R_ArcherElite",
+            "DisplayName": "Archer Elite",
+            "RuntimeStatus": "Live",
+            "Tier": "Elite",
+            "Family": "Ranged",
+            "RoleProfile": "GlassElite",
+            "EliteBaseId": "R_Archer",
+            "TargetHP": 44,
+            "TargetRunSpeed": 500,
+            "Source": "EnemyAttributes/R_ArcherElite.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/R_ArcherEliteAttrs.R_ArcherEliteAttrs",
+            "GameplayTag": "Enemy.Role.Elite.Ranged.Archer",
+            "Intent": "High-damage glass elite whose base table is promoted once by the elite package."
+        },
+        {
+            "Id": "R_Bombardier",
+            "DisplayName": "Bombardier",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Ranged",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 50,
+            "TargetRunSpeed": 520,
+            "Source": "EnemyAttributes/R_BombardierAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/R_BombardierAttrs.R_BombardierAttrs",
+            "GameplayTag": null,
+            "Intent": "Ranged artillery specialist that controls space and punishes clustering."
+        },
+        {
+            "Id": "R_Caster",
+            "DisplayName": "Caster",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Ranged",
+            "RoleProfile": "Standard",
+            "EliteBaseId": null,
+            "TargetHP": 40,
+            "TargetRunSpeed": 560,
+            "Source": "EnemyAttributes/R_CasterAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/R_CasterAttrs.R_CasterAttrs",
+            "GameplayTag": null,
+            "Intent": "Fragile ranged backliner whose abilities provide most of its threat."
+        },
+        {
+            "Id": "R_Ranged",
+            "DisplayName": "Ranged",
+            "RuntimeStatus": "AuthoredOnly",
+            "Tier": "Ordinary",
+            "Family": "Ranged",
+            "RoleProfile": "Standard",
+            "EliteBaseId": null,
+            "TargetHP": 44,
+            "TargetRunSpeed": 600,
+            "Source": "EnemyAttributes/R_RangedAttrs.JSON",
+            "DataTableAsset": null,
+            "GameplayTag": null,
+            "Intent": "Generic ranged template retained in source until a matching live DataTable is created."
+        },
+        {
+            "Id": "R_Sniper",
+            "DisplayName": "Sniper",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Ranged",
+            "RoleProfile": "Specialist",
+            "EliteBaseId": null,
+            "TargetHP": 35,
+            "TargetRunSpeed": 580,
+            "Source": "EnemyAttributes/R_SniperAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/R_SniperAttrs.R_SniperAttrs",
+            "GameplayTag": null,
+            "Intent": "Long-range specialist with high damage and intentionally low durability."
+        },
+        {
+            "Id": "R_Support",
+            "DisplayName": "Support",
+            "RuntimeStatus": "Live",
+            "Tier": "Ordinary",
+            "Family": "Ranged",
+            "RoleProfile": "Fodder",
+            "EliteBaseId": null,
+            "TargetHP": 30,
+            "TargetRunSpeed": 500,
+            "Source": "EnemyAttributes/R_SupportAttrs.JSON",
+            "DataTableAsset": "/Game/Enemy/Attributes/R_SupportAttrs.R_SupportAttrs",
+            "GameplayTag": "Enemy.Role.Mob.Ranged.Support",
+            "Intent": "Low-durability utility backliner that enables other enemies."
+        }
+    ],
+    "ExcludedAttributeSources": [
+        {
+            "Source": "EnemyAttributes/SurvivalDefenseObj_Tree.json",
+            "Reason": "Mission defense objective, not an enemy combat archetype."
+        }
+    ]
+}

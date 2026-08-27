@@ -5,6 +5,19 @@
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "UObject/SoftObjectPath.h"
 
+namespace
+{
+	constexpr int32 MaxItemDefinitionAffixRanges = 256;
+	constexpr int32 MaxItemDefinitionAffixes = 64;
+	constexpr int32 MaxItemSynergyEntries = 64;
+
+	bool IsFiniteItemDefinitionColor(const FLinearColor& Color)
+	{
+		return FMath::IsFinite(Color.R) && FMath::IsFinite(Color.G)
+			&& FMath::IsFinite(Color.B) && FMath::IsFinite(Color.A);
+	}
+}
+
 UItemDefinition::UItemDefinition()
 {
 	RarityAffixRanges = {
@@ -79,14 +92,14 @@ UMaterialInterface* UItemDefinition::ResolvePreviewMaterial(EItemRarity Rarity)
 {
 	// Hard-coded lookup: preview glow materials per rarity. New assets can be added to this list.
 	static const TMap<EItemRarity, TSoftObjectPtr<UMaterialInterface>> RarityToMaterial = {
-		{ EItemRarity::Common,            TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereCommon.MI_LootDropSphereCommon"))) },
-		{ EItemRarity::Uncommon,          TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereUncommon.MI_LootDropSphereUncommon"))) },
-		{ EItemRarity::Rare,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereRare.MI_LootDropSphereRare"))) },
-		{ EItemRarity::Epic,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereEpic.MI_LootDropSphereEpic"))) },
-		{ EItemRarity::Legendary,         TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereLegendary.MI_LootDropSphereLegendary"))) },
-		{ EItemRarity::Pure,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSpherePure.MI_LootDropSpherePure"))) },
-		{ EItemRarity::PerfectLegendary,  TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSpherePerfectLegendary.MI_LootDropSpherePerfectLegendary"))) },
-		{ EItemRarity::Celestial,         TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/MI_LootDropSphereCelestial.MI_LootDropSphereCelestial"))) }
+		{ EItemRarity::Common,            TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSphereCommon.Mi_LootDropSphereCommon"))) },
+		{ EItemRarity::Uncommon,          TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSphereUncommon.Mi_LootDropSphereUncommon"))) },
+		{ EItemRarity::Rare,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSphereRare.Mi_LootDropSphereRare"))) },
+		{ EItemRarity::Epic,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSphereEpic.Mi_LootDropSphereEpic"))) },
+		{ EItemRarity::Legendary,         TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSphereLegendary.Mi_LootDropSphereLegendary"))) },
+		{ EItemRarity::Pure,              TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSpherePure.Mi_LootDropSpherePure"))) },
+		{ EItemRarity::PerfectLegendary,  TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSpherePerfectLegendary.Mi_LootDropSpherePerfectLegendary"))) },
+		{ EItemRarity::Celestial,         TSoftObjectPtr<UMaterialInterface>(FSoftObjectPath(TEXT("/Game/Inventory/Items/MaterialGlowRarities/Mi_LootDropSphereCelestial.Mi_LootDropSphereCelestial"))) }
 	};
 
 	if (const TSoftObjectPtr<UMaterialInterface>* Found = RarityToMaterial.Find(Rarity))
@@ -99,30 +112,45 @@ UMaterialInterface* UItemDefinition::ResolvePreviewMaterial(EItemRarity Rarity)
 
 void UItemDefinition::GetAffixCountRange(EItemRarity Rarity, int32& OutMin, int32& OutMax) const
 {
-	const FItemRarityAffixRange* Found = RarityAffixRanges.FindByPredicate(
-		[Rarity](const FItemRarityAffixRange& Entry)
+	OutMin = 0;
+	OutMax = 0;
+	const UEnum* RarityEnum = StaticEnum<EItemRarity>();
+	if (!RarityEnum || !RarityEnum->IsValidEnumValue(static_cast<int64>(Rarity)))
+	{
+		Rarity = EItemRarity::Common;
+	}
+
+	const FItemRarityAffixRange* Found = nullptr;
+	const int32 RangeCount = FMath::Min(RarityAffixRanges.Num(), MaxItemDefinitionAffixRanges);
+	for (int32 RangeIndex = 0; RangeIndex < RangeCount; ++RangeIndex)
+	{
+		if (RarityAffixRanges[RangeIndex].Rarity == Rarity)
 		{
-			return Entry.Rarity == Rarity;
-		});
+			Found = &RarityAffixRanges[RangeIndex];
+			break;
+		}
+	}
 
 	if (!Found)
 	{
-		Found = RarityAffixRanges.FindByPredicate(
-			[](const FItemRarityAffixRange& Entry)
+		for (int32 RangeIndex = 0; RangeIndex < RangeCount; ++RangeIndex)
+		{
+			if (RarityAffixRanges[RangeIndex].Rarity == EItemRarity::Common)
 			{
-				return Entry.Rarity == EItemRarity::Common;
-			});
+				Found = &RarityAffixRanges[RangeIndex];
+				break;
+			}
+		}
 	}
 
 	if (Found)
 	{
-		OutMin = Found->MinAffixes;
-		OutMax = Found->MaxAffixes;
-	}
-	else
-	{
-		OutMin = 0;
-		OutMax = 0;
+		OutMin = FMath::Clamp(Found->MinAffixes, 0, MaxItemDefinitionAffixes);
+		OutMax = FMath::Clamp(Found->MaxAffixes, 0, MaxItemDefinitionAffixes);
+		if (OutMin > OutMax)
+		{
+			Swap(OutMin, OutMax);
+		}
 	}
 }
 
@@ -142,9 +170,11 @@ bool UItemDefinition::TryGetEquipSynergyColor(
 	const FItemEquipSynergyColor* BestEntry = nullptr;
 	int32 BestStack = 0;
 
-	for (const FItemEquipSynergyColor& Entry : EquipSynergyColors)
+	const int32 EntryCount = FMath::Min(EquipSynergyColors.Num(), MaxItemSynergyEntries);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
-		if (Entry.StackCount <= 0)
+		const FItemEquipSynergyColor& Entry = EquipSynergyColors[EntryIndex];
+		if (Entry.StackCount <= 0 || !IsFiniteItemDefinitionColor(Entry.Color))
 		{
 			continue;
 		}

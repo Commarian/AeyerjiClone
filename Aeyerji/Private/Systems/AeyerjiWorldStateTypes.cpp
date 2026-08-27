@@ -36,7 +36,7 @@ FAeyerjiWorldStateValue FAeyerjiWorldStateValue::FromFloat(const float ValueIn)
 {
 	FAeyerjiWorldStateValue Value;
 	Value.Type = EAeyerjiWorldStateValueType::Float;
-	Value.FloatValue = ValueIn;
+	Value.FloatValue = FMath::IsFinite(ValueIn) ? ValueIn : 0.f;
 	return Value;
 }
 
@@ -52,7 +52,7 @@ FAeyerjiWorldStateValue FAeyerjiWorldStateValue::FromString(const FString& Value
 {
 	FAeyerjiWorldStateValue Value;
 	Value.Type = EAeyerjiWorldStateValueType::String;
-	Value.StringValue = ValueIn;
+	Value.StringValue = ValueIn.Left(4096);
 	return Value;
 }
 
@@ -76,10 +76,10 @@ FAeyerjiWorldStateValue FAeyerjiWorldStateValue::FromObject(UObject* ValueIn)
 {
 	FAeyerjiWorldStateValue Value;
 	Value.Type = EAeyerjiWorldStateValueType::Object;
-	Value.ObjectValue = ValueIn;
-	if (ValueIn)
+	Value.ObjectValue = IsValid(ValueIn) ? ValueIn : nullptr;
+	if (Value.ObjectValue.IsValid())
 	{
-		Value.SoftObjectPathValue = FSoftObjectPath(ValueIn);
+		Value.SoftObjectPathValue = FSoftObjectPath(Value.ObjectValue.Get());
 	}
 	return Value;
 }
@@ -134,8 +134,8 @@ bool FAeyerjiWorldStateValue::TryGetNumericValue(double& OutValue) const
 		OutValue = static_cast<double>(IntValue);
 		return true;
 	case EAeyerjiWorldStateValueType::Float:
-		OutValue = static_cast<double>(FloatValue);
-		return true;
+		OutValue = FMath::IsFinite(FloatValue) ? static_cast<double>(FloatValue) : 0.0;
+		return FMath::IsFinite(FloatValue);
 	default:
 		OutValue = 0.0;
 		return false;
@@ -157,7 +157,7 @@ FString FAeyerjiWorldStateValue::ToString() const
 	case EAeyerjiWorldStateValueType::Name:
 		return NameValue.ToString();
 	case EAeyerjiWorldStateValueType::String:
-		return StringValue;
+		return StringValue.Left(256);
 	case EAeyerjiWorldStateValueType::GameplayTag:
 		return TagValue.ToString();
 	case EAeyerjiWorldStateValueType::SoftObjectPath:

@@ -58,7 +58,7 @@
 		"AdditionalEffects": [],
 		"Visuals":
 		{
-			"Montage": "None",
+			"Montage": "/Game/ParagonSevarog/Characters/Heroes/Sevarog/Animations/Cast_Montage.Cast_Montage",
 			"MontagePlayRate": 1,
 			"ImpactDelaySeconds": -1,
 			"NiagaraSystem": "None",
@@ -142,7 +142,7 @@
 		"AdditionalEffects": [],
 		"Visuals":
 		{
-			"Montage": "None",
+			"Montage": "/Game/ParagonSevarog/Characters/Heroes/Sevarog/Animations/Cast_Montage.Cast_Montage",
 			"MontagePlayRate": 1,
 			"ImpactDelaySeconds": -1,
 			"NiagaraSystem": "None",
@@ -226,9 +226,9 @@
 		"AdditionalEffects": [],
 		"Visuals":
 		{
-			"Montage": "None",
+			"Montage": "/Game/ParagonSevarog/Characters/Heroes/Sevarog/Animations/Cast_Montage.Cast_Montage",
 			"MontagePlayRate": 1,
-			"ImpactDelaySeconds": 0,
+			"ImpactDelaySeconds": -1,
 			"NiagaraSystem": "None",
 			"bAttachNiagaraToOwnerMesh": false,
 			"NiagaraAttachSocket": "None",
@@ -335,7 +335,7 @@
 		],
 		"Visuals":
 		{
-			"Montage": "None",
+			"Montage": "/Game/ParagonSevarog/Characters/Heroes/Sevarog/Animations/Cast_Montage.Cast_Montage",
 			"MontagePlayRate": 1,
 			"ImpactDelaySeconds": -1,
 			"NiagaraSystem": "None",

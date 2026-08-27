@@ -237,7 +237,8 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Inventory")
 	UAbilitySystemComponent* GetASC() const;
 
-	UFUNCTION(Server, Reliable, BlueprintCallable, Category = "Inventory")
+	/** Authority-only grant hook. Client inventory requests must identify items already owned by this component. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category = "Inventory")
 	void Server_AddItem(UAeyerjiItemInstance* Item);
 
 	UFUNCTION(BlueprintCallable, Category = "Inventory")

@@ -12,6 +12,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Enemy/EnemyParentNative.h"
 #include "EngineUtils.h"
 #include "GameFramework/GameModeBase.h"
+#include "GameFramework/PlayerController.h"
 #include "Logging/AeyerjiLog.h"
 #include "TimerManager.h"
 
@@ -47,6 +48,7 @@ UGA_Death::UGA_Death()
 {
 	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerInitiated;
+	NetSecurityPolicy = EGameplayAbilityNetSecurityPolicy::ServerOnlyExecution;
 
 	// Identify this ability so death-state cancellation can exclude finalization.
 	FGameplayTagContainer AssetTags = GetAssetTags();
@@ -79,11 +81,7 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 	}
 
 	AJ_LOG(this, TEXT("Dying now"));
-	if (!CommitAbility(Handle, ActorInfo, ActivationInfo))
-	{
-		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
-		return;
-	}
+	SetCanBeCanceled(false);
 
 	ACharacter* Char = Cast<ACharacter>(ActorInfo->AvatarActor.Get());
 	if (!Char)
@@ -101,7 +99,8 @@ void UGA_Death::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 		return;
 	}
 
-	const float FinalizeDelay = FMath::Max(ResolvePlayerDeathFinalizeDelay(Char, RespawnDelay), 0.f);
+	const float ResolvedDelay = ResolvePlayerDeathFinalizeDelay(Char, RespawnDelay);
+	const float FinalizeDelay = FMath::IsFinite(ResolvedDelay) ? FMath::Max(ResolvedDelay, 0.f) : 0.f;
 	if (FinalizeDelay <= 0.f)
 	{
 		Server_FinishDeath();
@@ -129,7 +128,6 @@ void UGA_Death::EndAbility(const FGameplayAbilitySpecHandle Handle,
 void UGA_Death::Server_FinishDeath()
 {
 	// Prevent double-finalization if multiple timers/events fire.
-	static const FName DeathFinalizeLogTag(TEXT("GA_Death"));
 	if (bDeathFinalized)
 	{
 		AJ_LOG(this, TEXT("GA_Death: Server_FinishDeath already finalized; skipping."));
@@ -152,11 +150,11 @@ void UGA_Death::Server_FinishDeath()
 		World->GetTimerManager().ClearTimer(RespawnHandle);
 	}
 
-	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
-
 	// Cancel any remaining abilities to avoid shutdown crashes during ASC destruction.
 	const FGameplayAbilityActorInfo* ActorInfo = GetCurrentActorInfo();
-	if (UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr)
+	UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+	EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, false);
+	if (ASC)
 	{
 		ASC->CancelAllAbilities();
 	}
@@ -223,6 +221,18 @@ void UGA_Death::Server_FinishDeath()
 
 				AJ_LOG(this, TEXT("Server_FinishDeath: controller %s now possesses %s"),
 					*GetNameSafe(PC), *GetNameSafe(NewPawn));
+
+				// Automatic camera-target management is intentionally disabled by the custom
+				// controller. Confirm the replacement view target on the owning client as a
+				// server-side respawn handoff; local controller callbacks provide the same
+				// result for listen servers and standalone play.
+				if (NewPawn)
+				{
+					if (APlayerController* PlayerController = Cast<APlayerController>(PC))
+					{
+						PlayerController->ClientSetViewTarget(NewPawn);
+					}
+				}
 			}
 		}
 	}

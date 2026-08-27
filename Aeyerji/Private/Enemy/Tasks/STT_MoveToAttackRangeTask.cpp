@@ -11,13 +11,17 @@ PRAGMA_DISABLE_DEPRECATION_WARNINGS
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/MovementComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Navigation/CrowdFollowingComponent.h"
+#include "Navigation/CrowdManager.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
 #include "AeyerjiCharacter.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Components/BoxComponent.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Navigation/AeyerjiNavSafetyLibrary.h"
 #include "StateTreeExecutionContext.h"
 #include "Enemy/EnemyAIController.h"
@@ -156,6 +160,25 @@ static void MoveToAttackRangeTask_LogMovementSnapshot(const TCHAR* Phase, const 
 
 namespace
 {
+	bool MoveToAttackRangeTask_RestoreWalkSpeedIfNeeded(APawn* Pawn, const TCHAR* Phase)
+	{
+		ACharacter* Character = Cast<ACharacter>(Pawn);
+		UCharacterMovementComponent* Movement = Character ? Character->GetCharacterMovement() : nullptr;
+		if (!Movement || Movement->MaxWalkSpeed > 1.f)
+		{
+			return true;
+		}
+
+		const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn, /*LookForComponent=*/true);
+		const float AttributeSpeed = ASC ? ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetWalkSpeedAttribute()) : 0.f;
+		Movement->MaxWalkSpeed = FMath::Max(50.f, AttributeSpeed);
+		MOVE_LOG(Warning, TEXT("%s repaired leaked zero MaxWalkSpeed. Pawn=%s RestoredSpeed=%.1f"),
+			Phase,
+			*GetNameSafe(Pawn),
+			Movement->MaxWalkSpeed);
+		return true;
+	}
+
 	bool MoveToAttackRangeTask_StopIfCrowdControlled(AAIController* AI, APawn* Pawn, const TCHAR* Phase)
 	{
 		const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(Pawn);
@@ -435,9 +458,11 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 	{
 		return EStateTreeRunStatus::Failed;
 	}
+	MoveToAttackRangeTask_RestoreWalkSpeedIfNeeded(Pawn, TEXT("EnterState"));
 
+	AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI);
 	AActor* TargetActor = nullptr;
-	if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
+	if (EnemyAI)
 	{
 		EnemyAI->RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
 		TargetActor = EnemyAI->GetTargetActor();
@@ -493,6 +518,15 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 
 	// Already in range? succeed and let the parent transition to Attack
 	const float EnterDistance = MoveToAttackRangeTask_GetDistanceToTarget(Pawn, TargetActor);
+	if (EnemyAI)
+	{
+		// The controller owns cadence timestamps so this state can end without resetting recovery.
+		EnemyAI->UpdateChaseSprintCadence(
+			EnterDistance,
+			AttackRange,
+			/*DeltaTime=*/0.f,
+			/*bForceImmediateSpeed=*/true);
+	}
 	if (EnterDistance <= AcceptMoveRadius)
 	{
 		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [EnterState] Already within radius. Distance=%.1f AcceptRadius=%.1f -> Succeeded"),
@@ -545,10 +579,12 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 	{
 		return EStateTreeRunStatus::Failed;
 	}
+	MoveToAttackRangeTask_RestoreWalkSpeedIfNeeded(Pawn, TEXT("Tick"));
 
+	AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI);
 	AActor* TargetActor = nullptr;
 	bool bRetargeted = false;
-	if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
+	if (EnemyAI)
 	{
 		const AActor* PreviousTargetActor = EnemyAI->GetTargetActor();
 		bRetargeted = EnemyAI->RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
@@ -573,6 +609,14 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 
 	const float Distance = MoveToAttackRangeTask_GetDistanceToTarget(Pawn, TargetActor);
 	const float AcceptMoveRadius = FMath::Max(0.f, AttackRange - AttackRangeReduction);
+	if (EnemyAI)
+	{
+		EnemyAI->UpdateChaseSprintCadence(
+			Distance,
+			AttackRange,
+			DeltaTime,
+			/*bForceImmediateSpeed=*/Distance <= AttackRange);
+	}
 
 	if (bRetargeted && Distance > AttackRange)
 	{
@@ -612,7 +656,52 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 			const float Speed = Pawn->GetVelocity().Size();
 			if (Status == EPathFollowingStatus::Moving && Speed < 1.f)
 			{
-				MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] PathFollowing says Moving, but Pawn speed is ~0. Check movement component, collisions, physics simulation, or max speed."));
+				const ACharacter* CharacterPawn = Cast<ACharacter>(Pawn);
+				const UCharacterMovementComponent* CharacterMovement =
+					CharacterPawn ? CharacterPawn->GetCharacterMovement() : nullptr;
+				const UCapsuleComponent* Capsule =
+					CharacterPawn ? CharacterPawn->GetCapsuleComponent() : nullptr;
+				const UAbilitySystemComponent* ASC =
+					UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn, /*LookForComponent=*/true);
+				const FGameplayTag RootedTag =
+					FGameplayTag::RequestGameplayTag(TEXT("Player.States.Rooted"), /*ErrorIfNotFound=*/false);
+				const int32 RootedTagCount =
+					ASC && RootedTag.IsValid() ? ASC->GetTagCount(RootedTag) : 0;
+				const UCrowdFollowingComponent* CrowdFollowing =
+					Cast<UCrowdFollowingComponent>(PFC);
+				const UCrowdManager* CrowdManager =
+					CrowdFollowing ? UCrowdManager::GetCurrent(Pawn->GetWorld()) : nullptr;
+				const bool bValidCrowdAgent =
+					CrowdFollowing && CrowdManager && CrowdManager->IsAgentValid(CrowdFollowing);
+				const FNavPathSharedPtr CurrentPath = PFC ? PFC->GetPath() : nullptr;
+
+				MOVE_LOG(Warning,
+					TEXT("MoveToAttackRangeTask: [Tick] PathFollowing=Moving but speed is ~0. AI=%s Pawn=%s PathFollowingClass=%s RequestId=%u PathElement=%d PathValid=%d PathPoints=%d CrowdState=%d CrowdAgentValid=%d RVO=%d MoveActive=%d MoveTick=%d MoveRegistered=%d Mode=%d Updated=%s Capsule=%s CapsuleCollision=%d RootPhysics=%d MeshPhysics=%d MaxWalkSpeed=%.1f Velocity=%s Acceleration=%s LastRequestedVelocity=%s RootedTagCount=%d Distance=%.1f"),
+					*GetNameSafe(AI),
+					*GetNameSafe(Pawn),
+					*GetNameSafe(PFC),
+					PFC ? PFC->GetCurrentRequestId().GetID() : 0u,
+					PFC ? PFC->GetCurrentPathElement() : INDEX_NONE,
+					CurrentPath.IsValid() && CurrentPath->IsValid() ? 1 : 0,
+					CurrentPath.IsValid() ? CurrentPath->GetPathPoints().Num() : -1,
+					CrowdFollowing ? static_cast<int32>(CrowdFollowing->GetCrowdSimulationState()) : -1,
+					bValidCrowdAgent ? 1 : 0,
+					CharacterMovement && CharacterMovement->bUseRVOAvoidance ? 1 : 0,
+					CharacterMovement && CharacterMovement->IsActive() ? 1 : 0,
+					CharacterMovement && CharacterMovement->IsComponentTickEnabled() ? 1 : 0,
+					CharacterMovement && CharacterMovement->IsRegistered() ? 1 : 0,
+					CharacterMovement ? static_cast<int32>(CharacterMovement->MovementMode) : -1,
+					CharacterMovement ? *GetNameSafe(CharacterMovement->UpdatedComponent) : TEXT("None"),
+					*GetNameSafe(Capsule),
+					Capsule ? static_cast<int32>(Capsule->GetCollisionEnabled()) : -1,
+					Capsule && Capsule->IsSimulatingPhysics() ? 1 : 0,
+					CharacterPawn && CharacterPawn->GetMesh() && CharacterPawn->GetMesh()->IsSimulatingPhysics() ? 1 : 0,
+					CharacterMovement ? CharacterMovement->MaxWalkSpeed : -1.f,
+					CharacterMovement ? *CharacterMovement->Velocity.ToCompactString() : TEXT("None"),
+					CharacterMovement ? *CharacterMovement->GetCurrentAcceleration().ToCompactString() : TEXT("None"),
+					CharacterMovement ? *CharacterMovement->GetLastUpdateRequestedVelocity().ToCompactString() : TEXT("None"),
+					RootedTagCount,
+					Distance);
 			}
 
 			const UMovementComponent* MovementComponent = Pawn->GetMovementComponent();
@@ -698,6 +787,11 @@ void USTT_MoveToAttackRangeTask::ExitState(FStateTreeExecutionContext& Context, 
 	// Ensure movement is stopped when leaving this state (in case of abort or transition)
 	if (AAIController* AI = Cast<AAIController>(Context.GetOwner()))
 	{
+		if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
+		{
+			// Attack/Recover must never inherit a live RunSpeed phase from this chase state.
+			EnemyAI->EndChaseSprintCadence();
+		}
 		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [ExitState] StopMovement. AI=%s Pawn=%s"), *GetNameSafe(AI), *GetNameSafe(AI->GetPawn()));
 		AI->StopMovement();
 	}

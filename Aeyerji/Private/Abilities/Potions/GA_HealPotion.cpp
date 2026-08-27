@@ -46,12 +46,15 @@ void UGA_HealPotion::ActivateAbility(
 	}
 
 	UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get();
-	const float MaxHP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+	const float RawMaxHP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+	const float MaxHP = FMath::IsFinite(RawMaxHP) ? FMath::Max(0.f, RawMaxHP) : 0.f;
 	const float RawHealFraction = PotionData
-		? FMath::Max(0.f, PotionData->Tunables.HealPercentageOfMaxHP)
-		: FMath::Max(0.f, HealPercentageOfMaxHP);
-	const float HealFraction = RawHealFraction > 1.f ? RawHealFraction * 0.01f : RawHealFraction;
-	const float HealAmount = FMath::Max(0.f, MaxHP * HealFraction);
+		? PotionData->Tunables.HealPercentageOfMaxHP
+		: HealPercentageOfMaxHP;
+	const float SafeHealFraction = FMath::IsFinite(RawHealFraction) ? FMath::Max(0.f, RawHealFraction) : 0.f;
+	const float HealFraction = SafeHealFraction > 1.f ? SafeHealFraction * 0.01f : SafeHealFraction;
+	const float RawHealAmount = MaxHP * HealFraction;
+	const float HealAmount = FMath::IsFinite(RawHealAmount) ? FMath::Max(0.f, RawHealAmount) : 0.f;
 
 	if (HealAmount > KINDA_SMALL_NUMBER)
 	{
@@ -86,9 +89,12 @@ void UGA_HealPotion::ApplyCooldown(
 		return;
 	}
 
-	const float CooldownSeconds = PotionData
-		? FMath::Max(0.f, PotionData->EvaluateCost(ActorInfo->AbilitySystemComponent.Get()).Cooldown)
-		: FMath::Max(0.f, FallbackCooldownSeconds);
+	const float RawCooldownSeconds = PotionData
+		? PotionData->EvaluateCost(ActorInfo->AbilitySystemComponent.Get()).Cooldown
+		: FallbackCooldownSeconds;
+	const float CooldownSeconds = FMath::IsFinite(RawCooldownSeconds)
+		? FMath::Max(0.f, RawCooldownSeconds)
+		: 0.f;
 	if (CooldownSeconds <= KINDA_SMALL_NUMBER)
 	{
 		return;

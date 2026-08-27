@@ -43,6 +43,13 @@ public:
 	/** Calculates post-overkill life steal without exceeding the source's missing health. */
 	static float ResolveLifeSteal(float ActualDamage, float LifeStealFraction, float MissingHealth, bool bCanLifeSteal);
 
+	/** Evaluates the configured armor curve while preserving continuity at the soft cap. */
+	static float ResolveArmorDamageReduction(float Armor,
+	                                         float ArmorK,
+	                                         float ArmorSoftCap,
+	                                         float ArmorTailSlope,
+	                                         float ArmorTailCap);
+
 	// Resolves a server-authoritative physical hit and writes combat meta attributes.
 	virtual void Execute_Implementation(const FGameplayEffectCustomExecutionParameters& ExecutionParams,
 	                                    FGameplayEffectCustomExecutionOutput& OutExecutionOutput) const override;

@@ -5,7 +5,6 @@
 #include "Tasks/AITask.h"
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "STT_MoveToAttackRangeTask.generated.h"
-#pragma once
 
 /**
  * StateTree Task that moves the AI pawn to within attack range of its current target.

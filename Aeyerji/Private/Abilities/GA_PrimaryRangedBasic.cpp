@@ -265,9 +265,9 @@ void UGA_PrimaryRangedBasic::ScheduleProjectileSpawn(float ProjectileSpeed)
 		return;
 	}
 
-	if (SpawnDelaySeconds <= 0.f)
+	const float SafeSpawnDelay = FMath::IsFinite(SpawnDelaySeconds) ? FMath::Max(0.f, SpawnDelaySeconds) : 0.f;
+	if (SafeSpawnDelay <= KINDA_SMALL_NUMBER)
 	{
-		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("ScheduleProjectileSpawn: SpawnProjectileNow(ProjectileSpeed);"));
 		SpawnProjectileNow(ProjectileSpeed);
 		return;
 	}
@@ -276,24 +276,39 @@ void UGA_PrimaryRangedBasic::ScheduleProjectileSpawn(float ProjectileSpeed)
 	{
 		// Delay is intentionally server-driven so the projectile leaves in sync with the montage.
 		FTimerDelegate Delegate = FTimerDelegate::CreateUObject(this, &UGA_PrimaryRangedBasic::SpawnProjectileNow, ProjectileSpeed);
-		World->GetTimerManager().SetTimer(SpawnDelayHandle, Delegate, SpawnDelaySeconds, /*bLoop=*/false);
+		World->GetTimerManager().SetTimer(SpawnDelayHandle, Delegate, SafeSpawnDelay, /*bLoop=*/false);
+	}
+	else
+	{
+		FinishShotWithoutProjectile(TEXT("missing world while scheduling projectile"));
 	}
 }
 
 void UGA_PrimaryRangedBasic::SpawnProjectileNow(float ProjectileSpeed)
 {
-	if (!ShouldProcessServerLogic() || !ProjectileClass)
+	if (!ShouldProcessServerLogic())
 	{
+		return;
+	}
+	if (!ProjectileClass)
+	{
+		FinishShotWithoutProjectile(TEXT("ProjectileClass is not configured"));
 		return;
 	}
 
 	const FGameplayAbilityActorInfo* ActorInfo = GetCurrentActorInfo();
 	if (!ActorInfo || !ActorInfo->AvatarActor.IsValid())
 	{
+		FinishShotWithoutProjectile(TEXT("ability avatar is no longer valid"));
 		return;
 	}
 
 	const FTransform SpawnTransform = ComputeMuzzleTransform(ActorInfo);
+	if (SpawnTransform.ContainsNaN())
+	{
+		FinishShotWithoutProjectile(TEXT("computed muzzle transform is non-finite"));
+		return;
+	}
 	const FVector SpawnLocation = SpawnTransform.GetLocation();
 	const FRotator SpawnRotation = SpawnTransform.Rotator();
 	UE_LOG(LogPrimaryRangedGA, Verbose, TEXT("SpawnProjectileNow: Location=%s Rotation(Pitch=%.2f Yaw=%.2f Roll=%.2f) Speed=%.2f"),
@@ -309,6 +324,7 @@ void UGA_PrimaryRangedBasic::SpawnProjectileNow(float ProjectileSpeed)
 	UWorld* World = GetWorld();
 	if (!World)
 	{
+		FinishShotWithoutProjectile(TEXT("missing world during projectile spawn"));
 		return;
 	}
 
@@ -330,10 +346,15 @@ void UGA_PrimaryRangedBasic::SpawnProjectileNow(float ProjectileSpeed)
 	{
 		UE_LOG(LogPrimaryRangedGA, Warning, TEXT("SpawnProjectileNow: Failed to spawn projectile of class %s."),
 			*GetNameSafe(ProjectileClass));
+		FinishShotWithoutProjectile(TEXT("projectile actor spawn failed"));
 		return;
 	}
 
-	Projectile->InitializeProjectile(this, TargetActor, ProjectileSpeed, StationaryTargetSpeedTolerance);
+	const float SafeProjectileSpeed = FMath::IsFinite(ProjectileSpeed) ? FMath::Max(0.f, ProjectileSpeed) : 0.f;
+	const float SafeStationaryTolerance = FMath::IsFinite(StationaryTargetSpeedTolerance)
+		? FMath::Max(0.f, StationaryTargetSpeedTolerance)
+		: 0.f;
+	Projectile->InitializeProjectile(this, TargetActor, SafeProjectileSpeed, SafeStationaryTolerance);
 	Projectile->OnProjectileImpact.AddUObject(this, &UGA_PrimaryRangedBasic::HandleProjectileImpact);
 	// Both impact and expiry need to notify the ability so state can be cleaned up on the server.
 	Projectile->OnProjectileExpired.AddUObject(this, &UGA_PrimaryRangedBasic::HandleProjectileExpired);
@@ -345,12 +366,7 @@ void UGA_PrimaryRangedBasic::SpawnProjectileNow(float ProjectileSpeed)
 
 void UGA_PrimaryRangedBasic::HandleProjectileImpact(AActor* HitActor, const FHitResult& Hit)
 {
-	if (!HitActor)
-	{
-		return;
-	}
-
-	if (!HitActor || HitActor == GetAvatarActorFromActorInfo())
+	if (!IsValidTargetActor(GetCurrentActorInfo(), HitActor, /*bRequireInRange=*/false))
 	{
 		return;
 	}
@@ -419,7 +435,7 @@ void UGA_PrimaryRangedBasic::HandleProjectileExpired()
 
 void UGA_PrimaryRangedBasic::ApplyDamageToTarget(const FGameplayAbilityTargetDataHandle& TargetData)
 {
-	if (TargetData.Num() == 0)
+	if (!ShouldProcessServerLogic() || TargetData.Num() == 0)
 	{
 		return;
 	}
@@ -491,7 +507,11 @@ void UGA_PrimaryRangedBasic::ApplyAilmentsToTargetData(const FGameplayAbilityTar
 
 		float AilmentAmount = 0.f;
 		float AilmentDuration = 0.f;
-		if (!ResolveAilmentMagnitudes(AilmentTag, AilmentAmount, AilmentDuration))
+		if (!ResolveAilmentMagnitudes(AilmentTag, AilmentAmount, AilmentDuration)
+			|| !FMath::IsFinite(AilmentAmount)
+			|| !FMath::IsFinite(AilmentDuration)
+			|| AilmentAmount <= KINDA_SMALL_NUMBER
+			|| AilmentDuration <= KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
@@ -604,7 +624,10 @@ bool UGA_PrimaryRangedBasic::BuildDamageSpec(FGameplayEffectSpecHandle& OutSpecH
 			AttackDamage = AttrSet->GetAttackDamage();
 		}
 
-		const float FinalDamage = AttackDamage * DamageScalar;
+		const float RawFinalDamage = FMath::IsFinite(AttackDamage) && FMath::IsFinite(DamageScalar)
+			? AttackDamage * DamageScalar
+			: 0.f;
+		const float FinalDamage = FMath::IsFinite(RawFinalDamage) ? FMath::Max(0.f, RawFinalDamage) : 0.f;
 		OutSpecHandle.Data.Get()->SetSetByCallerMagnitude(DamageSetByCallerTag, FinalDamage);
 		UE_LOG(LogPrimaryRangedGA, Verbose, TEXT("BuildDamageSpec: AttackDamage=%.2f DamageScalar=%.2f FinalDamage=%.2f"),
 			AttackDamage,
@@ -643,8 +666,10 @@ FTransform UGA_PrimaryRangedBasic::ComputeMuzzleTransform(const FGameplayAbility
 
 	const FVector BaseLocation = Avatar->GetActorLocation();
 	const FRotator Facing = Avatar->GetActorRotation();
-	FVector SpawnLocation = BaseLocation + Facing.Vector() * ForwardSpawnOffset;
-	SpawnLocation.Z += VerticalSpawnOffset;
+	const float SafeForwardOffset = FMath::IsFinite(ForwardSpawnOffset) ? ForwardSpawnOffset : 0.f;
+	const float SafeVerticalOffset = FMath::IsFinite(VerticalSpawnOffset) ? VerticalSpawnOffset : 0.f;
+	FVector SpawnLocation = BaseLocation + Facing.Vector() * SafeForwardOffset;
+	SpawnLocation.Z += SafeVerticalOffset;
 	return FTransform(Facing, SpawnLocation);
 }
 
@@ -657,21 +682,21 @@ float UGA_PrimaryRangedBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo
 
     if (const UAeyerjiAttributeSet* Attr = ActorInfo->AbilitySystemComponent->GetSet<UAeyerjiAttributeSet>())
     {
-        const float AttributeAttackSpeed = Attr->GetAttackSpeed();
-        if (AttributeAttackSpeed > KINDA_SMALL_NUMBER)
+		const float AttributeAttackSpeed = Attr->GetAttackSpeed();
+		if (FMath::IsFinite(AttributeAttackSpeed) && AttributeAttackSpeed > KINDA_SMALL_NUMBER)
         {
             // AttackSpeed is stored as a "rating" where 100 == 1 attack/sec. Convert to real APS.
             return FMath::Max(AttributeAttackSpeed / 100.f, KMinAttackSpeed);
         }
 
         const float AttributeCooldownSeconds = Attr->GetAttackCooldown();
-        if (AttributeCooldownSeconds > KINDA_SMALL_NUMBER)
+		if (FMath::IsFinite(AttributeCooldownSeconds) && AttributeCooldownSeconds > KINDA_SMALL_NUMBER)
         {
             return FMath::Max(1.f / AttributeCooldownSeconds, KMinAttackSpeed);
         }
     }
 
-	return BaselineAttackSpeed;
+	return FMath::IsFinite(BaselineAttackSpeed) ? FMath::Max(BaselineAttackSpeed, KMinAttackSpeed) : 1.f;
 }
 
 float UGA_PrimaryRangedBasic::ResolveProjectileSpeed(const FGameplayAbilityActorInfo* ActorInfo) const
@@ -681,25 +706,65 @@ float UGA_PrimaryRangedBasic::ResolveProjectileSpeed(const FGameplayAbilityActor
 		if (const UAeyerjiAttributeSet* Attr = ActorInfo->AbilitySystemComponent->GetSet<UAeyerjiAttributeSet>())
 		{
 			const float AttributeSpeed = Attr->GetProjectileSpeedRanged();
-			if (AttributeSpeed > KINDA_SMALL_NUMBER)
+			if (FMath::IsFinite(AttributeSpeed) && AttributeSpeed > KINDA_SMALL_NUMBER)
 			{
 				return AttributeSpeed;
 			}
 		}
 	}
 
-	return ProjectileSpeedFallback;
+	return FMath::IsFinite(ProjectileSpeedFallback) ? FMath::Max(0.f, ProjectileSpeedFallback) : 0.f;
+}
+
+bool UGA_PrimaryRangedBasic::IsValidTargetActor(
+	const FGameplayAbilityActorInfo* ActorInfo,
+	AActor* Candidate,
+	const bool bRequireInRange) const
+{
+	AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
+	if (!IsValid(AvatarActor)
+		|| !IsValid(Candidate)
+		|| Candidate == AvatarActor
+		|| Candidate->GetWorld() != AvatarActor->GetWorld()
+		|| AbilityTeamUtils::AreOnSameTeam(AvatarActor, Candidate))
+	{
+		return false;
+	}
+
+	if (const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Candidate, true))
+	{
+		if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+		{
+			return false;
+		}
+	}
+	if (Candidate->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName()))
+	{
+		return false;
+	}
+
+	if (!bRequireInRange)
+	{
+		return true;
+	}
+
+	const UAbilitySystemComponent* SourceASC = ActorInfo->AbilitySystemComponent.Get();
+	const UAeyerjiAttributeSet* SourceAttributes = SourceASC ? SourceASC->GetSet<UAeyerjiAttributeSet>() : nullptr;
+	const float AttackRange = SourceAttributes ? SourceAttributes->GetAttackRange() : 0.f;
+	return !FMath::IsFinite(AttackRange)
+		? false
+		: AttackRange <= KINDA_SMALL_NUMBER
+			|| FVector::DistSquared2D(AvatarActor->GetActorLocation(), Candidate->GetActorLocation())
+				<= FMath::Square(AttackRange + KINDA_SMALL_NUMBER);
 }
 
 AActor* UGA_PrimaryRangedBasic::ResolveTargetActor(const FGameplayAbilityActorInfo* ActorInfo,
                                                    const FGameplayEventData* TriggerEventData) const
 {
-	const AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
-
 	if (TriggerEventData && TriggerEventData->Target.Get())
 	{
 		AActor* Candidate = const_cast<AActor*>(TriggerEventData->Target.Get());
-		if (!AbilityTeamUtils::AreOnSameTeam(AvatarActor, Candidate))
+		if (IsValidTargetActor(ActorInfo, Candidate))
 		{
 			return Candidate;
 		}
@@ -715,7 +780,7 @@ AActor* UGA_PrimaryRangedBasic::ResolveTargetActor(const FGameplayAbilityActorIn
 				{
 					if (AActor* HitActor = HitResult->GetActor())
 					{
-						if (!AbilityTeamUtils::AreOnSameTeam(AvatarActor, HitActor))
+						if (IsValidTargetActor(ActorInfo, HitActor))
 						{
 							return HitActor;
 						}
@@ -725,7 +790,7 @@ AActor* UGA_PrimaryRangedBasic::ResolveTargetActor(const FGameplayAbilityActorIn
 				const TArray<TWeakObjectPtr<AActor>> Actors = Data->GetActors();
 				for (const TWeakObjectPtr<AActor>& WeakActor : Actors)
 				{
-					if (WeakActor.IsValid() && !AbilityTeamUtils::AreOnSameTeam(AvatarActor, WeakActor.Get()))
+					if (WeakActor.IsValid() && IsValidTargetActor(ActorInfo, WeakActor.Get()))
 					{
 						return WeakActor.Get();
 					}
@@ -744,7 +809,7 @@ AActor* UGA_PrimaryRangedBasic::ResolveTargetActor(const FGameplayAbilityActorIn
 		if (const AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(PlayerController))
 		{
 			AActor* Target = EnemyAI->GetTargetActor();
-			if (!AbilityTeamUtils::AreOnSameTeam(AvatarActor, Target))
+			if (IsValidTargetActor(ActorInfo, Target))
 			{
 				return Target;
 			}
@@ -768,13 +833,24 @@ AActor* UGA_PrimaryRangedBasic::ResolveTargetActor(const FGameplayAbilityActorIn
 	if (const AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(ResolvedController))
 	{
 		AActor* Target = EnemyAI->GetTargetActor();
-		if (!AbilityTeamUtils::AreOnSameTeam(AvatarActor, Target))
+		if (IsValidTargetActor(ActorInfo, Target))
 		{
 			return Target;
 		}
 	}
 
 	return nullptr;
+}
+
+void UGA_PrimaryRangedBasic::FinishShotWithoutProjectile(const TCHAR* Reason)
+{
+	UE_LOG(LogPrimaryRangedGA, Warning, TEXT("Primary ranged shot ended without a projectile: %s."), Reason);
+	bHasCachedTriggerEventData = false;
+	BroadcastPrimaryAttackComplete();
+	if (IsActive())
+	{
+		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, true);
+	}
 }
 
 bool UGA_PrimaryRangedBasic::ShouldProcessServerLogic() const

@@ -82,6 +82,10 @@ struct AEYERJI_API FAeyerjiEnemyArchetypeEntry
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Visuals")
 	FAeyerjiEnemyMeshOverrides MeshOverrides;
 
+	// Optional root-capsule override applied during construction and gameplay on every network role.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Collision")
+	FAeyerjiEnemyCapsuleOverrides CapsuleOverrides;
+
 	// Optional actor class to spawn when this enemy dies, such as a geometry collection corpse or gib actor.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Death", meta=(ToolTip="Optional actor class to spawn when this enemy dies, such as a geometry collection corpse or gib actor."))
 	TSubclassOf<AActor> DeadBodyActorClass;

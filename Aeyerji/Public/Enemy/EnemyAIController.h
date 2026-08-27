@@ -39,6 +39,38 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AI")
 	TObjectPtr<class UStateTreeComponent> StateTreeComponent;
 
+	/** Enables the shared far-chase sprint cadence used by Move To Attack Range tasks. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Chase Cadence")
+	bool bEnableChaseSprintCadence = true;
+
+	/** Maximum time an enemy may remain at RunSpeed during one far-chase sprint. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Chase Cadence", meta=(ClampMin="0.05", Units="s"))
+	float ChaseSprintDurationSeconds = 1.5f;
+
+	/** Recovery time at WalkSpeed after a sprint ends or reaches the close-engagement band. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Chase Cadence", meta=(ClampMin="0.0", Units="s"))
+	float ChaseSprintRecoverySeconds = 5.0f;
+
+	/** Extra distance beyond AttackRange that must be exceeded before a recovered enemy may sprint again. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Chase Cadence", meta=(ClampMin="0.0", Units="cm"))
+	float ChaseSprintReengageDistance = 250.0f;
+
+	/** MaxWalkSpeed units changed per second while blending between WalkSpeed and RunSpeed. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Chase Cadence", meta=(ClampMin="0.0"))
+	float ChaseSpeedChangeRate = 900.0f;
+
+	/**
+	 * Lets the controller's stable combat focus own character yaw instead of Detour Crowd's
+	 * rapidly changing avoidance velocity. Disable only for enemies whose authored locomotion
+	 * must face their instantaneous movement direction.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Facing")
+	bool bStabilizeCrowdFacing = true;
+
+	/** Maximum yaw turn rate used while smoothly facing the controller's focus. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Facing", meta=(EditCondition="bStabilizeCrowdFacing", ClampMin="0.0", Units="deg/s"))
+	float StableFacingRotationRate = 540.0f;
+
 	/** Remember the spawn or "home base" location for patrolling. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "AI")
 	FVector HomeLocation;
@@ -93,8 +125,21 @@ public:
 	/** Clears transient target/perception state before a pooled enemy is checked out again. */
 	void ResetForPooledReuse(const FVector& NewHomeLocation);
 
+	/**
+	 * Releases scarce Detour Crowd slots while this enemy cannot move and reacquires one on wake.
+	 * Falls back to normal path following plus CharacterMovement RVO if Crowd has no valid slot.
+	 */
+	bool SetPathFollowingGameplayEnabled(bool bEnabled, const TCHAR* Reason);
+
+	/**
+	 * Restarts the editor-assigned StateTree when pooling or encounter activation left it stopped.
+	 * An already-running paused tree remains paused so encounter LOD retains control. A stopped tree
+	 * is restarted and explicitly resumed because UE 5.8 StopLogic preserves its prior pause flag.
+	 */
+	bool EnsureConfiguredStateTreeRunning(const TCHAR* ActivationReason);
+
 	/** Keeps this controller in combat pursuit; its Rift spawner continuously supplies the nearest live player. */
-	void SetPermanentRiftPursuit(bool bEnabled) { bPermanentRiftPursuit = bEnabled; }
+	void SetPermanentRiftPursuit(bool bEnabled) { if (HasAuthority()) { bPermanentRiftPursuit = bEnabled; } }
 
     UFUNCTION(BlueprintCallable, Category="Targeting")
 	void SetTargetActor(AActor* NewTarget);
@@ -122,13 +167,37 @@ public:
 	/** Sends a server-side crowd-control presentation event into the running StateTree. */
 	void SendAICrowdControlEvent(const FGameplayTag& EventTag);
 
-private:
-	UPROPERTY(Transient)
-	TWeakObjectPtr<AActor> TargetActor;
+	/**
+	 * Applies the persistent server-side sprint/recovery cadence for a live chase.
+	 * StateTree movement tasks supply target distance and attack range, while this controller
+	 * owns the absolute-time phase so Attack/Recover/Pressure transitions cannot reset it.
+	 */
+	void UpdateChaseSprintCadence(float DistanceToTarget, float AttackRange, float DeltaTime, bool bForceImmediateSpeed);
+
+	/**
+	 * Server-only chase exit hook that prevents RunSpeed leaking into Attack/Recover.
+	 * An active sprint becomes a recovery phase; existing recovery timestamps are preserved.
+	 */
+	void EndChaseSprintCadence();
+
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Deterministic policy seam used by automation without requiring a ticking world. */
+	float ResolveChaseCadenceSpeedForAutomation(
+		float DistanceToTarget,
+		float AttackRange,
+		double CurrentTimeSeconds,
+		float WalkSpeed,
+		float RunSpeed);
+	void ResetChaseSprintCadenceForAutomation();
+	void EndChaseSprintCadenceForAutomation(double CurrentTimeSeconds);
+	bool IsChaseSprintingForAutomation() const { return bChaseSprintActive; }
+	double GetChaseSprintRecoveryEndTimeForAutomation() const { return ChaseSprintRecoveryEndTime; }
+#endif
 
 protected:
 	virtual void PostLoad() override;
 	virtual void OnPossess(APawn* InPawn) override;
+	virtual void OnUnPossess() override;
 
 #if WITH_EDITOR
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
@@ -143,11 +212,26 @@ protected:
 
 
 private:
+	/** Stops, assigns, and starts the configured tree in a lifecycle-safe order. */
+	void RestartConfiguredStateTree(const TCHAR* StopReason);
 	bool IsTargetValidForAcquisition(AActor* Candidate) const;
 	AActor* FindBestDefenseThreatTarget() const;
 	bool IsRecentDamageThreatValid() const;
 	void AssignCurrentTarget(AActor* NewTarget, EAeyerjiEnemyTargetSource NewSource, bool bSendTargetAcquiredEvent, bool bStopCurrentMovement);
 	void RememberTargetLocation(AActor* Target);
+	/** Applies the controller-facing policy after possession so Blueprint pawn defaults cannot reintroduce crowd-yaw jitter. */
+	void ApplyStableCrowdFacingPolicy();
+	/** Clears the transient cadence whenever a controller is possessed or an enemy is recycled. */
+	void ResetChaseSprintCadence();
+	/** Converts the current sprint into a recovery phase at the supplied authoritative time. */
+	void BeginChaseSprintRecovery(double CurrentTimeSeconds);
+	/** Advances the deterministic cadence state and returns the requested attribute-derived speed. */
+	float ResolveChaseCadenceSpeed(
+		float DistanceToTarget,
+		float AttackRange,
+		double CurrentTimeSeconds,
+		float WalkSpeed,
+		float RunSpeed);
 	/** Migrates old property-driven perception defaults into the authoritative sense configs. */
 	void ApplyLegacyPerceptionPropertyOverrides();
 	/** Mirrors the authoritative configs into hidden legacy fields so older serialized assets stay coherent. */
@@ -206,6 +290,18 @@ private:
 	/** Server world time when RecentDamageThreat stops overriding normal objective targeting. */
 	UPROPERTY(Transient)
 	double RecentDamageThreatExpiryTime = -1.0;
+
+	/** True only during the bounded RunSpeed phase of the shared chase cadence. */
+	UPROPERTY(Transient)
+	bool bChaseSprintActive = false;
+
+	/** Server world time when the current RunSpeed phase must end. */
+	UPROPERTY(Transient)
+	double ChaseSprintEndTime = -1.0;
+
+	/** Server world time before which another far-chase sprint cannot begin. */
+	UPROPERTY(Transient)
+	double ChaseSprintRecoveryEndTime = -1.0;
 
 public:
     /** Reconfigures the live perception component from the authoritative sense configs. */

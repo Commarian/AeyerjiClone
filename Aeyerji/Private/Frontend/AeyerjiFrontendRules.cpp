@@ -53,6 +53,30 @@ bool AeyerjiFrontendRules::IsProfileTransferLayoutValid(const int32 TotalBytes, 
 		&& ChunkSize > 0 && ChunkSize <= MaximumChunkSize;
 }
 
+bool AeyerjiFrontendRules::IsProfileOwnerKeyAccepted(const FString& SubmittedOwner,
+	const FString& ExpectedOwner, const FString& BoundOwner,
+	const bool bAllowFirstUnauthenticatedBinding)
+{
+	constexpr int32 MaximumOwnerKeyCharacters = 128;
+	if (SubmittedOwner.IsEmpty() || SubmittedOwner.Len() > MaximumOwnerKeyCharacters)
+	{
+		return false;
+	}
+
+	// NULL has no authenticated account identity. Transport shape and schema are still
+	// validated before this first owner is bound to the server-side PlayerState.
+	if (bAllowFirstUnauthenticatedBinding)
+	{
+		return BoundOwner.IsEmpty() || SubmittedOwner == BoundOwner;
+	}
+
+	// Authenticated identity remains authoritative even if stale replicated state contains an
+	// earlier owner. A matching BoundOwner alone must never bypass the platform account check.
+	return !ExpectedOwner.IsEmpty()
+		&& SubmittedOwner == ExpectedOwner
+		&& (BoundOwner.IsEmpty() || BoundOwner == ExpectedOwner);
+}
+
 EAeyerjiFrontendFailure AeyerjiFrontendRules::ValidateLaunch(const FAeyerjiLobbySnapshot& Snapshot,
 	const int32 RequesterPlayerId, const FAeyerjiRiftTierRow* TierRow)
 {

@@ -15,6 +15,8 @@ namespace
 {
 	constexpr uint8 EndpointAIndex = 0;
 	constexpr uint8 EndpointBIndex = 1;
+	constexpr float MaxTeleporterDistance = 1000000.f;
+	constexpr float MaxTeleporterCooldownSeconds = 86400.f;
 
 	void ConfigureInteractionSphere(USphereComponent* Sphere)
 	{
@@ -140,24 +142,41 @@ FVector AAeyerjiLinkedTeleporter::GetEndpointLocation(const uint8 EndpointIndex)
 
 void AAeyerjiLinkedTeleporter::SetEndpointBWorldTransform(const FTransform& WorldTransform)
 {
+	if (!HasAuthority() || WorldTransform.ContainsNaN() || GetActorTransform().ContainsNaN())
+	{
+		return;
+	}
 	EndpointBRelativeTransform = WorldTransform.GetRelativeTransform(GetActorTransform());
+	if (EndpointBRelativeTransform.ContainsNaN())
+	{
+		EndpointBRelativeTransform = FTransform::Identity;
+		return;
+	}
 	ApplyEndpointConfiguration();
 	ForceNetUpdate();
 }
 
 float AAeyerjiLinkedTeleporter::GetEndpointInteractionRadius() const
 {
-	return FMath::Max(1.f, InteractionRadius);
+	return FMath::IsFinite(InteractionRadius)
+		? FMath::Clamp(InteractionRadius, 1.f, MaxTeleporterDistance)
+		: 140.f;
 }
 
 bool AAeyerjiLinkedTeleporter::IsPawnInInteractionRange(const APawn* Pawn, const uint8 EndpointIndex) const
 {
-	if (!Pawn || !IsValidEndpointIndex(EndpointIndex))
+	if (!IsValid(Pawn)
+		|| Pawn->GetWorld() != GetWorld()
+		|| !IsValidEndpointIndex(EndpointIndex))
 	{
 		return false;
 	}
 
 	const FVector EndpointLocation = GetEndpointLocation(EndpointIndex);
+	if (EndpointLocation.ContainsNaN() || Pawn->GetActorLocation().ContainsNaN())
+	{
+		return false;
+	}
 	const float Radius = GetEndpointInteractionRadius();
 	return FVector::DistSquared2D(Pawn->GetActorLocation(), EndpointLocation) <= FMath::Square(Radius);
 }
@@ -189,13 +208,18 @@ bool AAeyerjiLinkedTeleporter::IsEndpointEnabledForUse(const uint8 EndpointIndex
 
 bool AAeyerjiLinkedTeleporter::TryTeleport(AAeyerjiPlayerController* Controller, const uint8 EndpointIndex)
 {
-	if (!HasAuthority() || !IsValidEndpointIndex(EndpointIndex) || !Controller)
+	if (!HasAuthority()
+		|| !IsValidEndpointIndex(EndpointIndex)
+		|| !IsValid(Controller)
+		|| Controller->GetWorld() != GetWorld())
 	{
 		return false;
 	}
 
 	APawn* Pawn = Controller->GetPawn();
-	if (!Pawn)
+	if (!IsValid(Pawn)
+		|| Pawn->GetWorld() != GetWorld()
+		|| Pawn->GetController() != Controller)
 	{
 		return false;
 	}
@@ -210,12 +234,25 @@ bool AAeyerjiLinkedTeleporter::TryTeleport(AAeyerjiPlayerController* Controller,
 
 	const uint8 DestinationEndpointIndex = GetLinkedEndpointIndex(EndpointIndex);
 	const FTransform DestinationTransform = GetEndpointTransform(DestinationEndpointIndex);
-	const FVector DestinationLocation = DestinationTransform.TransformPosition(ExitOffsetLocal);
+	const FVector SafeExitOffset = ExitOffsetLocal.ContainsNaN()
+		? FVector(140.f, 0.f, 0.f)
+		: ExitOffsetLocal.GetClampedToMaxSize(MaxTeleporterDistance);
+	if (DestinationTransform.ContainsNaN())
+	{
+		BP_OnTeleportRejected(Pawn, EndpointIndex);
+		return false;
+	}
+	const FVector DestinationLocation = DestinationTransform.TransformPosition(SafeExitOffset);
 	const FRotator DestinationRotation = DestinationTransform.GetRotation().Rotator();
+	if (DestinationLocation.ContainsNaN() || DestinationRotation.ContainsNaN())
+	{
+		BP_OnTeleportRejected(Pawn, EndpointIndex);
+		return false;
+	}
 
 	FAeyerjiNavSafetyResolveParams NavParams;
 	NavParams.ProjectionExtent = FVector(200.f, 200.f, 600.f);
-	NavParams.SearchRadius = FMath::Max(InteractionRadius + 400.f, 600.f);
+	NavParams.SearchRadius = FMath::Clamp(GetEndpointInteractionRadius() + 400.f, 600.f, MaxTeleporterDistance);
 	NavParams.SearchStep = 150.f;
 	NavParams.GroundTraceHeight = 300.f;
 	NavParams.GroundTraceDepth = 600.f;
@@ -228,12 +265,17 @@ bool AAeyerjiLinkedTeleporter::TryTeleport(AAeyerjiPlayerController* Controller,
 	}
 
 	Controller->AbortMovement_Local();
-	Pawn->SetActorLocationAndRotation(
+	const bool bTeleported = Pawn->SetActorLocationAndRotation(
 		NavResult.GroundedLocation,
 		DestinationRotation,
 		/*bSweep=*/false,
 		nullptr,
 		ETeleportType::TeleportPhysics);
+	if (!bTeleported)
+	{
+		BP_OnTeleportRejected(Pawn, EndpointIndex);
+		return false;
+	}
 	Pawn->ForceNetUpdate();
 	Controller->ForceNetUpdate();
 
@@ -274,7 +316,8 @@ void AAeyerjiLinkedTeleporter::ApplyEndpointConfiguration()
 
 	if (EndpointB)
 	{
-		EndpointB->SetRelativeTransform(EndpointBRelativeTransform);
+		EndpointB->SetRelativeTransform(
+			EndpointBRelativeTransform.ContainsNaN() ? FTransform::Identity : EndpointBRelativeTransform);
 	}
 
 	if (EndpointAMesh)
@@ -361,7 +404,14 @@ bool AAeyerjiLinkedTeleporter::IsValidEndpointIndex(const uint8 EndpointIndex) c
 
 void AAeyerjiLinkedTeleporter::StartCooldownForController(AAeyerjiPlayerController* Controller)
 {
-	if (!Controller || CooldownSeconds <= 0.f)
+	if (!HasAuthority() || !IsValid(Controller) || Controller->GetWorld() != GetWorld())
+	{
+		return;
+	}
+	const float SafeCooldownSeconds = FMath::IsFinite(CooldownSeconds)
+		? FMath::Clamp(CooldownSeconds, 0.f, MaxTeleporterCooldownSeconds)
+		: 2.f;
+	if (SafeCooldownSeconds <= 0.f)
 	{
 		return;
 	}
@@ -384,7 +434,7 @@ void AAeyerjiLinkedTeleporter::StartCooldownForController(AAeyerjiPlayerControll
 	World->GetTimerManager().SetTimer(
 		CooldownTimer,
 		CooldownDelegate,
-		FMath::Max(0.01f, CooldownSeconds),
+		FMath::Max(0.01f, SafeCooldownSeconds),
 		false);
 }
 

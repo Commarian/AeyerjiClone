@@ -30,7 +30,7 @@ void AAeyerjiEndRunPortal::BeginPlay()
 {
 	Super::BeginPlay();
 
-	if (InteractionSphere)
+	if (HasAuthority() && InteractionSphere)
 	{
 		InteractionSphere->OnComponentBeginOverlap.RemoveDynamic(this, &AAeyerjiEndRunPortal::HandlePortalOverlap);
 		InteractionSphere->OnComponentBeginOverlap.AddDynamic(this, &AAeyerjiEndRunPortal::HandlePortalOverlap);
@@ -42,6 +42,11 @@ void AAeyerjiEndRunPortal::BeginPlay()
 void AAeyerjiEndRunPortal::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	ResetExtractionCountdown(nullptr, /*bNotifyBlueprintReset=*/true);
+	if (InteractionSphere)
+	{
+		InteractionSphere->OnComponentBeginOverlap.RemoveDynamic(this, &AAeyerjiEndRunPortal::HandlePortalOverlap);
+		InteractionSphere->OnComponentEndOverlap.RemoveDynamic(this, &AAeyerjiEndRunPortal::HandlePortalEndOverlap);
+	}
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -101,7 +106,11 @@ void AAeyerjiEndRunPortal::HandlePortalEndOverlap(
 
 void AAeyerjiEndRunPortal::BeginExtractionCountdown(APawn* OverlappingPawn)
 {
-	if (!HasAuthority() || bConsumed || !OverlappingPawn || !OverlappingPawn->IsPlayerControlled())
+	if (!HasAuthority()
+		|| bConsumed
+		|| !IsValid(OverlappingPawn)
+		|| OverlappingPawn->GetWorld() != GetWorld()
+		|| !OverlappingPawn->IsPlayerControlled())
 	{
 		return;
 	}
@@ -116,7 +125,9 @@ void AAeyerjiEndRunPortal::BeginExtractionCountdown(APawn* OverlappingPawn)
 		return;
 	}
 
-	const float CountdownDurationSeconds = FMath::Max(ExtractionDurationSeconds, 0.1f);
+	const float CountdownDurationSeconds = FMath::IsFinite(ExtractionDurationSeconds)
+		? FMath::Clamp(ExtractionDurationSeconds, 0.1f, 86400.f)
+		: 3.f;
 	PendingExtractingPawn = OverlappingPawn;
 
 	if (AAeyerjiPlayerController* PlayerController = Cast<AAeyerjiPlayerController>(OverlappingPawn->GetController()))
@@ -209,6 +220,18 @@ void AAeyerjiEndRunPortal::CompleteExtractionCountdown()
 		return;
 	}
 
+	AAeyerjiGameState* GameState = nullptr;
+	if (UWorld* World = GetWorld())
+	{
+		GameState = World->GetGameState<AAeyerjiGameState>();
+	}
+	if (!IsValid(GameState) || !GameState->Server_CompleteExtraction())
+	{
+		ResetExtractionCountdown(ExtractingPawn, /*bNotifyBlueprintReset=*/true);
+		TryBeginCountdownFromCurrentOverlaps();
+		return;
+	}
+
 	bConsumed = true;
 	BP_OnExtractionCountdownCompleted(ExtractingPawn);
 	ResetExtractionCountdown(ExtractingPawn, /*bNotifyBlueprintReset=*/false);
@@ -216,14 +239,6 @@ void AAeyerjiEndRunPortal::CompleteExtractionCountdown()
 	if (InteractionSphere)
 	{
 		InteractionSphere->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	}
-
-	if (UWorld* World = GetWorld())
-	{
-		if (AAeyerjiGameState* GameState = World->GetGameState<AAeyerjiGameState>())
-		{
-			GameState->Server_CompleteExtraction();
-		}
 	}
 
 	Destroy();

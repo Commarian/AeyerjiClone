@@ -59,6 +59,39 @@ public:
 		FVector InLootReleaseOffset,
 		float InLifeSpanAfterRelease);
 
+	/**
+	 * Supplies the nearby NavMesh anchor used for interaction movement and server range checks.
+	 * The visual chest remains at its authored transform; clients receive this anchor through replication.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward|Interaction")
+	void SetInteractionNavigationAnchor(const FVector& InNavigationAnchor);
+
+	/** Removes the optional navigation anchor so interaction returns to the visual actor location. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward|Interaction")
+	void ClearInteractionNavigationAnchor();
+
+	/**
+	 * Controls whether InitializeReward may vertically ground-snap this individual presentation.
+	 * Rift candidate points pass false before initialization so their visual chest transform remains exactly designer-authored;
+	 * the separate navigation anchor still handles player movement and range validation.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward|Ground Snap")
+	void SetSnapPresentationToGroundOnInitialize(bool bInSnapToGroundOnInitialize);
+
+	/**
+	 * Configures Rift treasure proximity opening and optional pickup auto-collection.
+	 * Auto-open calls this actor's normal HandleReleaseRequested path, and auto-collect retains each pickup's normal inventory transfer path.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward|Treasure")
+	void ConfigureTreasureAutomation(
+		bool bEnableAutoOpen,
+		float InAutoOpenRadius,
+		int32 InAutoOpenUnlockLevel,
+		bool bRequireMaxCharacterLevel,
+		float InAutoOpenPollingInterval,
+		bool bEnableAutoCollect,
+		float InAutoCollectRadius);
+
 	/** Adds one already-rolled private bundle to a shared visual cache. Authority only; repeated calls append without rerolling. */
 	void AddPrivateRewardBundle(APlayerState* PlayerState, const TArray<FLootDropResult>& LootResults, FGameplayTag InSourceTag);
 
@@ -99,6 +132,13 @@ public:
 	/** Moves this presentation actor so the bottom of its visual mesh bounds rests on traced ground. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Reward|Ground Snap")
 	bool SnapPresentationToGround();
+
+	/**
+	 * Discards unreleased reward state and any still-live pickups spawned by this presentation.
+	 * Rift reset uses this authority-only cleanup so stale chests and their released loot cannot survive into a new run.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward")
+	void DiscardStoredRewardAndSpawnedLoot();
 
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Reward")
@@ -202,12 +242,19 @@ private:
 	void AutoReleaseStoredLoot();
 	void RefreshInteractionCollision();
 	void RefreshRewardSummary();
+	void SanitizeRuntimeSettings();
 	void SetReleased();
+	void RefreshTreasureAutoOpenTimer();
+	void EvaluateTreasureAutoOpen();
+	bool IsPawnEligibleForTreasureAutoOpen(const APawn* Pawn) const;
+	void TrackSpawnedLootPickups(const TArray<class AAeyerjiLootPickup*>& SpawnedPickups);
+	void ConfigureSpawnedPickupsForAutoCollection(const TArray<class AAeyerjiLootPickup*>& SpawnedPickups) const;
 	APlayerState* ResolvePlayerStateFromActivator(AActor* Activator) const;
 	bool ReleasePrivateRewardAtTransform(const FTransform& ReleaseTransform, AActor* Activator);
 	void RefreshPrivateRewardSummary();
 
 	FTimerHandle AutoReleaseTimerHandle;
+	FTimerHandle TreasureAutoOpenTimerHandle;
 
 	UPROPERTY(Transient)
 	TArray<FLootDropResult> PendingLootResults;
@@ -228,6 +275,14 @@ private:
 	UPROPERTY(Transient)
 	bool bReleaseInProgress = false;
 
+	/** Optional NavMesh interaction point replicated to clients while the visual chest remains at its authored transform. */
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Reward|Interaction", meta=(AllowPrivateAccess="true"))
+	FVector InteractionNavigationAnchor = FVector::ZeroVector;
+
+	/** True when InteractionNavigationAnchor replaces the visual actor location for movement/range queries. */
+	UPROPERTY(Replicated, VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Reward|Interaction", meta=(AllowPrivateAccess="true"))
+	bool bHasInteractionNavigationAnchor = false;
+
 	UPROPERTY(ReplicatedUsing=OnRep_RewardSummary, BlueprintReadOnly, Category="Aeyerji|Reward", meta=(AllowPrivateAccess="true"))
 	int32 RewardCount = 0;
 
@@ -242,4 +297,17 @@ private:
 
 	UPROPERTY(ReplicatedUsing=OnRep_Initialized, BlueprintReadOnly, Category="Aeyerji|Reward", meta=(AllowPrivateAccess="true"))
 	bool bInitialized = false;
+
+	/** Runtime-only Rift automation; disabled by default so existing reward presentation behavior is unchanged. */
+	bool bTreasureAutoOpenEnabled = false;
+	bool bTreasureAutoOpenRequestPending = false;
+	bool bTreasureAutoOpenRequiresMaxCharacterLevel = false;
+	bool bAutoCollectSpawnedLoot = false;
+	int32 TreasureAutoOpenUnlockLevel = 1;
+	float TreasureAutoOpenRadius = 0.f;
+	float TreasureAutoOpenPollingInterval = 0.15f;
+	float TreasureAutoCollectRadius = 140.f;
+
+	/** Pickups released by this actor and still owned by the current Rift presentation cleanup scope. */
+	TArray<TWeakObjectPtr<class AAeyerjiLootPickup>> SpawnedLootPickups;
 };

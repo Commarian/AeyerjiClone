@@ -8,6 +8,20 @@ DEFINE_LOG_CATEGORY_STATIC(LogAeyerjiAbilityTuning, Log, All);
 
 namespace
 {
+	constexpr int32 MaxResolvedAdditionalEffects = 32;
+	constexpr int32 MaxResolvedTunablesPerType = 128;
+	constexpr int32 MaxResolvedTargets = 256;
+
+	float FiniteOrDefault(const float Value, const float DefaultValue)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
+
+	bool IsFiniteVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
 	template <typename TunableType, typename ValueType>
 	bool FindTunableValue(const TArray<TunableType>& Tunables, FGameplayTag Key, ValueType& OutValue)
 	{
@@ -83,6 +97,107 @@ namespace
 				InOutTunables.Add(Override);
 			}
 		}
+	}
+
+	template <typename TunableType>
+	void SanitizeTunableKeys(TArray<TunableType>& InOutTunables)
+	{
+		TSet<FGameplayTag> SeenKeys;
+		InOutTunables.RemoveAll([&SeenKeys](const TunableType& Tunable)
+		{
+			if (!Tunable.Key.IsValid() || SeenKeys.Contains(Tunable.Key))
+			{
+				return true;
+			}
+
+			SeenKeys.Add(Tunable.Key);
+			return false;
+		});
+
+		if (InOutTunables.Num() > MaxResolvedTunablesPerType)
+		{
+			InOutTunables.SetNum(MaxResolvedTunablesPerType, EAllowShrinking::No);
+		}
+	}
+
+	void SanitizeResolvedConfig(FAeyerjiAbilityResolvedConfig& InOutConfig)
+	{
+		InOutConfig.Rank = FMath::Max(1, InOutConfig.Rank);
+		InOutConfig.RequiredLevel = FMath::Max(1, InOutConfig.RequiredLevel);
+		InOutConfig.Cost.ManaCost = FMath::Max(0.f, FiniteOrDefault(InOutConfig.Cost.ManaCost, 0.f));
+		InOutConfig.Cost.Cooldown = FMath::Max(0.f, FiniteOrDefault(InOutConfig.Cost.Cooldown, 0.f));
+		InOutConfig.PreviewRange = FMath::Max(0.f, FiniteOrDefault(InOutConfig.PreviewRange, 0.f));
+		InOutConfig.MaxRange = FMath::Max(0.f, FiniteOrDefault(InOutConfig.MaxRange, 0.f));
+		InOutConfig.Radius = FMath::Max(0.f, FiniteOrDefault(InOutConfig.Radius, 0.f));
+		InOutConfig.ArcAngleDegrees = FMath::Clamp(FiniteOrDefault(InOutConfig.ArcAngleDegrees, 90.f), 0.f, 180.f);
+		InOutConfig.MaxTargets = FMath::Clamp(InOutConfig.MaxTargets, 0, MaxResolvedTargets);
+
+		if (!StaticEnum<EAeyerjiTargetMode>()->IsValidEnumValue(static_cast<int64>(InOutConfig.TargetMode)))
+		{
+			InOutConfig.TargetMode = EAeyerjiTargetMode::Instant;
+		}
+		if (!StaticEnum<EAeyerjiAbilityTargetShape>()->IsValidEnumValue(static_cast<int64>(InOutConfig.Shape)))
+		{
+			InOutConfig.Shape = EAeyerjiAbilityTargetShape::SingleActor;
+		}
+		if (!StaticEnum<EAeyerjiAbilityTargetTeam>()->IsValidEnumValue(static_cast<int64>(InOutConfig.TargetTeam)))
+		{
+			InOutConfig.TargetTeam = EAeyerjiAbilityTargetTeam::Enemy;
+		}
+		if (!StaticEnum<EAeyerjiStat>()->IsValidEnumValue(static_cast<int64>(InOutConfig.Damage.SourceStat)))
+		{
+			InOutConfig.Damage.SourceStat = EAeyerjiStat::None;
+		}
+
+		InOutConfig.Damage.FlatValue = FiniteOrDefault(InOutConfig.Damage.FlatValue, 0.f);
+		InOutConfig.Damage.SourceStatScalar = FiniteOrDefault(InOutConfig.Damage.SourceStatScalar, 0.f);
+		InOutConfig.Damage.VarianceOverride = FMath::Clamp(
+			FiniteOrDefault(InOutConfig.Damage.VarianceOverride, -1.f), -1.f, 0.95f);
+		InOutConfig.Damage.CriticalMultiplierOverride = FMath::Max(
+			0.f, FiniteOrDefault(InOutConfig.Damage.CriticalMultiplierOverride, 0.f));
+		InOutConfig.Damage.ArmorShred = FMath::Max(0.f, FiniteOrDefault(InOutConfig.Damage.ArmorShred, 0.f));
+		InOutConfig.Damage.ArmorPenetration = FMath::Clamp(
+			FiniteOrDefault(InOutConfig.Damage.ArmorPenetration, 0.f), 0.f, 1.f);
+		InOutConfig.Damage.StaggerMultiplier = FMath::Max(
+			0.f, FiniteOrDefault(InOutConfig.Damage.StaggerMultiplier, 1.f));
+
+		InOutConfig.AdditionalEffects.RemoveAll([](FAeyerjiAbilityAppliedEffect& Effect)
+		{
+			if (Effect.GameplayEffectClass.IsNull() || !FMath::IsFinite(Effect.Magnitude))
+			{
+				return true;
+			}
+
+			Effect.EffectLevel = FMath::Max(0.01f, FiniteOrDefault(Effect.EffectLevel, 1.f));
+			return false;
+		});
+		if (InOutConfig.AdditionalEffects.Num() > MaxResolvedAdditionalEffects)
+		{
+			InOutConfig.AdditionalEffects.SetNum(MaxResolvedAdditionalEffects, EAllowShrinking::No);
+		}
+
+		InOutConfig.Visuals.MontagePlayRate = FMath::Max(
+			0.01f, FiniteOrDefault(InOutConfig.Visuals.MontagePlayRate, 1.f));
+		InOutConfig.Visuals.ImpactDelaySeconds = FMath::Max(
+			-1.f, FiniteOrDefault(InOutConfig.Visuals.ImpactDelaySeconds, -1.f));
+		if (!IsFiniteVector(InOutConfig.Visuals.NiagaraOffset))
+		{
+			InOutConfig.Visuals.NiagaraOffset = FVector::ZeroVector;
+		}
+		if (!IsFiniteVector(InOutConfig.Visuals.NiagaraScale))
+		{
+			InOutConfig.Visuals.NiagaraScale = FVector::OneVector;
+		}
+
+		InOutConfig.FloatTunables.RemoveAll([](const FAeyerjiAbilityFloatTunable& Tunable)
+		{
+			return !FMath::IsFinite(Tunable.Value);
+		});
+		SanitizeTunableKeys(InOutConfig.FloatTunables);
+		SanitizeTunableKeys(InOutConfig.BoolTunables);
+		SanitizeTunableKeys(InOutConfig.IntTunables);
+		SanitizeTunableKeys(InOutConfig.TagTunables);
+		SanitizeTunableKeys(InOutConfig.AssetTunables);
 	}
 
 	FString MakeRankLookupKey(const FGameplayTag AbilityTag, const int32 Rank)
@@ -528,6 +643,7 @@ bool UAeyerjiAbilityTuningSubsystem::MakeResolvedConfigFromBaseRow(const FAeyerj
 	OutConfig.IntTunables = Row.IntTunables;
 	OutConfig.TagTunables = Row.TagTunables;
 	OutConfig.AssetTunables = Row.AssetTunables;
+	SanitizeResolvedConfig(OutConfig);
 	return true;
 }
 
@@ -580,6 +696,7 @@ void UAeyerjiAbilityTuningSubsystem::ApplyRankOverrides(const FAeyerjiAbilityRan
 	OverlayTunables(RankRow.IntTunables, InOutConfig.IntTunables);
 	OverlayTunables(RankRow.TagTunables, InOutConfig.TagTunables);
 	OverlayTunables(RankRow.AssetTunables, InOutConfig.AssetTunables);
+	SanitizeResolvedConfig(InOutConfig);
 }
 
 void UAeyerjiAbilityTuningSubsystem::RebuildCache()

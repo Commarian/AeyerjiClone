@@ -39,7 +39,17 @@ class AEYERJI_API UGA_PrimaryMeleeBasic : public UGA_AeyerjiBase
 public:
     UGA_PrimaryMeleeBasic();
 
+    /**
+     * Stops the current activation from consuming buffered combo input after the
+     * controller explicitly selects a different enemy. The accepted strike is
+     * left intact, but no follow-up stage may reuse its stale startup target.
+     */
+    void NotifyExternalRetarget(AActor* NewTarget);
+
 protected:
+    virtual bool ShouldAbilityRespondToEvent(const FGameplayAbilityActorInfo* ActorInfo,
+                                             const FGameplayEventData* Payload) const override;
+
     virtual void ActivateAbility(const FGameplayAbilitySpecHandle Handle,
                                  const FGameplayAbilityActorInfo* ActorInfo,
                                  const FGameplayAbilityActivationInfo ActivationInfo,
@@ -100,10 +110,6 @@ protected:
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ailment")
     FGameplayTag AilmentDurationSetByCallerTag;
 
-    /** Minimum cooldown duration applied even if AttackSpeed is very high. */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Cooldown", meta=(ClampMin="0.0"))
-    float MinCooldownDuration;
-
     /** Broadcast Event.PrimaryAttack.Completed when the montage ends (server only). */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Events")
     bool bSendCompletionGameplayEvent;
@@ -127,10 +133,6 @@ protected:
     /** Duration in seconds after activation during which manual cancel (movement/etc.) is permitted. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|State", meta=(ClampMin="0.0"))
     float CancelWindowDuration = 0.12f;
-
-    /** Cone trace drives hit detection (kept editable for legacy assets even though it is always used). */
-    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace")
-    bool bUseConeTraceFallback = true;
 
     /** Default melee reach in centimetres if the AttackRange attribute is unset. */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Melee|ConeTrace", meta=(ClampMin="0.0"))
@@ -210,6 +212,9 @@ private:
     /** True when the player has buffered an additional combo input during the current stage. */
     UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category="Melee|Combo", meta=(AllowPrivateAccess="true"))
     bool bComboInputBuffered = false;
+
+    /** True when an explicit target change must prevent this activation from launching another combo stage. */
+    bool bExternalRetargetBlocksCombo = false;
 
     /** Timer used to reset NextComboIndex when the player does not continue the chain. */
     FTimerHandle ComboResetTimerHandle;

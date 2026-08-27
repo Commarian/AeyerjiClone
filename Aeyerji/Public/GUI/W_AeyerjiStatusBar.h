@@ -12,6 +12,9 @@ class UAbilitySystemComponent;
 class UProgressBar;
 class UImage;
 class UTextBlock;
+class USizeBox;
+class UWidget;
+class UBorder;
 
 UENUM(BlueprintType)
 enum class EResourceVisibilityPolicy : uint8
@@ -74,6 +77,10 @@ public:
 
     UPROPERTY(meta=(BindWidgetOptional), BlueprintReadOnly)
     UImage* ImgDamageFlash = nullptr;
+
+    /** Optional SizeBox named OverlaySizeBox in a floating-status-bar Blueprint; it receives physical-width sizing while preserving bar height and text proportions. */
+    UPROPERTY(meta=(BindWidgetOptional), BlueprintReadOnly)
+    USizeBox* OverlaySizeBox = nullptr;
 
     // ----- Tuning knobs -----
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatusBar|Smoothing")
@@ -146,6 +153,33 @@ public:
                              FGameplayAttribute InHPRegen,
                              FGameplayAttribute InManaRegen);
 
+    /** Applies an Overlay-only horizontal size multiplier. Direct Canvas-panel bars resize without affecting labels; OverlaySizeBox and render scale remain layout fallbacks. */
+    void SetOverlayWidthScale(float InWidthScale);
+
+    /**
+     * Configures Max-HP-based health divisions. Floating-status components call this before
+     * binding attributes so every enemy rank uses one consistent segmentation language.
+     */
+    void ConfigureHealthChunkDivisions(
+        bool bInEnabled,
+        bool bInRequireAnyEligibilityTag,
+        const FGameplayTagContainer& InEligibilityTags,
+        int32 InTargetChunkCount,
+        int32 InMinPreferredChunkCount,
+        int32 InMaxPreferredChunkCount,
+        int32 InHardMaxChunkCount,
+        float InSeparatorThickness,
+        float InSeparatorVerticalInset,
+        const FLinearColor& InSeparatorColor);
+
+    /** Current number of Max-HP chunks selected by the native nice-number calculation. */
+    UFUNCTION(BlueprintPure, Category="Aeyerji|StatusBar|Health Chunks")
+    int32 GetHealthChunkCount() const { return HealthChunkCount; }
+
+    /** Amount of HP represented by each full health chunk; the final chunk may be partial. */
+    UFUNCTION(BlueprintPure, Category="Aeyerji|StatusBar|Health Chunks")
+    float GetHealthPerChunk() const { return HealthPerChunk; }
+
     /** Optional: let BP decide if this pawn uses a resource (OR-ed with auto and tag detection). */
     UFUNCTION(BlueprintNativeEvent, Category="Aeyerji|StatusBar|Resource")
     bool BP_ShouldShowResource(UAbilitySystemComponent* InASC);
@@ -201,6 +235,33 @@ private:
     float ResyncAccumulator = 0.f;
     bool bHasObservedHealthUpdate = false;
     bool bHasObservedManaUpdate = false;
+    float OverlayBaseWidth = 0.f;
+    bool bHealthChunkDivisionsEnabled = false;
+    bool bRequireAnyHealthChunkEligibilityTag = true;
+    bool bHealthChunkTagEligible = false;
+    FGameplayTagContainer HealthChunkEligibilityTags;
+    int32 TargetHealthChunkCount = 12;
+    int32 MinPreferredHealthChunkCount = 10;
+    int32 MaxPreferredHealthChunkCount = 14;
+    int32 HardMaxHealthChunkCount = 16;
+    int32 HealthChunkCount = 0;
+    float HealthPerChunk = 0.f;
+    float ChunkLayoutMaxHealth = 0.f;
+    float HealthChunkSeparatorThickness = 1.f;
+    float HealthChunkSeparatorVerticalInset = 1.f;
+    FLinearColor HealthChunkSeparatorColor = FLinearColor(0.01f, 0.01f, 0.01f, 0.9f);
+
+    /** Runtime separator widgets share the HealthBar Canvas slot's layout instead of relying on cached screen geometry. */
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UBorder>> HealthChunkSeparatorWidgets;
+
+    struct FOverlayCanvasSlotSize
+    {
+        TWeakObjectPtr<UWidget> Widget;
+        FVector2D BaseSize = FVector2D::ZeroVector;
+        FVector2D BasePosition = FVector2D::ZeroVector;
+    };
+    TArray<FOverlayCanvasSlotSize> OverlayCanvasSlotSizes;
 
     // Helpers
     void OnHealthChanged(const FOnAttributeChangeData& Data);
@@ -232,6 +293,19 @@ private:
     void UpdateRegenLabels();
     float GetDisplayedHealthValue(float CurrentHP, float MaxHP) const;
     float GetDisplayedManaValue(float CurrentMana, float MaxMana) const;
+    bool IsHealthChunkTagEligible() const;
+    void UpdateHealthChunkLayout(float MaxHealth);
+    void RefreshHealthChunkSeparatorWidgets();
+    void HideHealthChunkSeparatorWidgets();
+    static float SelectNiceHealthPerChunk(
+        float MaxHealth,
+        int32 TargetCount,
+        int32 MinPreferredCount,
+        int32 MaxPreferredCount,
+        int32 HardMaxCount,
+        int32& OutChunkCount);
+    /** Resizes a direct Canvas-slot child around its authored horizontal center while keeping its height and vertical placement unchanged. */
+    bool SetOverlayCanvasSlotWidth(UWidget* Widget, float WidthScale);
     void ScheduleDelayedInitialSync();
     void RunDelayedInitialSync();
 

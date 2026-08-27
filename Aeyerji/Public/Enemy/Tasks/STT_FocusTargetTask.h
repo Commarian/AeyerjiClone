@@ -6,10 +6,9 @@
 #include "UObject/Object.h"
 #include "Blueprint/StateTreeTaskBlueprintBase.h"
 #include "STT_FocusTargetTask.generated.h"
-#pragma once
 
 /**
- * StateTree Task that continuously focuses the AI controller on its target actor.
+ * Applies the enemy controller's current target as gameplay focus. The controller retains that focus across ordinary combat branch transitions.
  */
 UCLASS(Blueprintable, meta = (DisplayName = "Focus Target"))
 class AEYERJI_API USTT_FocusTargetTask : public UStateTreeTaskBlueprintBase

@@ -11,8 +11,12 @@ struct AEYERJI_API FAeyerjiMeleeDeterministicStrikePolicy
 	/** Returns the server impact delay after attack-speed scaling. */
 	static float CalculateImpactDelay(float WindupDuration, float StrikeDelay, float MontagePlayRate)
 	{
-		const float SafePlayRate = FMath::Max(MontagePlayRate, KINDA_SMALL_NUMBER);
-		const float RawDelay = FMath::Max(0.f, WindupDuration) + FMath::Max(0.f, StrikeDelay);
+		const float SafePlayRate = FMath::IsFinite(MontagePlayRate)
+			? FMath::Max(MontagePlayRate, KINDA_SMALL_NUMBER)
+			: 1.f;
+		const float SafeWindup = FMath::IsFinite(WindupDuration) ? FMath::Max(0.f, WindupDuration) : 0.f;
+		const float SafeStrikeDelay = FMath::IsFinite(StrikeDelay) ? FMath::Max(0.f, StrikeDelay) : 0.f;
+		const float RawDelay = SafeWindup + SafeStrikeDelay;
 		return FMath::Max(0.f, RawDelay / SafePlayRate);
 	}
 
@@ -31,9 +35,9 @@ struct AEYERJI_API FAeyerjiMeleeDeterministicStrikePolicy
 	/** Resolves the authored melee cone angle. A real zero means single-target, not a fallback cone. */
 	static float ResolveAttackAngle(float AttributeAngle, bool bHasAttribute, float FallbackAngle)
 	{
-		if (!bHasAttribute)
+		if (!bHasAttribute || !FMath::IsFinite(AttributeAngle))
 		{
-			return FMath::Clamp(FallbackAngle, 0.f, 360.f);
+			return FMath::IsFinite(FallbackAngle) ? FMath::Clamp(FallbackAngle, 0.f, 360.f) : 0.f;
 		}
 
 		return FMath::Clamp(AttributeAngle, 0.f, 360.f);
@@ -48,13 +52,24 @@ struct AEYERJI_API FAeyerjiMeleeDeterministicStrikePolicy
 	/** Returns the grace range for a target that was valid when the swing started. */
 	static float CalculateLockedTargetGraceRange(float AttackRange, float GraceRangeMultiplier)
 	{
-		return FMath::Max(0.f, AttackRange) * FMath::Max(0.f, GraceRangeMultiplier);
+		const float SafeRange = FMath::IsFinite(AttackRange) ? FMath::Max(0.f, AttackRange) : 0.f;
+		const float SafeMultiplier = FMath::IsFinite(GraceRangeMultiplier)
+			? FMath::Max(0.f, GraceRangeMultiplier)
+			: 0.f;
+		const float Result = SafeRange * SafeMultiplier;
+		return FMath::IsFinite(Result) ? Result : 0.f;
 	}
 
 	/** Returns true when the target has moved far enough off facing that the attacker should re-face it. */
 	static bool ShouldRefaceLockedTarget(float DotToTarget, float ThresholdDegrees)
 	{
-		const float ClampedThreshold = FMath::Clamp(ThresholdDegrees, 0.f, 180.f);
+		if (!FMath::IsFinite(DotToTarget))
+		{
+			return false;
+		}
+		const float ClampedThreshold = FMath::IsFinite(ThresholdDegrees)
+			? FMath::Clamp(ThresholdDegrees, 0.f, 180.f)
+			: 90.f;
 		const float CosThreshold = FMath::Cos(FMath::DegreesToRadians(ClampedThreshold));
 		return DotToTarget < CosThreshold;
 	}

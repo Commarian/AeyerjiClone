@@ -54,7 +54,7 @@ protected:
 
 private:
 	UPROPERTY(Transient)
-	TArray<USplineMeshComponent*> GeneratedSegments;
+	TArray<TObjectPtr<USplineMeshComponent>> GeneratedSegments;
 
 	void GatherOrCreateSegments(int32 NumNeeded);
 	void HideExtraSegments(int32 StartIndex);

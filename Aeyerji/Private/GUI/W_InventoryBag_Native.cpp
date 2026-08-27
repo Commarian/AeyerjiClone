@@ -152,8 +152,18 @@ bool UW_InventoryBag_Native::DropItemUnderCursor(float ForwardOffset)
 		return false;
 	}
 
+	if (!FMath::IsFinite(MouseX) || !FMath::IsFinite(MouseY)
+		|| !FMath::IsFinite(GridExtent.X) || !FMath::IsFinite(GridExtent.Y))
+	{
+		return false;
+	}
+
 	const FVector2D ScreenPos(MouseX, MouseY);
 	const FVector2D LocalPos = GridGeometry.AbsoluteToLocal(ScreenPos);
+	if (!FMath::IsFinite(LocalPos.X) || !FMath::IsFinite(LocalPos.Y))
+	{
+		return false;
+	}
 	if (LocalPos.X < 0.f || LocalPos.Y < 0.f || LocalPos.X > GridExtent.X || LocalPos.Y > GridExtent.Y)
 	{
 		return false;
@@ -180,8 +190,10 @@ bool UW_InventoryBag_Native::DropItemUnderCursor(float ForwardOffset)
 
 		const int32 SizeX = FMath::Max(1, Placement.Size.X);
 		const int32 SizeY = FMath::Max(1, Placement.Size.Y);
-		if (CellX >= Placement.TopLeft.X && CellX < Placement.TopLeft.X + SizeX
-			&& CellY >= Placement.TopLeft.Y && CellY < Placement.TopLeft.Y + SizeY)
+		const int64 EndX = static_cast<int64>(Placement.TopLeft.X) + SizeX;
+		const int64 EndY = static_cast<int64>(Placement.TopLeft.Y) + SizeY;
+		if (CellX >= Placement.TopLeft.X && static_cast<int64>(CellX) < EndX
+			&& CellY >= Placement.TopLeft.Y && static_cast<int64>(CellY) < EndY)
 		{
 			UAeyerjiItemInstance* Item = Placement.ItemInstance ? Placement.ItemInstance.Get() : nullptr;
 			if (!Item && Placement.ItemId.IsValid())

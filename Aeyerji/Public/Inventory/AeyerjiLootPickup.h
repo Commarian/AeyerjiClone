@@ -105,6 +105,13 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Loot|Ownership")
 	void ReserveForPlayerState(APlayerState* PlayerState);
 
+	/**
+	 * Enables or disables the existing authoritative auto-pickup flow for a runtime-spawned pickup.
+	 * Existing overlap and inventory-transfer validation still decide whether the item can be granted.
+	 */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Loot|AutoPickup")
+	void ConfigureRuntimeAutoPickup(bool bEnableAutoPickup, float InAutoPickupRadius);
+
 	UFUNCTION(BlueprintPure, Category="Loot|Ownership")
 	APlayerState* GetReservedPlayerState() const { return ReservedPlayerState; }
 
@@ -361,6 +368,10 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UShapeComponent> ActiveAutoPickupVolume;
 
+	/** Runtime volume currently bound to the authoritative auto-pickup overlap handler. */
+	UPROPERTY(Transient)
+	TObjectPtr<UShapeComponent> BoundAutoPickupVolume;
+
 	UFUNCTION()
 	void OnRep_ItemInstance();
 
@@ -386,6 +397,7 @@ protected:
 	FAeyerjiPickupVisualConfig ResolvePickupVisualConfig(const UAeyerjiItemInstance* InstanceOverride = nullptr) const;
 
 	void ConfigureVolumes();
+	void SanitizeRuntimeSettings();
 	void SetLabelFromItem();
 	void DestroyIfEmpty();
 	UFUNCTION()

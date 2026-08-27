@@ -19,9 +19,24 @@
 
 namespace
 {
+	constexpr float MaxRewardXP = 1000000000000.f;
+	constexpr float MaxRewardScalar = 1000000.f;
+	constexpr float MaxRewardRadius = 10000000.f;
+	constexpr int32 MaxRewardPlayers = 128;
+
+	float SafeRewardValue(const float Value, const float DefaultValue, const float MinValue, const float MaxValue)
+	{
+		return FMath::Clamp(FMath::IsFinite(Value) ? Value : DefaultValue, MinValue, MaxValue);
+	}
+
+	bool IsFiniteRewardVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
     static UAbilitySystemComponent* GetASCFromActor(const AActor* Actor)
     {
-        if (!Actor) return nullptr;
+		if (!IsValid(Actor)) return nullptr;
 
         if (const IAbilitySystemInterface* ASI = Cast<IAbilitySystemInterface>(Actor))
         {
@@ -64,7 +79,7 @@ namespace
             {
                 if (const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>())
                 {
-                    return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Set->GetLevel()));
+					return UAeyerjiDifficultySettings::FloatToGameplayLevel(Set->GetLevel());
                 }
             }
         }
@@ -78,7 +93,7 @@ namespace
                     {
                         if (const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>())
                         {
-                            return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Set->GetLevel()));
+							return UAeyerjiDifficultySettings::FloatToGameplayLevel(Set->GetLevel());
                         }
                     }
                 }
@@ -113,7 +128,7 @@ int32 UAeyerjiXPLibrary::GetHighestPlayerLevel(const UObject* WorldContextObject
         const UAeyerjiAttributeSet* Set = ASC->GetSet<UAeyerjiAttributeSet>();
         if (!Set) continue;
 
-        const int32 Lvl = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Set->GetLevel()));
+		const int32 Lvl = UAeyerjiDifficultySettings::FloatToGameplayLevel(Set->GetLevel());
         if (Lvl > Highest)
         {
             Highest = Lvl;
@@ -131,7 +146,11 @@ float UAeyerjiXPLibrary::GetBaseXPFromActor(const AActor* Actor)
     if (!Reward) return 0.f;
 
     // Use ASC to read the numeric in case GameplayEffects are modifying it.
-    return ASC->GetNumericAttribute(UAeyerjiRewardAttributeSet::GetXPRewardBaseAttribute());
+	return SafeRewardValue(
+		ASC->GetNumericAttribute(UAeyerjiRewardAttributeSet::GetXPRewardBaseAttribute()),
+		0.f,
+		0.f,
+		MaxRewardXP);
 }
 
 float UAeyerjiXPLibrary::ComputeScaledXPReward(const UObject* WorldContextObject,
@@ -140,8 +159,10 @@ float UAeyerjiXPLibrary::ComputeScaledXPReward(const UObject* WorldContextObject
 {
     const int32 Highest = GetHighestPlayerLevel(WorldContextObject);
     const int32 Delta   = FMath::Max(0, Highest - 1);
-    const float Factor  = 1.f + (float)Delta * FMath::Max(0.f, PerLevelScalar);
-    return FMath::Max(0.f, BaseXP * Factor);
+	const double Factor = 1.0 + static_cast<double>(Delta) * SafeRewardValue(
+		PerLevelScalar, 0.f, 0.f, MaxRewardScalar);
+	const double Result = static_cast<double>(SafeRewardValue(BaseXP, 0.f, 0.f, MaxRewardXP)) * Factor;
+	return static_cast<float>(FMath::Clamp(Result, 0.0, static_cast<double>(MaxRewardXP)));
 }
 
 float UAeyerjiXPLibrary::GetScaledXPRewardForEnemy(const UObject* WorldContextObject,
@@ -151,22 +172,34 @@ float UAeyerjiXPLibrary::GetScaledXPRewardForEnemy(const UObject* WorldContextOb
                                                    float DifficultyMinMultiplier,
                                                    float DifficultyMaxMultiplier)
 {
+	UWorld* World = GEngine
+		? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull)
+		: nullptr;
+	if (!World || !IsValid(EnemyActor) || EnemyActor->GetWorld() != World)
+	{
+		return 0.f;
+	}
+
     const float Base = GetBaseXPFromActor(EnemyActor);
     const int32 EnemyLevel = GetActorLevel_Safe(EnemyActor);
     const int32 Delta = FMath::Max(0, EnemyLevel - 1);
-    const float LevelFactor = 1.f + (float)Delta * FMath::Max(0.f, PerLevelScalar);
+	const double LevelFactor = 1.0 + static_cast<double>(Delta) * SafeRewardValue(
+		PerLevelScalar, 0.f, 0.f, MaxRewardScalar);
 
-    const float ClampedDiff = FMath::Clamp(DifficultyScale, 0.f, 1.f);
-    const float DiffMin = FMath::Max(0.f, DifficultyMinMultiplier);
-    const float DiffMax = FMath::Max(0.f, DifficultyMaxMultiplier);
-    const float DifficultyFactor = (DiffMax > 0.f) ? FMath::Lerp(DiffMin, DiffMax, ClampedDiff) : 1.f;
+	const float ClampedDiff = SafeRewardValue(DifficultyScale, 0.f, 0.f, 1.f);
+	const float DiffMin = SafeRewardValue(DifficultyMinMultiplier, 1.f, 0.f, MaxRewardScalar);
+	const float DiffMax = SafeRewardValue(DifficultyMaxMultiplier, 1.f, 0.f, MaxRewardScalar);
+	const double DifficultyFactor = DiffMax > 0.f ? FMath::Lerp(DiffMin, DiffMax, ClampedDiff) : 1.0;
 
-    return FMath::Max(0.f, Base * LevelFactor * DifficultyFactor);
+	return static_cast<float>(FMath::Clamp(
+		static_cast<double>(Base) * LevelFactor * DifficultyFactor,
+		0.0,
+		static_cast<double>(MaxRewardXP)));
 }
 
 void UAeyerjiXPLibrary::SetBaseXPOnActor(AActor* Actor, float BaseXP)
 {
-    if (!Actor) return;
+	if (!IsValid(Actor) || !Actor->HasAuthority()) return;
     if (UAbilitySystemComponent* ASC = GetASCFromActor(Actor))
     {
         // Ensure the Reward set exists at runtime (in case actor didn't add it yet)
@@ -186,7 +219,9 @@ void UAeyerjiXPLibrary::SetBaseXPOnActor(AActor* Actor, float BaseXP)
                 ASC->AddAttributeSetSubobject(NewSet);
             }
         }
-        ASC->SetNumericAttributeBase(UAeyerjiRewardAttributeSet::GetXPRewardBaseAttribute(), FMath::Max(0.f, BaseXP));
+		ASC->SetNumericAttributeBase(
+			UAeyerjiRewardAttributeSet::GetXPRewardBaseAttribute(),
+			SafeRewardValue(BaseXP, 0.f, 0.f, MaxRewardXP));
     }
 }
 
@@ -199,7 +234,7 @@ static bool Resolve_BaseRewardXP(const UAeyerjiRewardTuning* Tuning, float& OutB
     {
         if (Cur->bOverride_BaseRewardXP)
         {
-            OutBaseXP = Cur->BaseRewardXP;
+			OutBaseXP = SafeRewardValue(Cur->BaseRewardXP, 0.f, 0.f, MaxRewardXP);
             return true;
         }
         Cur = Cur->Parent;
@@ -214,7 +249,7 @@ static bool Resolve_PerLevelScalar(const UAeyerjiRewardTuning* Tuning, float& Ou
     {
         if (Cur->bOverride_PerLevelScalar)
         {
-            OutScalar = FMath::Max(0.f, Cur->PerLevelScalar);
+			OutScalar = SafeRewardValue(Cur->PerLevelScalar, 0.f, 0.f, MaxRewardScalar);
             return true;
         }
         Cur = Cur->Parent;
@@ -229,8 +264,8 @@ static bool Resolve_DifficultyMultiplierRange(const UAeyerjiRewardTuning* Tuning
     {
         if (Cur->bOverride_DifficultyMultiplierRange)
         {
-            OutMin = FMath::Max(0.f, Cur->DifficultyMinMultiplier);
-            OutMax = FMath::Max(0.f, Cur->DifficultyMaxMultiplier);
+			OutMin = SafeRewardValue(Cur->DifficultyMinMultiplier, 1.f, 0.f, MaxRewardScalar);
+			OutMax = SafeRewardValue(Cur->DifficultyMaxMultiplier, 1.f, 0.f, MaxRewardScalar);
             return true;
         }
         Cur = Cur->Parent;
@@ -245,7 +280,7 @@ static bool Resolve_KillerBonusPercent(const UAeyerjiRewardTuning* Tuning, float
     {
         if (Cur->bOverride_KillerBonusPercent)
         {
-            OutPercent = FMath::Max(0.f, Cur->KillerBonusPercent);
+			OutPercent = SafeRewardValue(Cur->KillerBonusPercent, 0.f, 0.f, 100.f);
             return true;
         }
         Cur = Cur->Parent;
@@ -255,7 +290,7 @@ static bool Resolve_KillerBonusPercent(const UAeyerjiRewardTuning* Tuning, float
 
 void UAeyerjiXPLibrary::ApplyRewardTuningToActor(AActor* Actor, const UAeyerjiRewardTuning* RewardTuning)
 {
-    if (!Actor || !RewardTuning) return;
+	if (!IsValid(Actor) || !Actor->HasAuthority() || !RewardTuning) return;
     float BaseXP = 0.f;
     if (Resolve_BaseRewardXP(RewardTuning, BaseXP))
     {
@@ -268,13 +303,17 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
                                             AActor* Killer)
 {
     UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr;
-    if (!World) return;
+	if (!World || !IsValid(EnemyActor) || EnemyActor->GetWorld() != World || !EnemyActor->HasAuthority()) return;
 
     // Server authority only
     if (World->GetNetMode() == NM_Client)
     {
         return;
     }
+	if (!IsValid(Killer) || Killer->GetWorld() != World)
+	{
+		Killer = nullptr;
+	}
 
     // If a RewardTuning is bound to the enemy, prefer its scalars when set
     float EffectiveScalar = 0.5f;
@@ -311,7 +350,7 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
         return;
     }
 
-    const float BonusFrac = FMath::Max(0.f, EffectiveBonus) * 0.01f; // 1.0 -> 0.01
+	const float BonusFrac = SafeRewardValue(EffectiveBonus, 0.f, 0.f, 100.f) * 0.01f; // 1.0 -> 0.01
 
     // Try to resolve killer's PlayerState for comparison
     const APlayerState* KillerPS = nullptr;
@@ -329,9 +368,15 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
     AGameStateBase* GS = World->GetGameState();
     if (!GS) return;
 
-    for (APlayerState* PS : GS->PlayerArray)
+	int32 ProcessedPlayers = 0;
+	for (APlayerState* PS : GS->PlayerArray)
     {
-        if (!PS) continue;
+		if (ProcessedPlayers >= MaxRewardPlayers)
+		{
+			break;
+		}
+		if (!IsValid(PS) || PS->GetWorld() != World) continue;
+		++ProcessedPlayers;
 
         // Active player heuristic: must currently possess a pawn in this world
         APawn* Pawn = PS->GetPawn();
@@ -345,7 +390,7 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
 
         const bool bIsKiller = (PS == KillerPS);
         const float Mult = bHasKillerPS ? (bIsKiller ? (1.f + BonusFrac) : (1.f - BonusFrac)) : 1.f;
-        const float ToGive = FMath::Max(0.f, ScaledXP * Mult);
+		const float ToGive = SafeRewardValue(ScaledXP * Mult, 0.f, 0.f, MaxRewardXP);
         Leveling->AddXP(ToGive);
     }
 }
@@ -356,10 +401,19 @@ void UAeyerjiXPLibrary::AwardXPToEnemiesOnPlayerDeath(const UObject* WorldContex
                                                       float Radius)
 {
     UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr;
-    if (!World) return;
+	if (!World || !IsValid(DeadPlayer) || DeadPlayer->GetWorld() != World || !DeadPlayer->HasAuthority()) return;
     if (World->GetNetMode() == NM_Client) return; // server only
+	if (!IsValid(Killer) || Killer->GetWorld() != World)
+	{
+		Killer = nullptr;
+	}
 
-    const FVector Origin = DeadPlayer ? DeadPlayer->GetActorLocation() : FVector::ZeroVector;
+	const FVector Origin = DeadPlayer->GetActorLocation();
+	if (!IsFiniteRewardVector(Origin))
+	{
+		return;
+	}
+	const float SafeRadius = SafeRewardValue(Radius, 2500.f, 0.f, MaxRewardRadius);
 
     const float BaseXP = GetBaseXPFromActor(DeadPlayer);
     if (BaseXP <= 0.f) return;
@@ -380,10 +434,12 @@ void UAeyerjiXPLibrary::AwardXPToEnemiesOnPlayerDeath(const UObject* WorldContex
     }
 
     const int32 PlayerLevel = GetActorLevel_Safe(DeadPlayer);
-    const float Factor = 1.f + (float)FMath::Max(0, PlayerLevel - 1) * FMath::Max(0.f, EffectiveScalar);
-    const float ScaledXP = FMath::Max(0.f, BaseXP * Factor);
+	const double Factor = 1.0 + static_cast<double>(FMath::Max(0, PlayerLevel - 1))
+		* SafeRewardValue(EffectiveScalar, 0.f, 0.f, MaxRewardScalar);
+	const float ScaledXP = static_cast<float>(FMath::Clamp(
+		static_cast<double>(BaseXP) * Factor, 0.0, static_cast<double>(MaxRewardXP)));
 
-    const float BonusFrac = FMath::Max(0.f, EffectiveBonus) * 0.01f;
+	const float BonusFrac = SafeRewardValue(EffectiveBonus, 0.f, 0.f, 100.f) * 0.01f;
 
     const APawn* KillerPawn = Cast<APawn>(Killer);
 
@@ -391,8 +447,10 @@ void UAeyerjiXPLibrary::AwardXPToEnemiesOnPlayerDeath(const UObject* WorldContex
     for (TActorIterator<APawn> It(World); It; ++It)
     {
         APawn* Pawn = *It;
-        if (!Pawn || Pawn->IsPlayerControlled()) continue; // skip players
-        if (Radius > 0.f && FVector::DistSquared(Pawn->GetActorLocation(), Origin) > FMath::Square(Radius))
+		if (!IsValid(Pawn) || Pawn->IsPlayerControlled() || !Cast<AEnemyParentNative>(Pawn)) continue;
+		const FVector PawnLocation = Pawn->GetActorLocation();
+		if (!IsFiniteRewardVector(PawnLocation)) continue;
+		if (SafeRadius > 0.f && FVector::DistSquared(PawnLocation, Origin) > FMath::Square(SafeRadius))
         {
             continue;
         }
@@ -402,7 +460,7 @@ void UAeyerjiXPLibrary::AwardXPToEnemiesOnPlayerDeath(const UObject* WorldContex
 
         const bool bIsKiller = (KillerPawn && (Pawn == KillerPawn));
         const float Mult = bIsKiller ? (1.f + BonusFrac) : (1.f - BonusFrac);
-        const float ToGive = FMath::Max(0.f, ScaledXP * Mult);
+		const float ToGive = SafeRewardValue(ScaledXP * Mult, 0.f, 0.f, MaxRewardXP);
         Leveling->AddXP(ToGive);
     }
 }

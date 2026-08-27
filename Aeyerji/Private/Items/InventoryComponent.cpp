@@ -13,6 +13,7 @@
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Inventory/AeyerjiLootPickup.h"
 #include "Items/ItemDefinition.h"
+#include "Items/ItemGenerator.h"
 #include "Items/ItemInstance.h"
 #include "Logging/AeyerjiLog.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
@@ -39,6 +40,8 @@ namespace
 	constexpr int32 MinimumNormalSlotCount = 5;
 	constexpr int32 CorruptionUnlockLevel = 50;
 	constexpr int32 CorruptionSlotCount = 3;
+	constexpr int32 MaximumInventoryGridDimension = 64;
+	constexpr int32 MaximumSavedInventoryItems = MaximumInventoryGridDimension * MaximumInventoryGridDimension;
 
 	static_assert(static_cast<int32>(EEquipmentSlot::Assault) == static_cast<int32>(EItemCategory::Assault)
 		&& static_cast<int32>(EEquipmentSlot::Guard) == static_cast<int32>(EItemCategory::Guard)
@@ -69,6 +72,24 @@ namespace
 			|| Category == EItemCategory::Flow;
 	}
 
+	bool IsValidItemRarity(EItemRarity Rarity)
+	{
+		if (const UEnum* RarityEnum = StaticEnum<EItemRarity>())
+		{
+			return RarityEnum->IsValidEnumValue(static_cast<int64>(Rarity));
+		}
+		return false;
+	}
+
+	bool IsValidItemModifierOperation(EItemModOp Operation)
+	{
+		if (const UEnum* OperationEnum = StaticEnum<EItemModOp>())
+		{
+			return OperationEnum->IsValidEnumValue(static_cast<int64>(Operation));
+		}
+		return false;
+	}
+
 	FString SafeNameToString(const FName& Name)
 	{
 		return Name.IsValid() ? Name.ToString() : FString(TEXT("InvalidName"));
@@ -92,7 +113,9 @@ namespace
 		Modifiers.RemoveAll(
 			[](const FItemStatModifier& Modifier)
 			{
-				return !IsUsableItemStatAttribute(Modifier.Attribute);
+				return !IsUsableItemStatAttribute(Modifier.Attribute)
+					|| !IsValidItemModifierOperation(Modifier.Op)
+					|| !FMath::IsFinite(Modifier.Magnitude);
 			});
 		return OriginalCount - Modifiers.Num();
 	}
@@ -332,27 +355,6 @@ namespace
 		return nullptr;
 	}
 
-	const UAeyerjiLootTable* ResolveLootTableForInventory(const UAeyerjiInventoryComponent* Inventory)
-	{
-		const UWorld* World = Inventory ? Inventory->GetWorld() : nullptr;
-		const UGameInstance* GameInstance = World ? World->GetGameInstance() : nullptr;
-		const ULootService* LootService = GameInstance ? GameInstance->GetSubsystem<ULootService>() : nullptr;
-		return LootService ? LootService->GetLootTable() : nullptr;
-	}
-
-	bool ShouldRebuildEmptySnapshotAggregation(const UAeyerjiItemInstance* Item)
-	{
-		if (!Item || !Item->Definition || Item->FinalAggregatedModifiers.Num() > 0)
-		{
-			return false;
-		}
-
-		return Item->Definition->BaseModifiers.Num() > 0
-			|| Item->RolledAffixes.Num() > 0
-			|| Item->Definition->GrantedEffects.Num() > 0
-			|| Item->Definition->GrantedAbilities.Num() > 0;
-	}
-
 	FVector FindGroundedDropLocation(UWorld& World, const FVector& DesiredLocation, const AActor* ActorToIgnore)
 	{
 		const float TraceUp = 200.f;
@@ -396,7 +398,7 @@ namespace
 
 			if (const UAeyerjiAttributeSet* Attr = ASC->GetSet<UAeyerjiAttributeSet>())
 			{
-				return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
+				return UAeyerjiDifficultySettings::FloatToGameplayLevel(Attr->GetLevel());
 			}
 
 			return 1;
@@ -619,7 +621,7 @@ bool UAeyerjiInventoryComponent::AddItemInstance(UAeyerjiItemInstance* Item, boo
 	return false;
 }
 
-void UAeyerjiInventoryComponent::Server_AddItem_Implementation(UAeyerjiItemInstance* Item)
+void UAeyerjiInventoryComponent::Server_AddItem(UAeyerjiItemInstance* Item)
 {
 	AddItemInstance(Item);
 }
@@ -1596,6 +1598,8 @@ void UAeyerjiInventoryComponent::Server_MoveItemInGrid_Implementation(const FGui
 	*Existing = Candidate;
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
 	OnInventoryChanged.Broadcast();
+	SyncProfileInventoryCache(TEXT("MoveGridItem"));
+	ScheduleInventoryAutosave(TEXT("MoveGridItem"));
 }
 
 void UAeyerjiInventoryComponent::Server_SwapItemsInGrid_Implementation(const FGuid& ItemIdA, const FGuid& ItemIdB)
@@ -1649,6 +1653,8 @@ void UAeyerjiInventoryComponent::Server_SwapItemsInGrid_Implementation(const FGu
 
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
 	OnInventoryChanged.Broadcast();
+	SyncProfileInventoryCache(TEXT("SwapGridItems"));
+	ScheduleInventoryAutosave(TEXT("SwapGridItems"));
 }
 
 void UAeyerjiInventoryComponent::Server_SwapEquippedSlots_Implementation(EEquipmentSlot Slot, int32 SlotIndexA, int32 SlotIndexB)
@@ -1723,8 +1729,8 @@ void UAeyerjiInventoryComponent::SetGridDimensions(int32 Columns, int32 Rows)
 		return;
 	}
 
-	const int32 NewColumns = FMath::Max(1, Columns);
-	const int32 NewRows = FMath::Max(1, Rows);
+	const int32 NewColumns = FMath::Clamp(Columns, 1, MaximumInventoryGridDimension);
+	const int32 NewRows = FMath::Clamp(Rows, 1, MaximumInventoryGridDimension);
 
 	if (GridColumns == NewColumns && GridRows == NewRows)
 	{
@@ -1797,16 +1803,39 @@ void UAeyerjiInventoryComponent::Server_DropItem_Implementation(const FGuid& Ite
 	if (UWorld* World = GetWorld())
 	{
 		AActor* InventoryOwner = GetOwner();
-		const FVector GroundedLocation = FindGroundedDropLocation(*World, WorldLocation, InventoryOwner);
+		if (!InventoryOwner)
+		{
+			AddItemInstance(Item, true);
+			return;
+		}
+
+		// Client-selected placement is cosmetic and must remain close to the authoritative owner.
+		constexpr float MaximumRequestedDropDistance = 300.f;
+		const FVector OwnerLocation = InventoryOwner->GetActorLocation();
+		FVector RequestedOffset = WorldLocation - OwnerLocation;
+		RequestedOffset.Z = 0.f;
+		if (WorldLocation.ContainsNaN())
+		{
+			RequestedOffset = InventoryOwner->GetActorForwardVector() * 100.f;
+		}
+		else
+		{
+			RequestedOffset = RequestedOffset.GetClampedToMaxSize(MaximumRequestedDropDistance);
+		}
+		const FVector ValidatedDropLocation = OwnerLocation + RequestedOffset;
+		const FRotator ValidatedDropRotation = WorldRotation.ContainsNaN()
+			? InventoryOwner->GetActorRotation()
+			: WorldRotation.GetNormalized();
+		const FVector GroundedLocation = FindGroundedDropLocation(*World, ValidatedDropLocation, InventoryOwner);
 
 		AJ_LOG(this, TEXT("Server_DropItem dropping %s at %s (grounded %s) Rot=%s Class=%s"),
 			*GetNameSafe(Item),
 			*WorldLocation.ToString(),
 			*GroundedLocation.ToString(),
-			*WorldRotation.ToString(),
+			*ValidatedDropRotation.ToString(),
 			*GetNameSafe(LootPickupClass.Get()));
 
-		if (!UAeyerjiInventoryBPFL::SpawnLootByInstance(this, Item, GroundedLocation, WorldRotation, EItemDropDistributionMode::DropOnlyForInstigator, InventoryOwner))
+		if (!UAeyerjiInventoryBPFL::SpawnLootByInstance(this, Item, GroundedLocation, ValidatedDropRotation, EItemDropDistributionMode::DropOnlyForInstigator, InventoryOwner))
 		{
 			if (!AddItemInstance(Item, true))
 			{
@@ -2161,21 +2190,6 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 		return;
 	}
 
-	FAeyerjiInventorySaveData SanitizedSaveData = SaveData;
-	const int32 RemovedInvalidAttributes = SanitizeSaveDataAttributes(SanitizedSaveData);
-	if (RemovedInvalidAttributes > 0)
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[InventorySave] ApplySaveData pruned %d invalid item stat attribute references."),
-			RemovedInvalidAttributes);
-	}
-
-	const TArray<FInventoryItemSnapshot> SavedItemSnapshots = SanitizedSaveData.ItemSnapshots;
-	const TArray<FInventoryItemGridData> SavedGridPlacements = SanitizedSaveData.GridPlacements;
-	const TArray<FEquippedItemEntry> SavedEquippedItems = SanitizedSaveData.EquippedItems;
-	const int32 SavedGridColumns = SanitizedSaveData.GridColumns;
-	const int32 SavedGridRows = SanitizedSaveData.GridRows;
-
 	for (UAeyerjiItemInstance* Item : Items)
 	{
 		UnbindItemInstanceDelegates(Item);
@@ -2197,13 +2211,34 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 	EquippedItems.Reset();
 	ItemSnapshots.Reset();
 
-	GridColumns = SavedGridColumns > 0 ? SavedGridColumns : GridColumns;
-	GridRows = SavedGridRows > 0 ? SavedGridRows : GridRows;
+	GridColumns = FMath::Clamp(
+		SaveData.GridColumns > 0 ? SaveData.GridColumns : GridColumns,
+		1,
+		MaximumInventoryGridDimension);
+	GridRows = FMath::Clamp(
+		SaveData.GridRows > 0 ? SaveData.GridRows : GridRows,
+		1,
+		MaximumInventoryGridDimension);
+	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridColumns, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridRows, this);
 
-	for (const FInventoryItemSnapshot& Snapshot : SavedItemSnapshots)
+	// The profile is uploaded by the owning client. Treat only identity and roll inputs as
+	// transport data; all derived stats, effects, abilities, and dimensions are rebuilt from
+	// server-loaded item definitions so a modified save cannot inject gameplay payloads.
+	TSet<FGuid> RestoredItemIds;
+	const int32 SavedItemCount = FMath::Min(SaveData.ItemSnapshots.Num(), MaximumSavedInventoryItems);
+	for (int32 SnapshotIndex = 0; SnapshotIndex < SavedItemCount; ++SnapshotIndex)
 	{
+		const FInventoryItemSnapshot& Snapshot = SaveData.ItemSnapshots[SnapshotIndex];
 		if (!Snapshot.ItemId.IsValid())
 		{
+			continue;
+		}
+		if (RestoredItemIds.Contains(Snapshot.ItemId))
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[InventorySave] ApplySaveData skipped duplicate ItemId=%s."),
+				*Snapshot.ItemId.ToString());
 			continue;
 		}
 
@@ -2216,20 +2251,40 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 			continue;
 		}
 
-		const FName ItemName = MakeUniqueObjectName(this, UAeyerjiItemInstance::StaticClass(), TEXT("AeyerjiItemInstance"));
-		UAeyerjiItemInstance* Item = NewObject<UAeyerjiItemInstance>(this, UAeyerjiItemInstance::StaticClass(), ItemName);
-		Item->Definition = ResolvedDefinition;
-		Item->Rarity = Snapshot.Rarity;
-		Item->ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Snapshot.ItemLevel);
-		Item->Seed = Snapshot.Seed;
+		EItemRarity CanonicalRarity = EItemRarity::Common;
+		if (IsValidItemRarity(Snapshot.Rarity))
+		{
+			CanonicalRarity = Snapshot.Rarity;
+		}
+		const int32 CanonicalItemLevel = FMath::Max(
+			UAeyerjiDifficultySettings::ClampGameplayLevel(Snapshot.ItemLevel),
+			ResolvedDefinition->GetEffectiveRequiredLevel());
+		int32 CanonicalSeed = Snapshot.Seed;
+		if (CanonicalSeed == 0)
+		{
+			CanonicalSeed = static_cast<int32>(GetTypeHash(Snapshot.ItemId) & MAX_int32);
+			CanonicalSeed = CanonicalSeed != 0 ? CanonicalSeed : 1;
+		}
+
+		UAeyerjiItemInstance* Item = UItemGenerator::RollItemInstance(
+			this,
+			ResolvedDefinition,
+			CanonicalItemLevel,
+			CanonicalRarity,
+			CanonicalSeed,
+			ResolvedDefinition->DefaultSlot);
+		if (!Item)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[InventorySave] ApplySaveData could not rebuild ItemId=%s Definition=%s."),
+				*Snapshot.ItemId.ToString(),
+				*GetNameSafe(ResolvedDefinition));
+			continue;
+		}
+
 		Item->UniqueId = Snapshot.ItemId;
-		Item->RolledAffixes = Snapshot.RolledAffixes;
-		Item->FinalAggregatedModifiers = Snapshot.FinalAggregatedModifiers;
-		Item->GrantedEffects = Snapshot.GrantedEffects;
-		Item->GrantedAbilities = Snapshot.GrantedAbilities;
-		Item->EquippedSlot = Snapshot.EquippedSlot;
-		Item->EquippedSlotIndex = Snapshot.SlotIndex;
-		Item->InventorySize = Snapshot.InventorySize;
+		Item->EquippedSlot = ResolveEquipmentSlot(ResolvedDefinition->DefaultSlot, ResolvedDefinition);
+		Item->EquippedSlotIndex = INDEX_NONE;
 		Item->SetNetAddressable();
 
 		const int32 RemovedRuntimeAttributes = SanitizeItemInstanceAttributes(*Item);
@@ -2241,36 +2296,97 @@ void UAeyerjiInventoryComponent::ApplySaveData(const FAeyerjiInventorySaveData& 
 				*Item->UniqueId.ToString());
 		}
 
-		if (ShouldRebuildEmptySnapshotAggregation(Item))
-		{
-			UE_LOG(LogTemp, Display, TEXT("[InventorySave] Rebuilding empty item aggregation ItemId=%s Def=%s ItemLevel=%d"),
-				*Item->UniqueId.ToString(),
-				*GetNameSafe(Item->Definition.Get()),
-				Item->ItemLevel);
-			Item->RebuildAggregation();
-			if (const UAeyerjiLootTable* LootTable = ResolveLootTableForInventory(this))
-			{
-				Item->ApplyLootStatScaling(LootTable);
-			}
-		}
-
 		Items.Add(Item);
+		RestoredItemIds.Add(Item->UniqueId);
 		BindItemInstanceDelegates(Item);
 	}
-
-	GridPlacements = SavedGridPlacements;
-	for (FInventoryItemGridData& Placement : GridPlacements)
+	if (SaveData.ItemSnapshots.Num() > SavedItemCount)
 	{
-		Placement.ItemInstance = FindItemById(Placement.ItemId);
+		UE_LOG(LogTemp, Warning,
+			TEXT("[InventorySave] ApplySaveData capped item snapshots from %d to %d."),
+			SaveData.ItemSnapshots.Num(),
+			SavedItemCount);
 	}
-	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
 
-	EquippedItems = SavedEquippedItems;
-	for (FEquippedItemEntry& Entry : EquippedItems)
+	// Resolve equipped entries into unique items and unique, currently unlocked slots.
+	TSet<FGuid> EquippedItemIds;
+	const int32 MaximumEquippedEntries =
+		(3 * FMath::Max(MinimumNormalSlotCount, SlotsPerEquipmentCategory)) + CorruptionSlotCount;
+	const int32 SavedEquippedCount = FMath::Min(SaveData.EquippedItems.Num(), MaximumEquippedEntries);
+	for (int32 EntryIndex = 0; EntryIndex < SavedEquippedCount; ++EntryIndex)
 	{
-		Entry.Item = FindItemById(Entry.ItemId);
+		const FEquippedItemEntry& SavedEntry = SaveData.EquippedItems[EntryIndex];
+		UAeyerjiItemInstance* Item = SavedEntry.ItemId.IsValid() ? FindItemById(SavedEntry.ItemId) : nullptr;
+		if (!Item || EquippedItemIds.Contains(Item->UniqueId) || !Item->Definition)
+		{
+			continue;
+		}
+
+		const EEquipmentSlot Slot = ResolveEquipmentSlot(SavedEntry.Slot, Item->Definition.Get());
+		int32 SlotIndex = SanitizeSlotIndex(Slot, SavedEntry.SlotIndex);
+		if (SlotIndex == INDEX_NONE || FindEquippedEntry(Slot, SlotIndex))
+		{
+			SlotIndex = FindFirstFreeSlotIndex(Slot, Item);
+		}
+		if (!CanEquipItemInSlot(Item, Slot, SlotIndex))
+		{
+			continue;
+		}
+
+		FEquippedItemEntry& RestoredEntry = EquippedItems.AddDefaulted_GetRef();
+		RestoredEntry.Slot = Slot;
+		RestoredEntry.SlotIndex = SlotIndex;
+		RestoredEntry.ItemId = Item->UniqueId;
+		RestoredEntry.Item = Item;
+		Item->EquippedSlot = Slot;
+		Item->EquippedSlotIndex = SlotIndex;
+		EquippedItemIds.Add(Item->UniqueId);
 	}
+
+	// Rebuild the grid incrementally, using the canonical item footprint and rejecting
+	// duplicates, overlaps, out-of-bounds positions, and placements for equipped items.
+	TSet<FGuid> PlacedItemIds;
+	const int32 SavedPlacementCount = FMath::Min(SaveData.GridPlacements.Num(), MaximumSavedInventoryItems);
+	for (int32 PlacementIndex = 0; PlacementIndex < SavedPlacementCount; ++PlacementIndex)
+	{
+		const FInventoryItemGridData& SavedPlacement = SaveData.GridPlacements[PlacementIndex];
+		UAeyerjiItemInstance* Item = SavedPlacement.ItemId.IsValid() ? FindItemById(SavedPlacement.ItemId) : nullptr;
+		if (!Item
+			|| EquippedItemIds.Contains(Item->UniqueId)
+			|| PlacedItemIds.Contains(Item->UniqueId))
+		{
+			continue;
+		}
+
+		FInventoryItemGridData Candidate;
+		Candidate.ItemId = Item->UniqueId;
+		Candidate.TopLeft = SavedPlacement.TopLeft;
+		Candidate.Size = FIntPoint(
+			FMath::Max(1, Item->InventorySize.X),
+			FMath::Max(1, Item->InventorySize.Y));
+		Candidate.ItemInstance = Item;
+		if (!CanPlaceAt(Candidate))
+		{
+			continue;
+		}
+
+		GridPlacements.Add(Candidate);
+		PlacedItemIds.Add(Item->UniqueId);
+	}
+
 	ResolveEquippedItems();
+	for (UAeyerjiItemInstance* Item : Items)
+	{
+		if (Item
+			&& !EquippedItemIds.Contains(Item->UniqueId)
+			&& !PlacedItemIds.Contains(Item->UniqueId)
+			&& TryAutoPlaceItem(Item))
+		{
+			PlacedItemIds.Add(Item->UniqueId);
+		}
+	}
+
+	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, GridPlacements, this);
 	MARK_PROPERTY_DIRTY_FROM_NAME(UAeyerjiInventoryComponent, EquippedItems, this);
 
 	RebuildItemSnapshots();

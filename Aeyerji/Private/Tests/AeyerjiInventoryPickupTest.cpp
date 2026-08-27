@@ -204,6 +204,81 @@ bool FAeyerjiInventorySaveDataAttributeSanitizerTest::RunTest(const FString& Par
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiInventoryAuthoritativeSnapshotRebuildTest,
+	"Aeyerji.Inventory.AuthoritativeSnapshotRebuild",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiInventoryAuthoritativeSnapshotRebuildTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	UAeyerjiInventoryComponent* Inventory = MakeTestInventory(GetTransientPackage());
+	UItemDefinition* Definition = MakeTestDefinition(Inventory);
+	TestNotNull(TEXT("Inventory component can be created."), Inventory);
+	TestNotNull(TEXT("Item definition can be created."), Definition);
+	if (!Inventory || !Definition)
+	{
+		return false;
+	}
+
+	FItemStatModifier CanonicalModifier;
+	CanonicalModifier.Attribute = UAeyerjiAttributeSet::GetAttackDamageAttribute();
+	CanonicalModifier.Op = EItemModOp::Additive;
+	CanonicalModifier.Magnitude = 5.f;
+	Definition->BaseModifiers.Add(CanonicalModifier);
+
+	FInventoryItemSnapshot Snapshot;
+	Snapshot.ItemId = FGuid::NewGuid();
+	Snapshot.Definition = Definition;
+	Snapshot.Seed = 12345;
+	Snapshot.InventorySize = FIntPoint(64, 64);
+
+	FItemStatModifier InjectedModifier = CanonicalModifier;
+	InjectedModifier.Magnitude = 999999.f;
+	Snapshot.FinalAggregatedModifiers.Add(InjectedModifier);
+	FItemGrantedEffect InjectedEffect;
+	InjectedEffect.EffectClass = UGE_Regen_Periodic::StaticClass();
+	Snapshot.GrantedEffects.Add(InjectedEffect);
+
+	FAeyerjiInventorySaveData SaveData;
+	SaveData.ItemSnapshots.Add(Snapshot);
+	SaveData.ItemSnapshots.Add(Snapshot);
+	SaveData.GridColumns = 1000;
+	SaveData.GridRows = 1000;
+	FInventoryItemGridData Placement;
+	Placement.ItemId = Snapshot.ItemId;
+	Placement.TopLeft = FIntPoint::ZeroValue;
+	Placement.Size = Snapshot.InventorySize;
+	SaveData.GridPlacements.Add(Placement);
+
+	Inventory->ApplySaveData(SaveData);
+
+	UAeyerjiItemInstance* RestoredItem = Inventory->FindItemById(Snapshot.ItemId);
+	TestNotNull(TEXT("A valid snapshot identity is restored."), RestoredItem);
+	if (RestoredItem)
+	{
+		TestEqual(TEXT("Duplicate snapshot identities create only one owned item."), Inventory->Items.Num(), 1);
+		TestEqual(TEXT("Derived modifiers are rebuilt from the trusted definition."), RestoredItem->FinalAggregatedModifiers.Num(), 1);
+		if (RestoredItem->FinalAggregatedModifiers.Num() == 1)
+		{
+			TestTrue(TEXT("Client-supplied modifier magnitudes are ignored."),
+				FMath::IsNearlyEqual(RestoredItem->FinalAggregatedModifiers[0].Magnitude, 5.f));
+		}
+		TestEqual(TEXT("Client-supplied granted effects are ignored."), RestoredItem->GrantedEffects.Num(), 0);
+		TestEqual(TEXT("Inventory footprint comes from the trusted definition."), RestoredItem->InventorySize, FIntPoint(1, 1));
+	}
+
+	TestEqual(TEXT("Uploaded grid width is capped."), Inventory->GridColumns, 64);
+	TestEqual(TEXT("Uploaded grid height is capped."), Inventory->GridRows, 64);
+	FInventoryItemGridData RestoredPlacement;
+	TestTrue(TEXT("Placement is restored using the canonical footprint."),
+		Inventory->GetPlacementForItem(Snapshot.ItemId, RestoredPlacement));
+	TestEqual(TEXT("Saved placement dimensions cannot override the definition."), RestoredPlacement.Size, FIntPoint(1, 1));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAeyerjiInventorySlotUnlockThresholdTest,
 	"Aeyerji.Inventory.SlotUnlockThresholds",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

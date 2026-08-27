@@ -34,7 +34,7 @@ public:
 	                     UGameplayAbility* InSourceAbility);
 
 	/** Damage hook called on overlap; native code applies a GAS effect unless BP overrides. */
-	UFUNCTION(BlueprintNativeEvent, Category="BurningTrail|Damage")
+	UFUNCTION(BlueprintNativeEvent, BlueprintAuthorityOnly, Category="BurningTrail|Damage")
 	bool ApplyPatchDamage(AActor* Target, float InDamagePerSecond, UGameplayAbility* InSourceAbility);
 
 protected:

@@ -75,7 +75,6 @@ private:
 	/** Flag so we only process one impact. */
 	bool bImpactProcessed;
 	FVector SpawnLocation;
-	TArray<FName> CachedSourceTags;
 
 	/** Suppresses world collision for a short grace window when spawning inside geometry. */
 	bool bWorldCollisionSuppressed = false;
@@ -84,7 +83,6 @@ private:
 	void HandleImpact(AActor* OtherActor, const FHitResult& Hit);
 	void IgnoreActorAndResumeFlight(AActor* ActorToIgnore, const FHitResult& Hit);
 	const AActor* GetSourceActorForTeamCheck() const;
-	bool SharesTagWithSource(const AActor* OtherActor) const;
 	void ApplyCollisionResponseOverrides() const;
 	void SuppressWorldCollisionForGrace(float OverrideDelaySeconds = -1.f);
 	void RestoreWorldCollision();

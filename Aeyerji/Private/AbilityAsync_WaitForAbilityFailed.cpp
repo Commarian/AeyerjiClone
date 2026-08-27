@@ -8,26 +8,35 @@ UAbilityAsync_WaitForAbilityFailed::WaitForAbilityFailed(
 	FGameplayTag FilterTag)
 {
 	auto* Task = NewObject<UAbilityAsync_WaitForAbilityFailed>();
-	Task->ASC         = AbilitySystem;
+	Task->ASC = AbilitySystem;
 	Task->SingleFilter = FilterTag;
+	Task->RegisterWithGameInstance(WorldContextObject);
 	return Task;
 }
 
 void UAbilityAsync_WaitForAbilityFailed::Activate()
 {
-	if (!ASC) { SetReadyToDestroy(); return; }
+	UAbilitySystemComponent* AbilitySystem = ASC.Get();
+	if (!AbilitySystem)
+	{
+		SetReadyToDestroy();
+		return;
+	}
 
-	Handle = ASC->AbilityFailedCallbacks.AddUObject(
+	Handle = AbilitySystem->AbilityFailedCallbacks.AddUObject(
 				this, &UAbilityAsync_WaitForAbilityFailed::HandleFailure);
 }
 
 void UAbilityAsync_WaitForAbilityFailed::SetReadyToDestroy()
 {
-    if (ASC && Handle.IsValid())
-    {
-        ASC->AbilityFailedCallbacks.Remove(Handle);
-    }
-    Super::SetReadyToDestroy();
+	if (UAbilitySystemComponent* AbilitySystem = ASC.Get(); AbilitySystem && Handle.IsValid())
+	{
+		AbilitySystem->AbilityFailedCallbacks.Remove(Handle);
+	}
+
+	Handle.Reset();
+	ASC.Reset();
+	Super::SetReadyToDestroy();
 }
 
 void UAbilityAsync_WaitForAbilityFailed::HandleFailure(

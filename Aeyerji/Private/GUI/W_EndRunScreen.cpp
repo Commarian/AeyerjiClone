@@ -9,15 +9,21 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GUI/AeyerjiStringLibrary.h"
+#include "Systems/AeyerjiDifficultyTuning.h"
 
 namespace
 {
 	FText FormatSeconds(const float TotalSeconds)
 	{
-		const int32 ClampedSeconds = FMath::Max(0, FMath::RoundToInt(TotalSeconds));
-		const int32 Minutes = ClampedSeconds / 60;
-		const int32 Seconds = ClampedSeconds % 60;
-		return FText::FromString(FString::Printf(TEXT("%02d:%02d"), Minutes, Seconds));
+		constexpr double MaxDisplayedSeconds = 3155760000.0;
+		const double SafeSeconds = FMath::Clamp(
+			FMath::IsFinite(TotalSeconds) ? static_cast<double>(TotalSeconds) : 0.0,
+			0.0,
+			MaxDisplayedSeconds);
+		const int64 ClampedSeconds = FMath::RoundToInt64(SafeSeconds);
+		const int64 Minutes = ClampedSeconds / 60;
+		const int64 Seconds = ClampedSeconds % 60;
+		return FText::FromString(FString::Printf(TEXT("%02lld:%02lld"), Minutes, Seconds));
 	}
 
 	FText FormatPercentValue(const float WholePercent)
@@ -25,7 +31,19 @@ namespace
 		FNumberFormattingOptions NumberOptions;
 		NumberOptions.SetMinimumFractionalDigits(0);
 		NumberOptions.SetMaximumFractionalDigits(0);
-		return FText::AsPercent(WholePercent / 100.f, &NumberOptions);
+		const float SafePercent = FMath::Clamp(
+			FMath::IsFinite(WholePercent) ? WholePercent : 0.f, 0.f, 1000000.f);
+		return FText::AsPercent(SafePercent / 100.f, &NumberOptions);
+	}
+
+	int32 DifficultyDisplayValue(const float Slider)
+	{
+		const float SafeSlider = FMath::IsFinite(Slider)
+			? Slider
+			: UAeyerjiDifficultySettings::WorldTierToDifficultySlider(
+				UAeyerjiDifficultySettings::GetNormalWorldTier());
+		return FMath::RoundToInt(FMath::Clamp(
+			SafeSlider, 0.f, UAeyerjiDifficultySettings::DifficultySliderMax));
 	}
 
 	FString MakeFriendlyZoneNameString(const FName ZoneId)
@@ -242,7 +260,8 @@ void UW_EndRunScreen::HandleRetryDifficultyChanged(const float NewValue)
 	{
 		if (UAeyerjiGameInstance* GameInstance = Cast<UAeyerjiGameInstance>(World->GetGameInstance()))
 		{
-			GameInstance->SetDifficultySlider(FMath::Clamp(NewValue, 0.f, 1.f) * 1000.f);
+			const float SafeValue = FMath::IsFinite(NewValue) ? FMath::Clamp(NewValue, 0.f, 1.f) : 0.f;
+			GameInstance->SetDifficultySlider(SafeValue * UAeyerjiDifficultySettings::DifficultySliderMax);
 			RefreshDifficultyControls();
 		}
 	}
@@ -278,8 +297,9 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 {
 	const FText FailureReason = FormatFailureReason(CachedResults.Resolution);
 	const bool bShowUnitsGoal = CachedResults.UnitsKillTarget > 0;
-	const bool bShowTimedRows = CachedResults.TimeLimitSeconds > 0.f;
-	const bool bShowBestTime = CachedResults.BestTimeForDifficultySeconds > 0.f;
+	const bool bShowTimedRows = FMath::IsFinite(CachedResults.TimeLimitSeconds) && CachedResults.TimeLimitSeconds > 0.f;
+	const bool bShowBestTime = FMath::IsFinite(CachedResults.BestTimeForDifficultySeconds)
+		&& CachedResults.BestTimeForDifficultySeconds > 0.f;
 	const bool bShowFailureReason = !FailureReason.IsEmpty();
 
 	if (ResultTitleText)
@@ -301,7 +321,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (UnitsKilledValueText)
 	{
-		UnitsKilledValueText->SetText(FText::AsNumber(CachedResults.UnitsKilled));
+		UnitsKilledValueText->SetText(FText::AsNumber(FMath::Max(0, CachedResults.UnitsKilled)));
 	}
 
 	if (UnitsGoalLabelText)
@@ -311,7 +331,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (UnitsGoalValueText)
 	{
-		UnitsGoalValueText->SetText(FText::AsNumber(CachedResults.UnitsKillTarget));
+		UnitsGoalValueText->SetText(FText::AsNumber(FMath::Max(0, CachedResults.UnitsKillTarget)));
 	}
 
 	if (TimeElapsedLabelText)
@@ -351,7 +371,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (BestTimeValueText)
 	{
-		BestTimeValueText->SetText(CachedResults.BestTimeForDifficultySeconds > 0.f
+		BestTimeValueText->SetText(bShowBestTime
 			? FormatSeconds(CachedResults.BestTimeForDifficultySeconds)
 			: AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("EndRunBestTimeUnavailable")));
 	}
@@ -363,7 +383,7 @@ void UW_EndRunScreen::RefreshDisplayedValues()
 
 	if (DifficultyValueText)
 	{
-		DifficultyValueText->SetText(FText::AsNumber(FMath::RoundToInt(CachedResults.DifficultySlider)));
+		DifficultyValueText->SetText(FText::AsNumber(DifficultyDisplayValue(CachedResults.DifficultySlider)));
 	}
 
 	if (FailureReasonLabelText)
@@ -418,12 +438,13 @@ void UW_EndRunScreen::RefreshDifficultyControls()
 	if (RetryDifficultySlider)
 	{
 		bUpdatingDifficultyControls = true;
-		RetryDifficultySlider->SetValue(FMath::Clamp(GameInstance->GetDifficultySlider() / 1000.f, 0.f, 1.f));
+		RetryDifficultySlider->SetValue(static_cast<float>(DifficultyDisplayValue(GameInstance->GetDifficultySlider()))
+			/ UAeyerjiDifficultySettings::DifficultySliderMax);
 		bUpdatingDifficultyControls = false;
 	}
 
 	if (DifficultyValueText)
 	{
-		DifficultyValueText->SetText(FText::AsNumber(FMath::RoundToInt(GameInstance->GetDifficultySlider())));
+		DifficultyValueText->SetText(FText::AsNumber(DifficultyDisplayValue(GameInstance->GetDifficultySlider())));
 	}
 }

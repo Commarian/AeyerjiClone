@@ -7,6 +7,19 @@
 #include "GUI/AeyerjiItemDragOperation.h"
 #include "Items/InventoryComponent.h"
 
+namespace
+{
+	bool IsFiniteScreenVector(const FVector2D& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y);
+	}
+
+	bool IsUsableInventoryGrid(const FIntPoint& GridSize)
+	{
+		return GridSize.X > 0 && GridSize.Y > 0 && GridSize.X <= 64 && GridSize.Y <= 64;
+	}
+}
+
 bool UW_InventoryBag_DnD::NativeOnDragOver(
     const FGeometry& InGeometry,
     const FDragDropEvent& InDragDropEvent,
@@ -48,7 +61,7 @@ bool UW_InventoryBag_DnD::NativeOnDrop(
 bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* DragOp, const FGeometry& InGeometry, const FDragDropEvent& DragEvent)
 {
 	UAeyerjiInventoryComponent* InventoryComponent = GetInventoryComponent();
-	if (!DragOp || !GridPanel_Items || !InventoryComponent)
+	if (!IsValid(DragOp) || !GridPanel_Items || !InventoryComponent)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[InventoryBagDnD] TryMoveFromDragOperation aborted - DragOp=%d Grid=%d Inventory=%d"),
 			DragOp ? 1 : 0, GridPanel_Items ? 1 : 0, InventoryComponent ? 1 : 0);
@@ -57,8 +70,14 @@ bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* Dr
 
 	const FVector2D ScreenPos = DragEvent.GetScreenSpacePosition();
 	const FVector2D LocalPos = GridPanel_Items->GetCachedGeometry().AbsoluteToLocal(ScreenPos);
-	const FIntPoint GridSize = GetInventoryComponent()->GetGridSize();
+	const FIntPoint GridSize = InventoryComponent->GetGridSize();
 	const FVector2D GridExtent = GridPanel_Items->GetCachedGeometry().GetLocalSize();
+	if (!IsFiniteScreenVector(ScreenPos) || !IsFiniteScreenVector(LocalPos)
+		|| !IsFiniteScreenVector(GridExtent) || !IsUsableInventoryGrid(GridSize)
+		|| GridExtent.X <= 0.f || GridExtent.Y <= 0.f)
+	{
+		return false;
+	}
 	const float CellWidth = (GridSize.X > 0) ? GridExtent.X / FMath::Max(1, GridSize.X) : CellSize.X;
 	const float CellHeight = (GridSize.Y > 0) ? GridExtent.Y / FMath::Max(1, GridSize.Y) : CellSize.Y;
 	const int32 HoverCellX = FMath::Clamp(FMath::FloorToInt(LocalPos.X / FMath::Max(1.f, CellWidth)), 0, FMath::Max(0, GridSize.X - 1));
@@ -72,14 +91,24 @@ bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* Dr
 	}
 
 	// Ensure we have an item instance reference for both bag/equipment drags.
-	if (!DragOp->ItemInstance && DragOp->ItemId.IsValid())
+	if (!DragOp->ItemId.IsValid())
 	{
-		DragOp->ItemInstance = InventoryComponent->FindItemById(DragOp->ItemId);
+		return false;
+	}
+	if (UAeyerjiItemInstance* OwnedItem = InventoryComponent->FindItemById(DragOp->ItemId))
+	{
+		DragOp->ItemInstance = OwnedItem;
+	}
+	else
+	{
+		return false;
 	}
 
-	const FIntPoint ItemSize = DragOp->ItemInstance
+	FIntPoint ItemSize = DragOp->ItemInstance
 		? DragOp->ItemInstance->InventorySize
 		: DragOp->ItemSize;
+	ItemSize.X = FMath::Clamp(ItemSize.X, 1, GridSize.X);
+	ItemSize.Y = FMath::Clamp(ItemSize.Y, 1, GridSize.Y);
 
 	switch (DragOp->Source)
 	{
@@ -95,8 +124,10 @@ bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* Dr
 			{
 				const int32 SizeX = FMath::Max(1, Placement.Size.X);
 				const int32 SizeY = FMath::Max(1, Placement.Size.Y);
-				return CellX >= Placement.TopLeft.X && CellX < Placement.TopLeft.X + SizeX
-					&& CellY >= Placement.TopLeft.Y && CellY < Placement.TopLeft.Y + SizeY;
+				const int64 EndX = static_cast<int64>(Placement.TopLeft.X) + SizeX;
+				const int64 EndY = static_cast<int64>(Placement.TopLeft.Y) + SizeY;
+				return CellX >= Placement.TopLeft.X && static_cast<int64>(CellX) < EndX
+					&& CellY >= Placement.TopLeft.Y && static_cast<int64>(CellY) < EndY;
 			};
 
 			const FInventoryItemGridData* TargetPlacement = Placements.FindByPredicate(
@@ -150,7 +181,11 @@ bool UW_InventoryBag_DnD::TryMoveFromDragOperation(UAeyerjiItemDragOperation* Dr
 	return false;
 }
 
-bool UW_InventoryBag_DnD::ScreenToGridCell(const FVector2D& ScreenPos, FIntPoint ItemSize, const FVector2D& /*GrabOffsetPx*/, FIntPoint& OutTopLeft) const
+bool UW_InventoryBag_DnD::ScreenToGridCell(
+	const FVector2D& ScreenPos,
+	FIntPoint ItemSize,
+	const FVector2D& GrabOffsetPx,
+	FIntPoint& OutTopLeft) const
 {
 	if (!GridPanel_Items)
 	{
@@ -158,18 +193,36 @@ bool UW_InventoryBag_DnD::ScreenToGridCell(const FVector2D& ScreenPos, FIntPoint
 	}
 
 	const FGeometry GridGeometry = GridPanel_Items->GetCachedGeometry();
+	if (!IsFiniteScreenVector(ScreenPos))
+	{
+		return false;
+	}
 	const FVector2D LocalPos = GridGeometry.AbsoluteToLocal(ScreenPos);
 
-	const FIntPoint GridSize = GetInventoryComponent()->GetGridSize();
+	UAeyerjiInventoryComponent* InventoryComponent = GetInventoryComponent();
+	if (!InventoryComponent)
+	{
+		return false;
+	}
+	const FIntPoint GridSize = InventoryComponent->GetGridSize();
 	const FVector2D GridExtent = GridGeometry.GetLocalSize();
+	if (!IsFiniteScreenVector(LocalPos) || !IsFiniteScreenVector(GrabOffsetPx) || !IsFiniteScreenVector(GridExtent)
+		|| !IsUsableInventoryGrid(GridSize) || GridExtent.X <= 0.f || GridExtent.Y <= 0.f)
+	{
+		return false;
+	}
+	ItemSize.X = FMath::Clamp(ItemSize.X, 1, GridSize.X);
+	ItemSize.Y = FMath::Clamp(ItemSize.Y, 1, GridSize.Y);
 	const float DerivedCellWidth = (GridSize.X > 0) ? GridExtent.X / GridSize.X : CellSize.X;
 	const float DerivedCellHeight = (GridSize.Y > 0) ? GridExtent.Y / GridSize.Y : CellSize.Y;
 
 	const float CellWidth = FMath::Max(1.f, DerivedCellWidth);
 	const float CellHeight = FMath::Max(1.f, DerivedCellHeight);
 
-	int32 CellX = FMath::FloorToInt(LocalPos.X / CellWidth);
-	int32 CellY = FMath::FloorToInt(LocalPos.Y / CellHeight);
+	// Preserve the cell under the cursor where the drag began instead of snapping the item's top-left to the cursor.
+	const FVector2D DesiredTopLeft = LocalPos - GrabOffsetPx;
+	int32 CellX = FMath::FloorToInt(DesiredTopLeft.X / CellWidth);
+	int32 CellY = FMath::FloorToInt(DesiredTopLeft.Y / CellHeight);
 
 	CellX = FMath::Clamp(CellX, 0, FMath::Max(0, GridSize.X - ItemSize.X));
 	CellY = FMath::Clamp(CellY, 0, FMath::Max(0, GridSize.Y - ItemSize.Y));

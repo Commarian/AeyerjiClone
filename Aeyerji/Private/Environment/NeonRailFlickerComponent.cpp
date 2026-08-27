@@ -3,8 +3,21 @@
 
 #include "Components/SplineMeshComponent.h"
 #include "Environment/NeonRailBuilderComponent.h"
+#include "Engine/World.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "TimerManager.h"
+
+namespace
+{
+	constexpr int32 MaxFlickerSegments = 4096;
+	constexpr float MinFlickerDelay = 0.01f;
+	constexpr float MaxFlickerDelay = 3600.f;
+
+	float SafeFlickerValue(const float Value, const float DefaultValue, const float MinValue, const float MaxValue)
+	{
+		return FMath::Clamp(FMath::IsFinite(Value) ? Value : DefaultValue, MinValue, MaxValue);
+	}
+}
 
 UNeonRailFlickerComponent::UNeonRailFlickerComponent()
 {
@@ -14,6 +27,10 @@ UNeonRailFlickerComponent::UNeonRailFlickerComponent()
 void UNeonRailFlickerComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	if (GetWorld() && GetWorld()->IsNetMode(NM_DedicatedServer))
+	{
+		return;
+	}
 
 	ResolveBuilder();
 	RefreshSegments();
@@ -21,11 +38,12 @@ void UNeonRailFlickerComponent::BeginPlay()
 
 void UNeonRailFlickerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (Builder && bHasBoundDelegate)
+	if (UNeonRailBuilderComponent* ExistingBuilder = BoundBuilder.Get())
 	{
-		Builder->OnRailRebuilt.RemoveAll(this);
-		bHasBoundDelegate = false;
+		ExistingBuilder->OnRailRebuilt.RemoveAll(this);
 	}
+	bHasBoundDelegate = false;
+	BoundBuilder.Reset();
 
 	ClearFlickerState();
 
@@ -34,20 +52,40 @@ void UNeonRailFlickerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason
 
 void UNeonRailFlickerComponent::ResolveBuilder()
 {
-	if (Builder)
+	AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		Builder = nullptr;
+		return;
+	}
+
+	if (IsValid(Builder) && Builder->GetOwner() == Owner && Builder->GetWorld() == GetWorld())
 	{
 		return;
 	}
 
-	if (AActor* Owner = GetOwner())
-	{
-		Builder = Owner->FindComponentByClass<UNeonRailBuilderComponent>();
-	}
+	Builder = Owner->FindComponentByClass<UNeonRailBuilderComponent>();
 }
 
 void UNeonRailFlickerComponent::RefreshSegments()
 {
 	ResolveBuilder();
+	if (GetWorld() && GetWorld()->IsNetMode(NM_DedicatedServer))
+	{
+		ClearFlickerState();
+		return;
+	}
+
+	if (UNeonRailBuilderComponent* ExistingBuilder = BoundBuilder.Get(); ExistingBuilder && ExistingBuilder != Builder)
+	{
+		ExistingBuilder->OnRailRebuilt.RemoveAll(this);
+		bHasBoundDelegate = false;
+		BoundBuilder.Reset();
+	}
+	else if (bHasBoundDelegate && !BoundBuilder.IsValid())
+	{
+		bHasBoundDelegate = false;
+	}
 
 	if (!Builder)
 	{
@@ -57,8 +95,9 @@ void UNeonRailFlickerComponent::RefreshSegments()
 
 	if (!bHasBoundDelegate)
 	{
-		Builder->OnRailRebuilt.AddDynamic(this, &UNeonRailFlickerComponent::HandleRailRebuilt);
+		Builder->OnRailRebuilt.AddUniqueDynamic(this, &UNeonRailFlickerComponent::HandleRailRebuilt);
 		bHasBoundDelegate = true;
+		BoundBuilder = Builder;
 	}
 
 	TArray<USplineMeshComponent*> Segments;
@@ -85,15 +124,23 @@ void UNeonRailFlickerComponent::SetupForSegments(const TArray<USplineMeshCompone
 		return;
 	}
 
-	TrackedSegments.Reserve(Segments.Num());
-	SegmentMaterials.Reserve(Segments.Num());
+	const int32 SegmentCapacity = FMath::Min(Segments.Num(), MaxFlickerSegments);
+	TrackedSegments.Reserve(SegmentCapacity);
+	SegmentMaterials.Reserve(SegmentCapacity);
+	TSet<USplineMeshComponent*> SeenSegments;
 
 	for (USplineMeshComponent* Segment : Segments)
 	{
-		if (!Segment)
+		if (TrackedSegments.Num() >= SegmentCapacity)
+		{
+			break;
+		}
+
+		if (!IsValid(Segment) || Segment->GetOwner() != GetOwner() || SeenSegments.Contains(Segment))
 		{
 			continue;
 		}
+		SeenSegments.Add(Segment);
 
 		Segment->SetVisibility(true, true);
 
@@ -109,7 +156,9 @@ void UNeonRailFlickerComponent::SetupForSegments(const TArray<USplineMeshCompone
 				DynMaterial = Segment->CreateDynamicMaterialInstance(0, Material);
 				if (DynMaterial && EmissiveParameterName != NAME_None)
 				{
-					DynMaterial->SetScalarParameterValue(EmissiveParameterName, EmissiveOnValue);
+					DynMaterial->SetScalarParameterValue(
+						EmissiveParameterName,
+						SafeFlickerValue(EmissiveOnValue, 5.f, -1000000.f, 1000000.f));
 				}
 			}
 		}
@@ -119,7 +168,9 @@ void UNeonRailFlickerComponent::SetupForSegments(const TArray<USplineMeshCompone
 
 	for (int32 Index = 0; Index < TrackedSegments.Num(); ++Index)
 	{
-		const float InitialDelay = bRandomiseInitialDelay ? FMath::FRandRange(MinOnTime, MaxOnTime) : GetRandomOnTime();
+		const float InitialDelay = bRandomiseInitialDelay
+			? GetRandomOnTime()
+			: SafeFlickerValue(MinOnTime, 0.35f, MinFlickerDelay, MaxFlickerDelay);
 		ScheduleNextToggle(Index, InitialDelay);
 	}
 }
@@ -165,7 +216,13 @@ void UNeonRailFlickerComponent::ApplySegmentState(int32 Index, bool bIsLit)
 		{
 			if (EmissiveParameterName != NAME_None)
 			{
-				DynMaterial->SetScalarParameterValue(EmissiveParameterName, bIsLit ? EmissiveOnValue : EmissiveOffValue);
+				DynMaterial->SetScalarParameterValue(
+					EmissiveParameterName,
+					SafeFlickerValue(
+						bIsLit ? EmissiveOnValue : EmissiveOffValue,
+						bIsLit ? 5.f : 0.f,
+						-1000000.f,
+						1000000.f));
 			}
 		}
 	}
@@ -181,13 +238,10 @@ void UNeonRailFlickerComponent::ScheduleNextToggle(int32 Index, float OverrideDe
 	if (UWorld* World = GetWorld())
 	{
 		FFlickerSegment& Entry = TrackedSegments[Index];
-		const float Delay = (OverrideDelay >= 0.f) ? OverrideDelay : (Entry.bIsLit ? GetRandomOnTime() : GetRandomOffTime());
-
-		if (Delay <= KINDA_SMALL_NUMBER)
-		{
-			ToggleSegment(Index);
-			return;
-		}
+		const float RequestedDelay = FMath::IsFinite(OverrideDelay) && OverrideDelay >= 0.f
+			? OverrideDelay
+			: (Entry.bIsLit ? GetRandomOnTime() : GetRandomOffTime());
+		const float Delay = SafeFlickerValue(RequestedDelay, MinFlickerDelay, MinFlickerDelay, MaxFlickerDelay);
 
 		World->GetTimerManager().SetTimer(
 			Entry.TimerHandle,
@@ -218,10 +272,14 @@ void UNeonRailFlickerComponent::ToggleSegment(int32 Index)
 
 float UNeonRailFlickerComponent::GetRandomOnTime() const
 {
-	return (MaxOnTime <= MinOnTime) ? MinOnTime : FMath::FRandRange(MinOnTime, MaxOnTime);
+	const float SafeMin = SafeFlickerValue(MinOnTime, 0.35f, MinFlickerDelay, MaxFlickerDelay);
+	const float SafeMax = SafeFlickerValue(MaxOnTime, SafeMin, MinFlickerDelay, MaxFlickerDelay);
+	return FMath::FRandRange(FMath::Min(SafeMin, SafeMax), FMath::Max(SafeMin, SafeMax));
 }
 
 float UNeonRailFlickerComponent::GetRandomOffTime() const
 {
-	return (MaxOffTime <= MinOffTime) ? MinOffTime : FMath::FRandRange(MinOffTime, MaxOffTime);
+	const float SafeMin = SafeFlickerValue(MinOffTime, 0.05f, MinFlickerDelay, MaxFlickerDelay);
+	const float SafeMax = SafeFlickerValue(MaxOffTime, SafeMin, MinFlickerDelay, MaxFlickerDelay);
+	return FMath::FRandRange(FMath::Min(SafeMin, SafeMax), FMath::Max(SafeMin, SafeMax));
 }

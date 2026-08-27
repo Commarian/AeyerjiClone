@@ -92,6 +92,29 @@ struct AEYERJI_API FAeyerjiEnemyMeshOverrides
 };
 
 /**
+ * Optional root-capsule sizing shared by movement collision, spawn clearance, click presentation,
+ * and floating-status-bar width. The archetype applicator updates it during construction so the
+ * inherited CapsuleComponent can be inspected directly in each enemy Blueprint viewport.
+ */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiEnemyCapsuleOverrides
+{
+	GENERATED_BODY()
+
+	/** Enables centralized capsule sizing for this archetype instead of the enemy Blueprint's legacy capsule values. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Collision")
+	bool bOverrideCapsuleSize = false;
+
+	/** Unscaled root-capsule radius in cm; this also provides the physical-width reference used by floating health bars. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Collision", meta=(EditCondition="bOverrideCapsuleSize", ClampMin="1.0", Units="cm"))
+	float CapsuleRadius = 42.f;
+
+	/** Unscaled root-capsule half-height in cm; values below CapsuleRadius are safely raised to the radius at application time. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Collision", meta=(EditCondition="bOverrideCapsuleSize", ClampMin="1.0", Units="cm"))
+	float CapsuleHalfHeight = 96.f;
+};
+
+/**
  * Data-driven enemy archetype definition used by enemy pawns on spawn.
  */
 UCLASS(BlueprintType)
@@ -165,6 +188,10 @@ public:
 	// Optional mesh/animation overrides for the pawn's skeletal mesh component.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Visuals")
 	FAeyerjiEnemyMeshOverrides MeshOverrides;
+
+	// Optional root-capsule override applied during construction and gameplay on every network role.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Collision")
+	FAeyerjiEnemyCapsuleOverrides CapsuleOverrides;
 
 	// Optional actor class to spawn when this enemy dies, such as a geometry collection corpse or gib actor.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Death", meta=(ToolTip="Optional actor class to spawn when this enemy dies, such as a geometry collection corpse or gib actor."))

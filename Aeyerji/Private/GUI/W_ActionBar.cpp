@@ -17,7 +17,6 @@
 #include "Engine/GameInstance.h"
 #include "GameplayEffect.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
-#include "Kismet/GameplayStatics.h"
 #include "Logging/AeyerjiLog.h"
 #include "GameFramework/Pawn.h"
 #include "HAL/IConsoleManager.h"
@@ -125,14 +124,23 @@ void UW_ActionBar::Refresh(const TArray<FAeyerjiAbilitySlot> &NewBar)
 	{
 		if (UW_ActionSlotNative *SlotWidget = Cast<UW_ActionSlotNative>(SlotsBox->GetChildAt(Idx)))
 		{
+			FAeyerjiAbilitySlot PresentationSlot = NewBar[Idx];
+
+			// The replicated slot stores the icon as a soft reference. Resolve it only for
+			// this local UMG copy so a client can paint the slot immediately after load.
+			if (!PresentationSlot.Icon && !PresentationSlot.SavedIcon.IsNull())
+			{
+				PresentationSlot.Icon = PresentationSlot.SavedIcon.LoadSynchronous();
+			}
+
 			SlotWidget->StoredSlotIndex = Idx;
-			SlotWidget->StoredSlotData = NewBar[Idx];
+			SlotWidget->StoredSlotData = PresentationSlot;
 			SlotWidget->bIsPotionSlot = AeyerjiAbilitySlotUtils::IsPotionSlotIndex(Idx, IncomingSize);
 			SlotWidget->ClearCooldownDisplay();
 
-			if (NewBar[Idx].Icon)
+			if (PresentationSlot.Icon)
 			{
-				SlotWidget->SetIcon(NewBar[Idx].Icon);
+				SlotWidget->SetIcon(PresentationSlot.Icon);
 			}
 			else
 			{
@@ -228,6 +236,14 @@ void UW_ActionBar::NativeConstruct()
 
 void UW_ActionBar::NativeDestruct()
 {
+	if (PickerInstance)
+	{
+		PickerInstance->OnAbilityPicked.RemoveDynamic(this, &UW_ActionBar::HandleAbilityPicked);
+		PickerInstance->OnAbilityPickerClosed.RemoveDynamic(this, &UW_ActionBar::HandleAbilityPickerClosed);
+		PickerInstance->Close();
+		PickerInstance = nullptr;
+	}
+
 	UnbindCooldownEffectDelegates();
 	Super::NativeDestruct();
 }
@@ -273,12 +289,7 @@ void UW_ActionBar::HandleSlotRightClicked(int32 Index)
 		return;
 	}
 
-	if (PickerInstance && PickerInstance->IsInViewport())
-	{
-		PickerInstance->SetVisibility(ESlateVisibility::Visible);
-		PickerInstance->SetFocus();
-	}
-	else
+	if (!PickerInstance)
 	{
 		PickerInstance = CreateWidget<UW_AbilitySelectionNative>(PC, PickerClass);
 		if (!PickerInstance)
@@ -288,16 +299,37 @@ void UW_ActionBar::HandleSlotRightClicked(int32 Index)
 		}
 
 		PickerInstance->OnAbilityPicked.AddDynamic(this, &UW_ActionBar::HandleAbilityPicked);
-		PickerInstance->AddToViewport(100);
-		PickerInstance->SetVisibility(ESlateVisibility::Visible);
-		PickerInstance->SetFocus();
+		PickerInstance->OnAbilityPickerClosed.AddDynamic(this, &UW_ActionBar::HandleAbilityPickerClosed);
 	}
 
-	PickerInstance->EditingSlotIndex = Index;
-	PickerInstance->SetPotionSlotContext(
-		AeyerjiAbilitySlotUtils::IsPotionSlotIndex(Index, SlotsBox ? SlotsBox->GetChildrenCount() : 0));
-	PickerInstance->SetAbilitySystemForTooltip(ResolveAbilitySystem());
-	PickerInstance->RebuildAbilityGrid();
+	PickerInstance->ConfigureForSlot(
+		Index,
+		AeyerjiAbilitySlotUtils::IsPotionSlotIndex(Index, SlotsBox ? SlotsBox->GetChildrenCount() : 0),
+		EAeyerjiAbilityPickerMode::Assign,
+		ResolveAbilitySystem());
+	PickerInstance->Open();
+}
+
+bool UW_ActionBar::CloseAbilityPicker()
+{
+	if (!PickerInstance || (!PickerInstance->IsOpen() && !PickerInstance->IsInViewport()))
+	{
+		return false;
+	}
+
+	PickerInstance->Close();
+	return true;
+}
+
+bool UW_ActionBar::IsAbilityPickerOpen() const
+{
+	return PickerInstance && PickerInstance->IsOpen();
+}
+
+void UW_ActionBar::HandleAbilityPickerClosed()
+{
+	ActiveAbilityTooltipSource.Reset();
+	LastAbilityTooltipData = FAeyerjiAbilityTooltipData();
 }
 
 bool UW_ActionBar::ActivateSlotByIndex(int32 SlotIndex)
@@ -325,7 +357,7 @@ bool UW_ActionBar::ActivateSlotByIndex(int32 SlotIndex)
 
 		{
 
-			AJ_LOG(this, TEXT("ActivateSlotByIndex() succeeded via PlayerState for %d"), SlotIndex);
+			AJ_LOG(this, TEXT("ActivateSlotByIndex() input handled via PlayerState for %d"), SlotIndex);
 
 			return true;
 		}
@@ -456,11 +488,11 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 		return false;
 	}
 
-	/* ---------- pause gate (time-dilation 1.0 == NOT paused) ---------- */
-	if (!FMath::IsNearlyEqual(UGameplayStatics::GetGlobalTimeDilation(GetWorld()), 1.f))
+	// The picker owns local UI focus. Networked worlds continue running, but action-bar
+	// activation is blocked locally until the picker closes.
+	if (IsAbilityPickerOpen())
 	{
-		ShowActionBarDebugMessage(this, TEXT("Game is Paused"));
-		return false; // abort - don't try to cast while paused
+		return false;
 	}
 
 	FAeyerjiAbilitySlot EffectiveSlotData = SlotData;
@@ -533,11 +565,13 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 
 	if (bBlockedByCooldown)
 	{
-		AJ_LOG(this, TEXT("ExecuteAbilitySlot() blocked by cooldown (Tag=%s Class=%s)"),
+		AJ_LOG(this, TEXT("ExecuteAbilitySlot() cooldown feedback handled (Tag=%s Class=%s)"),
 			*TagString,
 			*GetNameSafe(EffectiveSlotData.Class));
 		ShowActionBarDebugMessage(this, TEXT("Ability is on cooldown"));
-		return false;
+		// A valid slot press was consumed, even though its gameplay effect is unavailable.
+		// This keeps Blueprint callers from treating expected cooldown feedback as a slot error.
+		return true;
 	}
 
 	const bool bClientWorld = GetWorld() && GetWorld()->GetNetMode() == NM_Client;
@@ -674,10 +708,10 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 	{
 		if (IsAbilityOnCooldown(ASC, EffectiveSlotData.Class))
 		{
-			AJ_LOG(this, TEXT("ExecuteAbilitySlot() %s on cooldown, blocking targeting"),
+			AJ_LOG(this, TEXT("ExecuteAbilitySlot() %s on cooldown, handling targeting input"),
 				*GetNameSafe(EffectiveSlotData.Class));
 			ShowActionBarDebugMessage(this, TEXT("Ability is on cooldown"));
-			return false;
+			return true;
 		}
 
 		if (auto *PC = GetOwningPlayer<AAeyerjiPlayerController>())
@@ -731,6 +765,7 @@ void UW_ActionBar::HandleAbilityPicked(int32 SlotIndex, FAeyerjiAbilitySlot Pick
 
 				CooldownTickAccumulator = CooldownTickInterval;
 				UpdateCooldowns();
+				CloseAbilityPicker();
 			}
 		}
 	}

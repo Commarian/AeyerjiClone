@@ -13,6 +13,7 @@
 #include "Items/ItemAffixDefinition.h"
 #include "Items/ItemDefinition.h"
 #include "Misc/FileHelper.h"
+#include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "Misc/Parse.h"
 #include "NiagaraSystem.h"
@@ -39,6 +40,15 @@ UItemDefinitionJsonImportCommandlet::UItemDefinitionJsonImportCommandlet()
 namespace
 {
 constexpr TCHAR DefaultItemDefinitionDestination[] = TEXT("/Game/Inventory/Items/Definitions");
+constexpr int64 MaxImportJsonBytes = 16ll * 1024ll * 1024ll;
+constexpr int32 MaxImportedItems = 4096;
+constexpr int32 MaxImportedTags = 256;
+constexpr int32 MaxImportedAffixes = 64;
+constexpr int32 MaxImportedModifiers = 2048;
+constexpr int32 MaxImportedGrants = 256;
+constexpr int32 MaxImportedSetByCallerMagnitudes = 64;
+constexpr int32 MaxImportedSynergyColors = 64;
+constexpr int32 MaxImportedTextLength = 16384;
 
 struct FItemImportReport
 {
@@ -80,8 +90,84 @@ bool TryGetString(const FJsonObject& Object, const TCHAR* FieldName, FString& Ou
 		return false;
 	}
 
-	OutValue = (*Value)->AsString();
+	OutValue = (*Value)->AsString().Left(MaxImportedTextLength);
 	return true;
+}
+
+/** Reads one finite JSON number and bounds it before any integer conversion. */
+bool TryReadFiniteNumber(
+	const TSharedPtr<FJsonValue>& Value,
+	double& OutValue,
+	const double MinValue,
+	const double MaxValue)
+{
+	if (!Value.IsValid() || Value->Type != EJson::Number)
+	{
+		return false;
+	}
+
+	const double Number = Value->AsNumber();
+	if (!FMath::IsFinite(Number))
+	{
+		return false;
+	}
+
+	OutValue = FMath::Clamp(Number, MinValue, MaxValue);
+	return true;
+}
+
+/** Reads an optional finite number field and preserves the current output when absent or malformed. */
+bool TryApplyFiniteNumberField(
+	const FJsonObject& Object,
+	const TCHAR* FieldName,
+	float& OutValue,
+	const float MinValue,
+	const float MaxValue)
+{
+	const TSharedPtr<FJsonValue>* Value = FindJsonField(Object, FieldName);
+	double Number = 0.0;
+	if (!Value || !TryReadFiniteNumber(*Value, Number, MinValue, MaxValue))
+	{
+		return false;
+	}
+
+	OutValue = static_cast<float>(Number);
+	return true;
+}
+
+bool TryApplyBoundedIntField(
+	const FJsonObject& Object,
+	const TCHAR* FieldName,
+	int32& OutValue,
+	const int32 MinValue,
+	const int32 MaxValue)
+{
+	const TSharedPtr<FJsonValue>* Value = FindJsonField(Object, FieldName);
+	double Number = 0.0;
+	if (!Value || !TryReadFiniteNumber(*Value, Number, MinValue, MaxValue))
+	{
+		return false;
+	}
+
+	OutValue = FMath::RoundToInt(Number);
+	return true;
+}
+
+bool TryReadOptionalObjectNumber(
+	const FJsonObject& Object,
+	const TCHAR* FieldName,
+	const double DefaultValue,
+	double& OutValue,
+	const double MinValue,
+	const double MaxValue)
+{
+	const TSharedPtr<FJsonValue>* Value = FindJsonField(Object, FieldName);
+	if (!Value)
+	{
+		OutValue = FMath::Clamp(DefaultValue, MinValue, MaxValue);
+		return true;
+	}
+	return TryReadFiniteNumber(*Value, OutValue, MinValue, MaxValue);
 }
 
 /** Reads an enum value by C++ name, short name, or display name. */
@@ -198,6 +284,11 @@ void ApplyObjectField(const FJsonObject& Object, const TCHAR* FieldName, TObject
 	}
 
 	Path = NormalizeObjectPath(Path);
+	if (Path.Len() > 1024)
+	{
+		Report.Warn(FString::Printf(TEXT("%s: %s asset path is too long."), *ItemName, FieldName));
+		return;
+	}
 	OutObject = Path.IsEmpty() ? nullptr : LoadObject<TObject>(nullptr, *Path);
 	if (!Path.IsEmpty() && !OutObject)
 	{
@@ -229,6 +320,11 @@ void ApplyClassField(const FJsonObject& Object, const TCHAR* FieldName, TSubclas
 	}
 
 	Path = NormalizeObjectPath(Path);
+	if (Path.Len() > 1024)
+	{
+		Report.Warn(FString::Printf(TEXT("%s: %s class path is too long."), *ItemName, FieldName));
+		return;
+	}
 	OutClass = Path.IsEmpty() ? nullptr : FSoftClassPath(Path).TryLoadClass<TClass>();
 	if (!Path.IsEmpty() && !*OutClass)
 	{
@@ -248,6 +344,10 @@ void ApplyGameplayTags(const FJsonObject& Object, const TCHAR* FieldName, FGamep
 	OutTags.Reset();
 	auto AddTag = [&OutTags, &Report, &ItemName, FieldName](const FString& TagText)
 	{
+		if (OutTags.Num() >= MaxImportedTags || TagText.Len() > 256)
+		{
+			return;
+		}
 		const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(FName(*TagText), false);
 		if (Tag.IsValid())
 		{
@@ -271,8 +371,11 @@ void ApplyGameplayTags(const FJsonObject& Object, const TCHAR* FieldName, FGamep
 		return;
 	}
 
-	for (const TSharedPtr<FJsonValue>& Entry : (*JsonValue)->AsArray())
+	const TArray<TSharedPtr<FJsonValue>>& TagEntries = (*JsonValue)->AsArray();
+	const int32 TagEntryCount = FMath::Min(TagEntries.Num(), MaxImportedTags);
+	for (int32 TagEntryIndex = 0; TagEntryIndex < TagEntryCount; ++TagEntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& Entry = TagEntries[TagEntryIndex];
 		if (Entry.IsValid() && Entry->Type == EJson::String)
 		{
 			AddTag(Entry->AsString());
@@ -293,20 +396,39 @@ bool TryReadIntPoint(const TSharedPtr<FJsonValue>& Value, FIntPoint& OutPoint)
 		const TArray<TSharedPtr<FJsonValue>>& Values = Value->AsArray();
 		if (Values.Num() >= 2)
 		{
-			OutPoint.X = FMath::RoundToInt(Values[0]->AsNumber());
-			OutPoint.Y = FMath::RoundToInt(Values[1]->AsNumber());
+			double X = 0.0;
+			double Y = 0.0;
+			if (!TryReadFiniteNumber(Values[0], X, 1.0, 64.0)
+				|| !TryReadFiniteNumber(Values[1], Y, 1.0, 64.0))
+			{
+				return false;
+			}
+			OutPoint.X = FMath::RoundToInt(X);
+			OutPoint.Y = FMath::RoundToInt(Y);
 			return true;
 		}
 	}
 	else if (Value->Type == EJson::Object)
 	{
 		const TSharedPtr<FJsonObject> Object = Value->AsObject();
-		double X = OutPoint.X;
-		double Y = OutPoint.Y;
-		Object->TryGetNumberField(TEXT("X"), X);
-		Object->TryGetNumberField(TEXT("Y"), Y);
+		double X = 0.0;
+		double Y = 0.0;
+		if (!TryReadOptionalObjectNumber(*Object, TEXT("X"), OutPoint.X, X, 1.0, 64.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("Y"), OutPoint.Y, Y, 1.0, 64.0))
+		{
+			return false;
+		}
 		OutPoint = FIntPoint(FMath::RoundToInt(X), FMath::RoundToInt(Y));
 		return true;
+	}
+	else if (Value->Type == EJson::Number)
+	{
+		double Size = 0.0;
+		if (TryReadFiniteNumber(Value, Size, 1.0, 64.0))
+		{
+			OutPoint = FIntPoint(FMath::RoundToInt(Size));
+			return true;
+		}
 	}
 
 	return false;
@@ -325,19 +447,31 @@ bool TryReadVector(const TSharedPtr<FJsonValue>& Value, FVector& OutVector)
 		const TArray<TSharedPtr<FJsonValue>>& Values = Value->AsArray();
 		if (Values.Num() >= 3)
 		{
-			OutVector = FVector(Values[0]->AsNumber(), Values[1]->AsNumber(), Values[2]->AsNumber());
+			double X = 0.0;
+			double Y = 0.0;
+			double Z = 0.0;
+			if (!TryReadFiniteNumber(Values[0], X, -10000000.0, 10000000.0)
+				|| !TryReadFiniteNumber(Values[1], Y, -10000000.0, 10000000.0)
+				|| !TryReadFiniteNumber(Values[2], Z, -10000000.0, 10000000.0))
+			{
+				return false;
+			}
+			OutVector = FVector(X, Y, Z);
 			return true;
 		}
 	}
 	else if (Value->Type == EJson::Object)
 	{
 		const TSharedPtr<FJsonObject> Object = Value->AsObject();
-		double X = OutVector.X;
-		double Y = OutVector.Y;
-		double Z = OutVector.Z;
-		Object->TryGetNumberField(TEXT("X"), X);
-		Object->TryGetNumberField(TEXT("Y"), Y);
-		Object->TryGetNumberField(TEXT("Z"), Z);
+		double X = 0.0;
+		double Y = 0.0;
+		double Z = 0.0;
+		if (!TryReadOptionalObjectNumber(*Object, TEXT("X"), OutVector.X, X, -10000000.0, 10000000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("Y"), OutVector.Y, Y, -10000000.0, 10000000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("Z"), OutVector.Z, Z, -10000000.0, 10000000.0))
+		{
+			return false;
+		}
 		OutVector = FVector(X, Y, Z);
 		return true;
 	}
@@ -358,20 +492,32 @@ bool TryReadRotator(const TSharedPtr<FJsonValue>& Value, FRotator& OutRotator)
 		const TArray<TSharedPtr<FJsonValue>>& Values = Value->AsArray();
 		if (Values.Num() >= 3)
 		{
-			OutRotator = FRotator(Values[0]->AsNumber(), Values[1]->AsNumber(), Values[2]->AsNumber());
+			double Pitch = 0.0;
+			double Yaw = 0.0;
+			double Roll = 0.0;
+			if (!TryReadFiniteNumber(Values[0], Pitch, -360000.0, 360000.0)
+				|| !TryReadFiniteNumber(Values[1], Yaw, -360000.0, 360000.0)
+				|| !TryReadFiniteNumber(Values[2], Roll, -360000.0, 360000.0))
+			{
+				return false;
+			}
+			OutRotator = FRotator(Pitch, Yaw, Roll).GetNormalized();
 			return true;
 		}
 	}
 	else if (Value->Type == EJson::Object)
 	{
 		const TSharedPtr<FJsonObject> Object = Value->AsObject();
-		double Pitch = OutRotator.Pitch;
-		double Yaw = OutRotator.Yaw;
-		double Roll = OutRotator.Roll;
-		Object->TryGetNumberField(TEXT("Pitch"), Pitch);
-		Object->TryGetNumberField(TEXT("Yaw"), Yaw);
-		Object->TryGetNumberField(TEXT("Roll"), Roll);
-		OutRotator = FRotator(Pitch, Yaw, Roll);
+		double Pitch = 0.0;
+		double Yaw = 0.0;
+		double Roll = 0.0;
+		if (!TryReadOptionalObjectNumber(*Object, TEXT("Pitch"), OutRotator.Pitch, Pitch, -360000.0, 360000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("Yaw"), OutRotator.Yaw, Yaw, -360000.0, 360000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("Roll"), OutRotator.Roll, Roll, -360000.0, 360000.0))
+		{
+			return false;
+		}
+		OutRotator = FRotator(Pitch, Yaw, Roll).GetNormalized();
 		return true;
 	}
 
@@ -391,22 +537,35 @@ bool TryReadLinearColor(const TSharedPtr<FJsonValue>& Value, FLinearColor& OutCo
 		const TArray<TSharedPtr<FJsonValue>>& Values = Value->AsArray();
 		if (Values.Num() >= 3)
 		{
-			const float Alpha = Values.Num() >= 4 ? Values[3]->AsNumber() : OutColor.A;
-			OutColor = FLinearColor(Values[0]->AsNumber(), Values[1]->AsNumber(), Values[2]->AsNumber(), Alpha);
+			double R = 0.0;
+			double G = 0.0;
+			double B = 0.0;
+			double A = FMath::Clamp(static_cast<double>(OutColor.A), 0.0, 1.0);
+			if (!TryReadFiniteNumber(Values[0], R, 0.0, 1000.0)
+				|| !TryReadFiniteNumber(Values[1], G, 0.0, 1000.0)
+				|| !TryReadFiniteNumber(Values[2], B, 0.0, 1000.0)
+				|| (Values.Num() >= 4 && !TryReadFiniteNumber(Values[3], A, 0.0, 1.0)))
+			{
+				return false;
+			}
+			OutColor = FLinearColor(R, G, B, A);
 			return true;
 		}
 	}
 	else if (Value->Type == EJson::Object)
 	{
 		const TSharedPtr<FJsonObject> Object = Value->AsObject();
-		double R = OutColor.R;
-		double G = OutColor.G;
-		double B = OutColor.B;
-		double A = OutColor.A;
-		Object->TryGetNumberField(TEXT("R"), R);
-		Object->TryGetNumberField(TEXT("G"), G);
-		Object->TryGetNumberField(TEXT("B"), B);
-		Object->TryGetNumberField(TEXT("A"), A);
+		double R = 0.0;
+		double G = 0.0;
+		double B = 0.0;
+		double A = 0.0;
+		if (!TryReadOptionalObjectNumber(*Object, TEXT("R"), OutColor.R, R, 0.0, 1000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("G"), OutColor.G, G, 0.0, 1000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("B"), OutColor.B, B, 0.0, 1000.0)
+			|| !TryReadOptionalObjectNumber(*Object, TEXT("A"), OutColor.A, A, 0.0, 1.0))
+		{
+			return false;
+		}
 		OutColor = FLinearColor(R, G, B, A);
 		return true;
 	}
@@ -423,15 +582,15 @@ void ApplyPickupVisuals(const FJsonObject& Object, FAeyerjiPickupVisualConfig& O
 	FString Text;
 	if (TryGetString(Object, TEXT("AttachSocket"), Text))
 	{
-		OutVisuals.AttachSocket = FName(*Text);
+		OutVisuals.AttachSocket = FName(*Text.Left(256));
 	}
 	if (TryGetString(Object, TEXT("SecondaryAttachSocket"), Text))
 	{
-		OutVisuals.SecondaryAttachSocket = FName(*Text);
+		OutVisuals.SecondaryAttachSocket = FName(*Text.Left(256));
 	}
 	if (TryGetString(Object, TEXT("ColorParameter"), Text))
 	{
-		OutVisuals.ColorParameter = FName(*Text);
+		OutVisuals.ColorParameter = FName(*Text.Left(256));
 	}
 
 	if (const TSharedPtr<FJsonValue>* Value = FindJsonField(Object, TEXT("SpawnOffset")))
@@ -444,14 +603,11 @@ void ApplyPickupVisuals(const FJsonObject& Object, FAeyerjiPickupVisualConfig& O
 	}
 
 	Object.TryGetBoolField(TEXT("bPulseOutline"), OutVisuals.bPulseOutline);
-	Object.TryGetNumberField(TEXT("OutlinePulseDuration"), OutVisuals.OutlinePulseDuration);
-	Object.TryGetNumberField(TEXT("OutlinePulseFadeTime"), OutVisuals.OutlinePulseFadeTime);
+	TryApplyFiniteNumberField(Object, TEXT("OutlinePulseDuration"), OutVisuals.OutlinePulseDuration, 0.f, 60.f);
+	TryApplyFiniteNumberField(Object, TEXT("OutlinePulseFadeTime"), OutVisuals.OutlinePulseFadeTime, 0.f, 60.f);
 
-	double StencilOverride = OutVisuals.OutlineStencilOverride;
-	if (Object.TryGetNumberField(TEXT("OutlineStencilOverride"), StencilOverride))
-	{
-		OutVisuals.OutlineStencilOverride = FMath::RoundToInt(StencilOverride);
-	}
+	TryApplyBoundedIntField(
+		Object, TEXT("OutlineStencilOverride"), OutVisuals.OutlineStencilOverride, -1, 255);
 }
 
 /** Replaces rarity affix ranges when the JSON field is present. */
@@ -464,8 +620,10 @@ void ApplyRarityAffixRanges(const FJsonObject& Object, UItemDefinition& Definiti
 	}
 
 	Definition.RarityAffixRanges.Reset();
-	for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+	const int32 EntryCount = FMath::Min(Entries->Num(), MaxImportedAffixes);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& EntryValue = (*Entries)[EntryIndex];
 		if (!EntryValue.IsValid() || EntryValue->Type != EJson::Object)
 		{
 			continue;
@@ -474,14 +632,22 @@ void ApplyRarityAffixRanges(const FJsonObject& Object, UItemDefinition& Definiti
 		const TSharedPtr<FJsonObject> EntryObject = EntryValue->AsObject();
 		FItemRarityAffixRange Entry;
 		TryApplyEnumField(*EntryObject, TEXT("Rarity"), Entry.Rarity, Report, ItemName);
-		EntryObject->TryGetNumberField(TEXT("MinAffixes"), Entry.MinAffixes);
-		EntryObject->TryGetNumberField(TEXT("MaxAffixes"), Entry.MaxAffixes);
+		TryApplyBoundedIntField(*EntryObject, TEXT("MinAffixes"), Entry.MinAffixes, 0, MaxImportedAffixes);
+		TryApplyBoundedIntField(*EntryObject, TEXT("MaxAffixes"), Entry.MaxAffixes, 0, MaxImportedAffixes);
+		if (Entry.MinAffixes > Entry.MaxAffixes)
+		{
+			Swap(Entry.MinAffixes, Entry.MaxAffixes);
+		}
 		Definition.RarityAffixRanges.Add(Entry);
 	}
 }
 
 FGameplayAttribute ResolveJsonAttribute(const FString& AttributeText)
 {
+	if (AttributeText.Len() > 256)
+	{
+		return FGameplayAttribute();
+	}
 	FString NameString = AttributeText;
 	int32 DotIndex = INDEX_NONE;
 	if (NameString.FindChar(TEXT('.'), DotIndex))
@@ -528,8 +694,10 @@ void ApplyBaseModifiers(const FJsonObject& Object, UItemDefinition& Definition, 
 	}
 
 	Definition.BaseModifiers.Reset();
-	for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+	const int32 EntryCount = FMath::Min(Entries->Num(), MaxImportedModifiers);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& EntryValue = (*Entries)[EntryIndex];
 		if (!EntryValue.IsValid() || EntryValue->Type != EJson::Object)
 		{
 			continue;
@@ -552,11 +720,7 @@ void ApplyBaseModifiers(const FJsonObject& Object, UItemDefinition& Definition, 
 		}
 
 		TryApplyEnumField(*EntryObject, TEXT("Op"), Modifier.Op, Report, ItemName);
-		double Magnitude = Modifier.Magnitude;
-		if (EntryObject->TryGetNumberField(TEXT("Magnitude"), Magnitude))
-		{
-			Modifier.Magnitude = static_cast<float>(Magnitude);
-		}
+		TryApplyFiniteNumberField(*EntryObject, TEXT("Magnitude"), Modifier.Magnitude, -1000000000.f, 1000000000.f);
 
 		if (Modifier.Op != EItemModOp::Additive)
 		{
@@ -605,15 +769,19 @@ void ApplyAffixListField(
 	}
 
 	OutAffixes.Reset();
-	for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+	const int32 EntryCount = FMath::Min(Entries->Num(), MaxImportedAffixes);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& EntryValue = (*Entries)[EntryIndex];
 		if (!EntryValue.IsValid() || EntryValue->Type != EJson::String)
 		{
 			continue;
 		}
 
 		const FString Path = NormalizeObjectPath(EntryValue->AsString());
-		UItemAffixDefinition* Affix = Path.IsEmpty() ? nullptr : LoadObject<UItemAffixDefinition>(nullptr, *Path);
+		UItemAffixDefinition* Affix = Path.IsEmpty() || Path.Len() > 1024
+			? nullptr
+			: LoadObject<UItemAffixDefinition>(nullptr, *Path);
 		if (Affix)
 		{
 			OutAffixes.Add(Affix);
@@ -635,8 +803,10 @@ void ApplyGrantedEffects(const FJsonObject& Object, UItemDefinition& Definition,
 	}
 
 	Definition.GrantedEffects.Reset();
-	for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+	const int32 EntryCount = FMath::Min(Entries->Num(), MaxImportedGrants);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& EntryValue = (*Entries)[EntryIndex];
 		if (!EntryValue.IsValid() || EntryValue->Type != EJson::Object)
 		{
 			continue;
@@ -645,14 +815,17 @@ void ApplyGrantedEffects(const FJsonObject& Object, UItemDefinition& Definition,
 		const TSharedPtr<FJsonObject> EntryObject = EntryValue->AsObject();
 		FItemGrantedEffect Effect;
 		ApplyClassField(*EntryObject, TEXT("EffectClass"), Effect.EffectClass, Report, ItemName);
-		EntryObject->TryGetNumberField(TEXT("EffectLevel"), Effect.EffectLevel);
+		TryApplyFiniteNumberField(*EntryObject, TEXT("EffectLevel"), Effect.EffectLevel, 0.01f, 1000.f);
 		ApplyGameplayTags(*EntryObject, TEXT("ApplicationTags"), Effect.ApplicationTags, Report, ItemName);
 
 		const TArray<TSharedPtr<FJsonValue>>* MagnitudeEntries = nullptr;
 		if (EntryObject->TryGetArrayField(TEXT("SetByCallerMagnitudes"), MagnitudeEntries))
 		{
-			for (const TSharedPtr<FJsonValue>& MagnitudeValue : *MagnitudeEntries)
+			const int32 MagnitudeCount = FMath::Min(
+				MagnitudeEntries->Num(), MaxImportedSetByCallerMagnitudes);
+			for (int32 MagnitudeIndex = 0; MagnitudeIndex < MagnitudeCount; ++MagnitudeIndex)
 			{
+				const TSharedPtr<FJsonValue>& MagnitudeValue = (*MagnitudeEntries)[MagnitudeIndex];
 				if (!MagnitudeValue.IsValid() || MagnitudeValue->Type != EJson::Object)
 				{
 					continue;
@@ -666,9 +839,9 @@ void ApplyGrantedEffects(const FJsonObject& Object, UItemDefinition& Definition,
 				{
 					Magnitude.DataTag = SingleTag.First();
 				}
-				MagnitudeObject->TryGetNumberField(TEXT("LevelOneMagnitude"), Magnitude.LevelOneMagnitude);
-				MagnitudeObject->TryGetNumberField(TEXT("PerLevelMultiplier"), Magnitude.PerLevelMultiplier);
-				MagnitudeObject->TryGetNumberField(TEXT("PerLevelAdd"), Magnitude.PerLevelAdd);
+				TryApplyFiniteNumberField(*MagnitudeObject, TEXT("LevelOneMagnitude"), Magnitude.LevelOneMagnitude, -1000000000.f, 1000000000.f);
+				TryApplyFiniteNumberField(*MagnitudeObject, TEXT("PerLevelMultiplier"), Magnitude.PerLevelMultiplier, -1000000.f, 1000000.f);
+				TryApplyFiniteNumberField(*MagnitudeObject, TEXT("PerLevelAdd"), Magnitude.PerLevelAdd, -1000000000.f, 1000000000.f);
 				Effect.SetByCallerMagnitudes.Add(Magnitude);
 			}
 		}
@@ -687,8 +860,10 @@ void ApplyGrantedAbilities(const FJsonObject& Object, UItemDefinition& Definitio
 	}
 
 	Definition.GrantedAbilities.Reset();
-	for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+	const int32 EntryCount = FMath::Min(Entries->Num(), MaxImportedGrants);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& EntryValue = (*Entries)[EntryIndex];
 		if (!EntryValue.IsValid() || EntryValue->Type != EJson::Object)
 		{
 			continue;
@@ -697,8 +872,8 @@ void ApplyGrantedAbilities(const FJsonObject& Object, UItemDefinition& Definitio
 		const TSharedPtr<FJsonObject> EntryObject = EntryValue->AsObject();
 		FItemGrantedAbility Ability;
 		ApplyClassField(*EntryObject, TEXT("AbilityClass"), Ability.AbilityClass, Report, ItemName);
-		EntryObject->TryGetNumberField(TEXT("AbilityLevel"), Ability.AbilityLevel);
-		EntryObject->TryGetNumberField(TEXT("InputID"), Ability.InputID);
+		TryApplyBoundedIntField(*EntryObject, TEXT("AbilityLevel"), Ability.AbilityLevel, 1, 1000);
+		TryApplyBoundedIntField(*EntryObject, TEXT("InputID"), Ability.InputID, -1, 255);
 		ApplyGameplayTags(*EntryObject, TEXT("OwnedTags"), Ability.OwnedTags, Report, ItemName);
 		Definition.GrantedAbilities.Add(Ability);
 	}
@@ -714,8 +889,10 @@ void ApplyEquipSynergyColors(const FJsonObject& Object, UItemDefinition& Definit
 	}
 
 	Definition.EquipSynergyColors.Reset();
-	for (const TSharedPtr<FJsonValue>& EntryValue : *Entries)
+	const int32 EntryCount = FMath::Min(Entries->Num(), MaxImportedSynergyColors);
+	for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 	{
+		const TSharedPtr<FJsonValue>& EntryValue = (*Entries)[EntryIndex];
 		if (!EntryValue.IsValid() || EntryValue->Type != EJson::Object)
 		{
 			continue;
@@ -723,7 +900,7 @@ void ApplyEquipSynergyColors(const FJsonObject& Object, UItemDefinition& Definit
 
 		const TSharedPtr<FJsonObject> EntryObject = EntryValue->AsObject();
 		FItemEquipSynergyColor Entry;
-		EntryObject->TryGetNumberField(TEXT("StackCount"), Entry.StackCount);
+		TryApplyBoundedIntField(*EntryObject, TEXT("StackCount"), Entry.StackCount, 1, 1000000);
 		if (const TSharedPtr<FJsonValue>* ColorValue = FindJsonField(*EntryObject, TEXT("Color")))
 		{
 			TryReadLinearColor(*ColorValue, Entry.Color);
@@ -755,7 +932,8 @@ void ApplyItemObjectToDefinition(const FJsonObject& Object, UItemDefinition& Def
 	double RequiredLevel = 0.0;
 	if (Object.TryGetNumberField(TEXT("RequiredLevel"), RequiredLevel))
 	{
-		Definition.RequiredLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(RequiredLevel));
+		Definition.RequiredLevel = UAeyerjiDifficultySettings::FloatToGameplayLevel(
+			FMath::IsFinite(RequiredLevel) ? static_cast<float>(RequiredLevel) : 1.f);
 	}
 	if (TryGetString(Object, TEXT("CorruptionPowerText"), Text))
 	{
@@ -811,7 +989,7 @@ void ApplyItemObjectToDefinition(const FJsonObject& Object, UItemDefinition& Def
 	Object.TryGetBoolField(TEXT("bEnableEquipSynergy"), Definition.bEnableEquipSynergy);
 	if (TryGetString(Object, TEXT("EquipSynergyColorParameter"), Text))
 	{
-		Definition.EquipSynergyColorParameter = FName(*Text);
+		Definition.EquipSynergyColorParameter = FName(*Text.Left(256));
 	}
 	ApplyEquipSynergyColors(Object, Definition);
 }
@@ -820,6 +998,7 @@ void ApplyItemObjectToDefinition(const FJsonObject& Object, UItemDefinition& Def
 FString SanitizeAssetName(FString AssetName)
 {
 	AssetName.TrimStartAndEndInline();
+	AssetName.LeftInline(128);
 	for (TCHAR& Character : AssetName)
 	{
 		if (!FChar::IsAlnum(Character) && Character != TEXT('_'))
@@ -851,6 +1030,14 @@ UItemDefinition* LoadOrCreateDefinition(const FString& PackagePath, const FStrin
 	if (!Package)
 	{
 		Report.Error(FString::Printf(TEXT("Failed to create package '%s'."), *PackageName));
+		return nullptr;
+	}
+	if (UObject* ExistingObject = StaticFindObjectFast(UObject::StaticClass(), Package, FName(*AssetName)))
+	{
+		Report.Error(FString::Printf(
+			TEXT("Cannot create item definition '%s': incompatible object '%s' already exists."),
+			*PackageName,
+			*GetNameSafe(ExistingObject)));
 		return nullptr;
 	}
 
@@ -892,7 +1079,7 @@ bool SaveDefinitionPackage(UItemDefinition& Definition, FItemImportReport& Repor
 	const bool bSaved = UPackage::SavePackage(Package, &Definition, *PackageFilename, SaveArgs);
 	if (!bSaved)
 	{
-		Report.Warn(FString::Printf(TEXT("%s: failed to save package '%s'."), *Definition.GetName(), *PackageFilename));
+		Report.Error(FString::Printf(TEXT("%s: failed to save package '%s'."), *Definition.GetName(), *PackageFilename));
 	}
 	return bSaved;
 }
@@ -921,7 +1108,7 @@ bool ImportOneItem(const FJsonObject& ItemObject, const FString& DefaultPackageP
 	PackagePath.TrimStartAndEndInline();
 	PackagePath.RemoveFromEnd(TEXT("/"));
 
-	if (!FPackageName::IsValidLongPackageName(PackagePath))
+	if (!PackagePath.StartsWith(TEXT("/Game/")) || !FPackageName::IsValidLongPackageName(PackagePath))
 	{
 		Report.Error(FString::Printf(TEXT("%s: invalid PackagePath '%s'."), *AssetName, *PackagePath));
 		return false;
@@ -947,7 +1134,10 @@ bool ImportOneItem(const FJsonObject& ItemObject, const FString& DefaultPackageP
 
 	if (bSaveAssets)
 	{
-		SaveDefinitionPackage(*Definition, Report);
+		if (!SaveDefinitionPackage(*Definition, Report))
+		{
+			return false;
+		}
 	}
 
 	if (bCreated)
@@ -974,8 +1164,11 @@ bool CollectItemObjects(const TSharedPtr<FJsonValue>& RootValue, TArray<TSharedP
 
 	if (RootValue->Type == EJson::Array)
 	{
-		for (const TSharedPtr<FJsonValue>& Entry : RootValue->AsArray())
+		const TArray<TSharedPtr<FJsonValue>>& RootEntries = RootValue->AsArray();
+		const int32 RootEntryCount = FMath::Min(RootEntries.Num(), MaxImportedItems);
+		for (int32 EntryIndex = 0; EntryIndex < RootEntryCount; ++EntryIndex)
 		{
+			const TSharedPtr<FJsonValue>& Entry = RootEntries[EntryIndex];
 			if (Entry.IsValid() && Entry->Type == EJson::Object)
 			{
 				OutItems.Add(Entry->AsObject());
@@ -995,8 +1188,10 @@ bool CollectItemObjects(const TSharedPtr<FJsonValue>& RootValue, TArray<TSharedP
 	const TArray<TSharedPtr<FJsonValue>>* Items = nullptr;
 	if (RootObject->TryGetArrayField(TEXT("Items"), Items))
 	{
-		for (const TSharedPtr<FJsonValue>& Entry : *Items)
+		const int32 ItemCount = FMath::Min(Items->Num(), MaxImportedItems);
+		for (int32 ItemIndex = 0; ItemIndex < ItemCount; ++ItemIndex)
 		{
+			const TSharedPtr<FJsonValue>& Entry = (*Items)[ItemIndex];
 			if (Entry.IsValid() && Entry->Type == EJson::Object)
 			{
 				OutItems.Add(Entry->AsObject());
@@ -1036,6 +1231,23 @@ int32 UItemDefinitionJsonImportCommandlet::Main(const FString& Params)
 
 	const bool bSaveAssets = !FParse::Param(*Params, TEXT("NoSave"));
 	const bool bDryRun = FParse::Param(*Params, TEXT("DryRun"));
+	const int64 JsonFileSize = IFileManager::Get().FileSize(*JsonPath);
+	if (JsonFileSize < 0 || JsonFileSize > MaxImportJsonBytes)
+	{
+		UE_LOG(
+			LogItemDefinitionJsonImport,
+			Error,
+			TEXT("JSON file '%s' is missing or exceeds the %lld-byte import limit."),
+			*JsonPath,
+			MaxImportJsonBytes);
+		return 1;
+	}
+	if (!DestinationPath.StartsWith(TEXT("/Game/"))
+		|| !FPackageName::IsValidLongPackageName(DestinationPath))
+	{
+		UE_LOG(LogItemDefinitionJsonImport, Error, TEXT("Invalid project content destination '%s'."), *DestinationPath);
+		return 1;
+	}
 
 	FString JsonText;
 	if (!FFileHelper::LoadFileToString(JsonText, *JsonPath))

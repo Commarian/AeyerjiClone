@@ -8,6 +8,7 @@
 #include "Director/AeyerjiLevelDirector.h"
 #include "Enemy/AeyerjiEnemyManagementBPFL.h"
 #include "Enemy/EnemyParentNative.h"
+#include "Enemy/EnemyAIController.h"
 #include "Enemy/AeyerjiEnemyArchetypeComponent.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
@@ -27,7 +28,11 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Perception/AIPerceptionComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include "Net/UnrealNetwork.h"
+#include "ProfilingDebugging/CountersTrace.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+#include "Stats/Stats.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/AeyerjiRiftRules.h"
 #include "AbilitySystemComponent.h"
@@ -35,8 +40,48 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 DEFINE_LOG_CATEGORY_STATIC(LogEncounterDirector, Log, All);
 
+DECLARE_STATS_GROUP(TEXT("Aeyerji Encounter"), STATGROUP_AeyerjiEncounter, STATCAT_Advanced);
+DECLARE_CYCLE_STAT(TEXT("Rift Population Prewarm"), STAT_AeyerjiRiftPopulationPrewarm, STATGROUP_AeyerjiEncounter);
+DECLARE_CYCLE_STAT(TEXT("Rift Region Staging"), STAT_AeyerjiRiftRegionStaging, STATGROUP_AeyerjiEncounter);
+DECLARE_CYCLE_STAT(TEXT("Rift Reinforcement Reveal"), STAT_AeyerjiRiftReinforcementReveal, STATGROUP_AeyerjiEncounter);
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftAwakeEnemies, TEXT("Aeyerji/Rift/AwakeEnemies"));
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftSleepingEnemies, TEXT("Aeyerji/Rift/SleepingEnemies"));
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftRevealingEnemies, TEXT("Aeyerji/Rift/RevealingEnemies"));
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftStagedPopulation, TEXT("Aeyerji/Rift/StagedPopulation"));
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftPooledEnemies, TEXT("Aeyerji/Rift/PooledEnemies"));
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftFreshConstructions, TEXT("Aeyerji/Rift/FreshConstructions"));
+TRACE_DECLARE_INT_COUNTER(AeyerjiRiftEmergencySpawns, TEXT("Aeyerji/Rift/EmergencySpawns"));
+
 namespace
 {
+	constexpr int32 MaxEncounterSpawnGroups = 256;
+	constexpr int32 MaxEnemyClassesPerGroup = 256;
+	constexpr int32 MaxDynamicEnemiesPerGroup = 10000;
+	constexpr int32 MaxEncounterPopulation = 100000;
+	constexpr int32 MaxRiftRegions = 4096;
+	constexpr int32 MaxFixedSpawnRegions = 4096;
+	constexpr int32 MaxPoolWarmSets = 4096;
+	constexpr int32 MaxFixedClusters = 10000;
+	constexpr int32 MaxSpawnAttempts = 256;
+	constexpr int32 MaxSpawnsPerDirectorTick = 1000;
+	constexpr int32 MaxRecentPathSamples = 1024;
+	constexpr int32 MaxProgressPoints = 1000000000;
+	constexpr int32 MaxRiftSpawnFailures = 100;
+	constexpr float MaxWorldDistance = 1000000.f;
+	constexpr float MaxDirectorSeconds = 86400.f;
+	constexpr float MaxDirectorWorkMilliseconds = 1000.f;
+	constexpr float MaxRuntimeMultiplier = 1000000.f;
+
+	float ResolveFiniteFloat(const float Value, const float Fallback, const float Minimum, const float Maximum)
+	{
+		return FMath::IsFinite(Value) ? FMath::Clamp(Value, Minimum, Maximum) : Fallback;
+	}
+
+	bool IsFiniteBox(const FBox& Bounds)
+	{
+		return Bounds.IsValid && !Bounds.Min.ContainsNaN() && !Bounds.Max.ContainsNaN();
+	}
+
 	static TAutoConsoleVariable<float>& GetFixedPopulationBudgetScaleCVar()
 	{
 		// Intentionally leaked to avoid shutdown-order crashes when the console manager is destroyed.
@@ -122,6 +167,19 @@ namespace
 	}
 }
 
+int32 UEnemySpawnGroupDefinition::ResolveSpawnCount() const
+{
+	int32 SafeMinCount = FMath::Clamp(MinCount, 1, MaxDynamicEnemiesPerGroup);
+	int32 SafeMaxCount = FMath::Clamp(MaxCount, 1, MaxDynamicEnemiesPerGroup);
+	if (SafeMaxCount < SafeMinCount)
+	{
+		Swap(SafeMinCount, SafeMaxCount);
+	}
+	return SafeMinCount == SafeMaxCount
+		? SafeMinCount
+		: FMath::RandRange(SafeMinCount, SafeMaxCount);
+}
+
 TSubclassOf<AEnemyParentNative> UEnemySpawnGroupDefinition::ResolveEnemyClass() const
 {
 	if (EnemyTypes.IsEmpty())
@@ -132,6 +190,10 @@ TSubclassOf<AEnemyParentNative> UEnemySpawnGroupDefinition::ResolveEnemyClass() 
 	TArray<TSubclassOf<AEnemyParentNative>> ValidEnemyTypes;
 	for (TSubclassOf<AEnemyParentNative> EnemyClass : EnemyTypes)
 	{
+		if (ValidEnemyTypes.Num() >= MaxEnemyClassesPerGroup)
+		{
+			break;
+		}
 		if (*EnemyClass)
 		{
 			ValidEnemyTypes.Add(EnemyClass);
@@ -157,6 +219,10 @@ TSubclassOf<AEnemyParentNative> UEnemySpawnGroupDefinition::ResolveEliteEnemyCla
 	TArray<TSubclassOf<AEnemyParentNative>> ValidEliteTypes;
 	for (TSubclassOf<AEnemyParentNative> EnemyClass : EliteEnemyTypes)
 	{
+		if (ValidEliteTypes.Num() >= MaxEnemyClassesPerGroup)
+		{
+			break;
+		}
 		if (*EnemyClass)
 		{
 			ValidEliteTypes.Add(EnemyClass);
@@ -209,8 +275,9 @@ void AAeyerjiEncounterDirector::BeginPlay()
 	{
 		ApplyDirectorDefinition();
 	}
+	SanitizeRuntimeSettings();
 
-	SetActorTickInterval(FMath::Max(0.f, TickIntervalSeconds));
+	SetActorTickInterval(TickIntervalSeconds);
 
 	RefreshPlayerReference();
 	RecentPlayerSamples.Reset();
@@ -231,59 +298,115 @@ void AAeyerjiEncounterDirector::BeginPlay()
 	}
 }
 
+void AAeyerjiEncounterDirector::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	for (const TWeakObjectPtr<AActor>& EnemyPtr : LiveEnemies)
+	{
+		if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPtr.Get()))
+		{
+			Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleTrackedEnemyDied);
+			Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+			Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleTrackedEnemyDestroyed);
+			Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+		}
+	}
+	for (const TWeakObjectPtr<AActor>& EnemyPtr : ProgressOnlyEnemies)
+	{
+		if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPtr.Get()))
+		{
+			Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+			Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+		}
+	}
+
+	LiveEnemies.Reset();
+	ProgressOnlyEnemies.Reset();
+	RegisteredProgressEnemyPoints.Reset();
+	PendingSpawnRequests.Reset();
+	FixedSpawnQueue.Reset();
+	RiftSpawnQueue.Reset();
+	RiftPrewarmQueue.Reset();
+	Super::EndPlay(EndPlayReason);
+}
+
 void AAeyerjiEncounterDirector::ApplyDirectorDefinition()
 {
-	if (!DirectorDefinition)
+	if (!DirectorDefinition || (!HasAuthority() && !IsTemplate()))
 	{
 		return;
 	}
 
 	if (DirectorDefinition->SpawnGroups.Num() > 0)
 	{
-		SpawnGroups = DirectorDefinition->SpawnGroups;
+		SpawnGroups.Reset();
+		for (UEnemySpawnGroupDefinition* Group : DirectorDefinition->SpawnGroups)
+		{
+			if (SpawnGroups.Num() >= MaxEncounterSpawnGroups)
+			{
+				break;
+			}
+			if (IsValid(Group))
+			{
+				SpawnGroups.Add(Group);
+			}
+		}
 	}
 
-	TickIntervalSeconds = FMath::Max(0.f, DirectorDefinition->TickIntervalSeconds);
-	MinDistanceBetweenEncounters = FMath::Max(0.f, DirectorDefinition->MinDistanceBetweenEncounters);
-	KillVelocitySpawnFloor = FMath::Max(0.f, DirectorDefinition->KillVelocitySpawnFloor);
-	KillVelocitySpawnCeil = FMath::Max(0.01f, DirectorDefinition->KillVelocitySpawnCeil);
-	MinDistanceAtSlow = FMath::Max(0.f, DirectorDefinition->MinDistanceAtSlow);
-	MinDistanceAtFast = FMath::Max(0.f, DirectorDefinition->MinDistanceAtFast);
-	MinDowntimeAtSlow = FMath::Max(0.f, DirectorDefinition->MinDowntimeAtSlow);
-	MinDowntimeAtFast = FMath::Max(0.f, DirectorDefinition->MinDowntimeAtFast);
-	KillVelocityWindowSeconds = FMath::Max(0.1f, DirectorDefinition->KillVelocityWindowSeconds);
-	MaxGroupsPerTrigger = FMath::Max(1, DirectorDefinition->MaxGroupsPerTrigger);
-	PostCombatDelaySeconds = FMath::Max(0.f, DirectorDefinition->PostCombatDelaySeconds);
-	MaxSpawnsPerTick = FMath::Max(1, DirectorDefinition->MaxSpawnsPerTick);
-	MinSpawnDistanceFromPlayer = FMath::Max(0.f, DirectorDefinition->MinSpawnDistanceFromPlayer);
+	TickIntervalSeconds = ResolveFiniteFloat(DirectorDefinition->TickIntervalSeconds, 0.2f, 0.f, MaxDirectorSeconds);
+	MinDistanceBetweenEncounters = ResolveFiniteFloat(DirectorDefinition->MinDistanceBetweenEncounters, 1200.f, 0.f, MaxWorldDistance);
+	KillVelocitySpawnFloor = ResolveFiniteFloat(DirectorDefinition->KillVelocitySpawnFloor, 0.25f, 0.f, MaxRuntimeMultiplier);
+	KillVelocitySpawnCeil = ResolveFiniteFloat(DirectorDefinition->KillVelocitySpawnCeil, 1.5f, 0.01f, MaxRuntimeMultiplier);
+	MinDistanceAtSlow = ResolveFiniteFloat(DirectorDefinition->MinDistanceAtSlow, 1800.f, 0.f, MaxWorldDistance);
+	MinDistanceAtFast = ResolveFiniteFloat(DirectorDefinition->MinDistanceAtFast, 900.f, 0.f, MaxWorldDistance);
+	MinDowntimeAtSlow = ResolveFiniteFloat(DirectorDefinition->MinDowntimeAtSlow, 2.f, 0.f, MaxDirectorSeconds);
+	MinDowntimeAtFast = ResolveFiniteFloat(DirectorDefinition->MinDowntimeAtFast, 0.5f, 0.f, MaxDirectorSeconds);
+	KillVelocityWindowSeconds = ResolveFiniteFloat(DirectorDefinition->KillVelocityWindowSeconds, 6.f, 0.1f, MaxDirectorSeconds);
+	MaxGroupsPerTrigger = FMath::Clamp(DirectorDefinition->MaxGroupsPerTrigger, 1, MaxEncounterSpawnGroups);
+	PostCombatDelaySeconds = ResolveFiniteFloat(DirectorDefinition->PostCombatDelaySeconds, 1.f, 0.f, MaxDirectorSeconds);
+	MaxSpawnsPerTick = FMath::Clamp(DirectorDefinition->MaxSpawnsPerTick, 1, MaxSpawnsPerDirectorTick);
+	MinSpawnDistanceFromPlayer = ResolveFiniteFloat(DirectorDefinition->MinSpawnDistanceFromPlayer, 0.f, 0.f, MaxWorldDistance);
 	bAvoidRecentPlayerPath = DirectorDefinition->bAvoidRecentPlayerPath;
-	RecentPathAvoidRadius = FMath::Max(0.f, DirectorDefinition->RecentPathAvoidRadius);
-	RecentPathSeconds = FMath::Max(0.1f, DirectorDefinition->RecentPathSeconds);
-	RecentPathSampleInterval = FMath::Max(0.1f, DirectorDefinition->RecentPathSampleInterval);
-	RecentPathMaxSamples = FMath::Max(1, DirectorDefinition->RecentPathMaxSamples);
+	RecentPathAvoidRadius = ResolveFiniteFloat(DirectorDefinition->RecentPathAvoidRadius, 600.f, 0.f, MaxWorldDistance);
+	RecentPathSeconds = ResolveFiniteFloat(DirectorDefinition->RecentPathSeconds, 8.f, 0.1f, MaxDirectorSeconds);
+	RecentPathSampleInterval = ResolveFiniteFloat(DirectorDefinition->RecentPathSampleInterval, 0.5f, 0.1f, MaxDirectorSeconds);
+	RecentPathMaxSamples = FMath::Clamp(DirectorDefinition->RecentPathMaxSamples, 1, MaxRecentPathSamples);
 	bAvoidPlayerForwardSpawnCone = DirectorDefinition->bAvoidPlayerForwardSpawnCone;
-	ForwardSpawnConeDegrees = FMath::Clamp(DirectorDefinition->ForwardSpawnConeDegrees, 0.f, 180.f);
+	ForwardSpawnConeDegrees = ResolveFiniteFloat(DirectorDefinition->ForwardSpawnConeDegrees, 120.f, 0.f, 180.f);
 	bUseLineOfSightForForwardCone = DirectorDefinition->bUseLineOfSightForForwardCone;
-	SpawnLocationSearchAttempts = FMath::Max(1, DirectorDefinition->SpawnLocationSearchAttempts);
-	GroundTraceUpOffset = FMath::Max(0.f, DirectorDefinition->GroundTraceUpOffset);
-	GroundTraceDownDistance = FMath::Max(10.f, DirectorDefinition->GroundTraceDownDistance);
-	SpawnGroundOffset = FMath::Max(0.f, DirectorDefinition->SpawnGroundOffset);
-	RiftMinimumSpawnDistanceFromPlayers = FMath::Max(0.f, DirectorDefinition->RiftMinimumSpawnDistanceFromPlayers);
-	RiftPressureEvaluationInterval = FMath::Max(0.1f, DirectorDefinition->RiftPressureEvaluationInterval);
-	RiftMinimumActiveEnemyPressure = FMath::Max(0, DirectorDefinition->RiftMinimumActiveEnemyPressure);
+	SpawnLocationSearchAttempts = FMath::Clamp(DirectorDefinition->SpawnLocationSearchAttempts, 1, MaxSpawnAttempts);
+	GroundTraceUpOffset = ResolveFiniteFloat(DirectorDefinition->GroundTraceUpOffset, 120.f, 0.f, MaxWorldDistance);
+	GroundTraceDownDistance = ResolveFiniteFloat(DirectorDefinition->GroundTraceDownDistance, 2000.f, 10.f, MaxWorldDistance);
+	SpawnGroundOffset = ResolveFiniteFloat(DirectorDefinition->SpawnGroundOffset, 5.f, 0.f, MaxWorldDistance);
+	RiftMinimumSpawnDistanceFromPlayers = ResolveFiniteFloat(DirectorDefinition->RiftMinimumSpawnDistanceFromPlayers, 1200.f, 0.f, MaxWorldDistance);
+	RiftPressureEvaluationInterval = ResolveFiniteFloat(DirectorDefinition->RiftPressureEvaluationInterval, 2.f, 0.1f, MaxDirectorSeconds);
+	RiftMinimumActiveEnemyPressure = FMath::Clamp(DirectorDefinition->RiftMinimumActiveEnemyPressure, 0, MaxEncounterPopulation);
 	bRiftPreferHiddenSpawnLocations = DirectorDefinition->bRiftPreferHiddenSpawnLocations;
+	RiftRegionStagingDistance = ResolveFiniteFloat(DirectorDefinition->RiftRegionStagingDistance, 6500.f, 0.f, MaxWorldDistance);
+	RiftAmbientEnemyFraction = ResolveFiniteFloat(DirectorDefinition->RiftAmbientEnemyFraction, 0.33f, 0.f, 1.f);
+	RiftRevealBatchSize = FMath::Clamp(DirectorDefinition->RiftRevealBatchSize, 1, MaxSpawnsPerDirectorTick);
+	RiftRevealBatchInterval = ResolveFiniteFloat(DirectorDefinition->RiftRevealBatchInterval, 0.15f, 0.f, MaxDirectorSeconds);
+	RiftRevealDurationSeconds = ResolveFiniteFloat(DirectorDefinition->RiftRevealDurationSeconds, 1.f, 0.f, MaxDirectorSeconds);
+	RiftGroundRevealWeight = ResolveFiniteFloat(DirectorDefinition->RiftGroundRevealWeight, 0.75f, 0.f, MaxRuntimeMultiplier);
+	RiftSkyRevealWeight = ResolveFiniteFloat(DirectorDefinition->RiftSkyRevealWeight, 0.25f, 0.f, MaxRuntimeMultiplier);
+	RiftPrewarmActorsPerTick = FMath::Clamp(DirectorDefinition->RiftPrewarmActorsPerTick, 1, MaxSpawnsPerDirectorTick);
+	RiftPrewarmWorkMillisecondsPerTick = ResolveFiniteFloat(DirectorDefinition->RiftPrewarmWorkMillisecondsPerTick, 4.f, 0.f, MaxDirectorWorkMilliseconds);
+	RiftPrewarmReplicationSettleSeconds = ResolveFiniteFloat(DirectorDefinition->RiftPrewarmReplicationSettleSeconds, 1.f, 0.f, MaxDirectorSeconds);
+	RiftEnemyWakeDistance = ResolveFiniteFloat(DirectorDefinition->RiftEnemyWakeDistance, 8000.f, 0.f, MaxWorldDistance);
+	RiftEnemySleepDistance = ResolveFiniteFloat(DirectorDefinition->RiftEnemySleepDistance, 10000.f, RiftEnemyWakeDistance, MaxWorldDistance);
+	RiftMaximumAwakeEnemies = FMath::Clamp(DirectorDefinition->RiftMaximumAwakeEnemies, 1, MaxEncounterPopulation);
+	RiftPressureRadius = ResolveFiniteFloat(DirectorDefinition->RiftPressureRadius, 8000.f, 0.f, MaxWorldDistance);
 	bEnableEnemyLODThrottling = DirectorDefinition->bEnableEnemyLODThrottling;
-	EnemyLODUpdateInterval = FMath::Max(0.05f, DirectorDefinition->EnemyLODUpdateInterval);
-	EnemyLODNearDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODNearDistance);
-	EnemyLODMidDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODMidDistance);
-	EnemyLODFarDistance = FMath::Max(0.f, DirectorDefinition->EnemyLODFarDistance);
-	EnemyLODMidTickInterval = FMath::Max(0.f, DirectorDefinition->EnemyLODMidTickInterval);
-	EnemyLODFarTickInterval = FMath::Max(0.f, DirectorDefinition->EnemyLODFarTickInterval);
+	EnemyLODUpdateInterval = ResolveFiniteFloat(DirectorDefinition->EnemyLODUpdateInterval, 0.5f, 0.05f, MaxDirectorSeconds);
+	EnemyLODNearDistance = ResolveFiniteFloat(DirectorDefinition->EnemyLODNearDistance, 4000.f, 0.f, MaxWorldDistance);
+	EnemyLODMidDistance = ResolveFiniteFloat(DirectorDefinition->EnemyLODMidDistance, 8000.f, EnemyLODNearDistance, MaxWorldDistance);
+	EnemyLODFarDistance = ResolveFiniteFloat(DirectorDefinition->EnemyLODFarDistance, 12000.f, EnemyLODMidDistance, MaxWorldDistance);
+	EnemyLODMidTickInterval = ResolveFiniteFloat(DirectorDefinition->EnemyLODMidTickInterval, 0.1f, 0.f, MaxDirectorSeconds);
+	EnemyLODFarTickInterval = ResolveFiniteFloat(DirectorDefinition->EnemyLODFarTickInterval, 0.25f, 0.f, MaxDirectorSeconds);
 	bEnableFixedClusterSleeping = DirectorDefinition->bEnableFixedClusterSleeping;
-	FixedClusterSleepDistance = FMath::Max(0.f, DirectorDefinition->FixedClusterSleepDistance);
-	FixedClusterWakeDistance = FMath::Max(0.f, DirectorDefinition->FixedClusterWakeDistance);
+	FixedClusterSleepDistance = ResolveFiniteFloat(DirectorDefinition->FixedClusterSleepDistance, 14000.f, 0.f, MaxWorldDistance);
+	FixedClusterWakeDistance = ResolveFiniteFloat(DirectorDefinition->FixedClusterWakeDistance, 11000.f, 0.f, FixedClusterSleepDistance);
 	bDrawDebug = DirectorDefinition->bDrawDebug;
-	DebugLogIntervalSeconds = FMath::Max(0.1f, DirectorDefinition->DebugLogIntervalSeconds);
+	DebugLogIntervalSeconds = ResolveFiniteFloat(DirectorDefinition->DebugLogIntervalSeconds, 1.f, 0.1f, MaxDirectorSeconds);
 
 	UE_LOG(LogEncounterDirector, Display, TEXT("EncounterDirector %s applied DirectorDefinition=%s SpawnGroups=%d."),
 		*GetNameSafe(this),
@@ -291,10 +414,84 @@ void AAeyerjiEncounterDirector::ApplyDirectorDefinition()
 		SpawnGroups.Num());
 }
 
+void AAeyerjiEncounterDirector::SanitizeRuntimeSettings()
+{
+	if (SpawnGroups.Num() > MaxEncounterSpawnGroups)
+	{
+		SpawnGroups.SetNum(MaxEncounterSpawnGroups, EAllowShrinking::No);
+	}
+	TickIntervalSeconds = ResolveFiniteFloat(TickIntervalSeconds, 0.2f, 0.f, MaxDirectorSeconds);
+	MinDistanceBetweenEncounters = ResolveFiniteFloat(MinDistanceBetweenEncounters, 1200.f, 0.f, MaxWorldDistance);
+	KillVelocitySpawnFloor = ResolveFiniteFloat(KillVelocitySpawnFloor, 0.25f, 0.f, MaxRuntimeMultiplier);
+	KillVelocitySpawnCeil = ResolveFiniteFloat(KillVelocitySpawnCeil, 1.5f, 0.01f, MaxRuntimeMultiplier);
+	MinDistanceAtSlow = ResolveFiniteFloat(MinDistanceAtSlow, 1800.f, 0.f, MaxWorldDistance);
+	MinDistanceAtFast = ResolveFiniteFloat(MinDistanceAtFast, 900.f, 0.f, MaxWorldDistance);
+	MinDowntimeAtSlow = ResolveFiniteFloat(MinDowntimeAtSlow, 2.f, 0.f, MaxDirectorSeconds);
+	MinDowntimeAtFast = ResolveFiniteFloat(MinDowntimeAtFast, 0.5f, 0.f, MaxDirectorSeconds);
+	KillVelocityWindowSeconds = ResolveFiniteFloat(KillVelocityWindowSeconds, 6.f, 0.1f, MaxDirectorSeconds);
+	MaxGroupsPerTrigger = FMath::Clamp(MaxGroupsPerTrigger, 1, MaxEncounterSpawnGroups);
+	PostCombatDelaySeconds = ResolveFiniteFloat(PostCombatDelaySeconds, 1.f, 0.f, MaxDirectorSeconds);
+	MaxSpawnsPerTick = FMath::Clamp(MaxSpawnsPerTick, 1, MaxSpawnsPerDirectorTick);
+	MaxSpawnWorkMillisecondsPerTick = ResolveFiniteFloat(MaxSpawnWorkMillisecondsPerTick, 2.f, 0.f, MaxDirectorWorkMilliseconds);
+	MinSpawnDistanceFromPlayer = ResolveFiniteFloat(MinSpawnDistanceFromPlayer, 0.f, 0.f, MaxWorldDistance);
+	RecentPathAvoidRadius = ResolveFiniteFloat(RecentPathAvoidRadius, 600.f, 0.f, MaxWorldDistance);
+	RecentPathSeconds = ResolveFiniteFloat(RecentPathSeconds, 8.f, 0.1f, MaxDirectorSeconds);
+	RecentPathSampleInterval = ResolveFiniteFloat(RecentPathSampleInterval, 0.5f, 0.1f, MaxDirectorSeconds);
+	RecentPathMaxSamples = FMath::Clamp(RecentPathMaxSamples, 1, MaxRecentPathSamples);
+	ForwardSpawnConeDegrees = ResolveFiniteFloat(ForwardSpawnConeDegrees, 120.f, 0.f, 180.f);
+	SpawnLocationSearchAttempts = FMath::Clamp(SpawnLocationSearchAttempts, 1, MaxSpawnAttempts);
+	GroundTraceUpOffset = ResolveFiniteFloat(GroundTraceUpOffset, 120.f, 0.f, MaxWorldDistance);
+	GroundTraceDownDistance = ResolveFiniteFloat(GroundTraceDownDistance, 2000.f, 10.f, MaxWorldDistance);
+	SpawnGroundOffset = ResolveFiniteFloat(SpawnGroundOffset, 5.f, 0.f, MaxWorldDistance);
+	RiftMinimumSpawnDistanceFromPlayers = ResolveFiniteFloat(RiftMinimumSpawnDistanceFromPlayers, 1200.f, 0.f, MaxWorldDistance);
+	RiftPressureEvaluationInterval = ResolveFiniteFloat(RiftPressureEvaluationInterval, 2.f, 0.1f, MaxDirectorSeconds);
+	RiftMinimumActiveEnemyPressure = FMath::Clamp(RiftMinimumActiveEnemyPressure, 0, MaxEncounterPopulation);
+	RiftRegionStagingDistance = ResolveFiniteFloat(RiftRegionStagingDistance, 6500.f, 0.f, MaxWorldDistance);
+	RiftAmbientEnemyFraction = ResolveFiniteFloat(RiftAmbientEnemyFraction, 0.33f, 0.f, 1.f);
+	RiftRevealBatchSize = FMath::Clamp(RiftRevealBatchSize, 1, MaxSpawnsPerDirectorTick);
+	RiftRevealBatchInterval = ResolveFiniteFloat(RiftRevealBatchInterval, 0.15f, 0.f, MaxDirectorSeconds);
+	RiftRevealDurationSeconds = ResolveFiniteFloat(RiftRevealDurationSeconds, 1.f, 0.f, MaxDirectorSeconds);
+	RiftGroundRevealWeight = ResolveFiniteFloat(RiftGroundRevealWeight, 0.75f, 0.f, MaxRuntimeMultiplier);
+	RiftSkyRevealWeight = ResolveFiniteFloat(RiftSkyRevealWeight, 0.25f, 0.f, MaxRuntimeMultiplier);
+	RiftPrewarmActorsPerTick = FMath::Clamp(RiftPrewarmActorsPerTick, 1, MaxSpawnsPerDirectorTick);
+	RiftPrewarmWorkMillisecondsPerTick = ResolveFiniteFloat(RiftPrewarmWorkMillisecondsPerTick, 4.f, 0.f, MaxDirectorWorkMilliseconds);
+	RiftPrewarmReplicationSettleSeconds = ResolveFiniteFloat(RiftPrewarmReplicationSettleSeconds, 1.f, 0.f, MaxDirectorSeconds);
+	RiftEnemyWakeDistance = ResolveFiniteFloat(RiftEnemyWakeDistance, 8000.f, 0.f, MaxWorldDistance);
+	RiftEnemySleepDistance = ResolveFiniteFloat(RiftEnemySleepDistance, 10000.f, RiftEnemyWakeDistance, MaxWorldDistance);
+	RiftMaximumAwakeEnemies = FMath::Clamp(RiftMaximumAwakeEnemies, 1, MaxEncounterPopulation);
+	RiftPressureRadius = ResolveFiniteFloat(RiftPressureRadius, 8000.f, 0.f, MaxWorldDistance);
+	EnemyLODUpdateInterval = ResolveFiniteFloat(EnemyLODUpdateInterval, 0.5f, 0.05f, MaxDirectorSeconds);
+	EnemyLODNearDistance = ResolveFiniteFloat(EnemyLODNearDistance, 4000.f, 0.f, MaxWorldDistance);
+	EnemyLODMidDistance = ResolveFiniteFloat(EnemyLODMidDistance, 8000.f, EnemyLODNearDistance, MaxWorldDistance);
+	EnemyLODFarDistance = ResolveFiniteFloat(EnemyLODFarDistance, 12000.f, EnemyLODMidDistance, MaxWorldDistance);
+	EnemyLODMidTickInterval = ResolveFiniteFloat(EnemyLODMidTickInterval, 0.1f, 0.f, MaxDirectorSeconds);
+	EnemyLODFarTickInterval = ResolveFiniteFloat(EnemyLODFarTickInterval, 0.25f, 0.f, MaxDirectorSeconds);
+	FixedClusterSleepDistance = ResolveFiniteFloat(FixedClusterSleepDistance, 14000.f, 0.f, MaxWorldDistance);
+	FixedClusterWakeDistance = ResolveFiniteFloat(FixedClusterWakeDistance, 11000.f, 0.f, FixedClusterSleepDistance);
+	DebugLogIntervalSeconds = ResolveFiniteFloat(DebugLogIntervalSeconds, 1.f, 0.1f, MaxDirectorSeconds);
+}
+
 FString AAeyerjiEncounterDirector::GetEncounterDirectorDebugString() const
 {
+	int32 PlannedRegions = 0;
+	int32 StagedRegions = 0;
+	int32 RevealingRegions = 0;
+	int32 ActiveRegions = 0;
+	int32 RetiredRegions = 0;
+	for (const FRiftRegionPlan& Plan : RiftRegionPlans)
+	{
+		switch (Plan.State)
+		{
+		case FRiftRegionPlan::EState::Planned: ++PlannedRegions; break;
+		case FRiftRegionPlan::EState::Staged: ++StagedRegions; break;
+		case FRiftRegionPlan::EState::Revealing: ++RevealingRegions; break;
+		case FRiftRegionPlan::EState::Active: ++ActiveRegions; break;
+		case FRiftRegionPlan::EState::Retired: ++RetiredRegions; break;
+		}
+	}
+	const AAeyerjiSpawnerGroup* RiftSpawner = RiftPopulationSpawner.Get();
 	return FString::Printf(
-		TEXT("EncounterDirector=%s Definition=%s State=%s Groups=%d Active=%d Progress=%d/%d BossSpawned=%d FixedActive=%d FixedRemaining=%d"),
+		TEXT("EncounterDirector=%s Definition=%s State=%s Groups=%d Active=%d Progress=%d/%d BossSpawned=%d FixedActive=%d FixedRemaining=%d RiftSerial=%d Prewarm=%d Remaining=%d Frontier=%d Regions=%d/%d/%d/%d/%d Pool=%d Checkout=%d Emergency=%d"),
 		*GetNameSafe(this),
 		*GetNameSafe(DirectorDefinition),
 		*StaticEnum<EEncounterDirectorState>()->GetNameStringByValue(static_cast<int64>(DirectorState)),
@@ -304,12 +501,24 @@ FString AAeyerjiEncounterDirector::GetEncounterDirectorDebugString() const
 		TotalToKill,
 		bBossSpawned ? 1 : 0,
 		bFixedPopulationActive ? 1 : 0,
-		FixedPopulationRemaining);
+		FixedPopulationRemaining,
+		RiftRegionRunSerial,
+		bRiftPopulationPrewarmComplete ? 1 : 0,
+		RiftPrewarmQueue.Num(),
+		HighestRiftProgressionIndex,
+		PlannedRegions,
+		StagedRegions,
+		RevealingRegions,
+		ActiveRegions,
+		RetiredRegions,
+		RiftSpawner ? RiftSpawner->GetInactivePooledEnemyCount() : 0,
+		RiftSpawner ? RiftSpawner->GetPooledCheckoutCount() : 0,
+		RiftSpawner ? RiftSpawner->GetEmergencyRuntimeSpawnCount() : 0);
 }
 
 void AAeyerjiEncounterDirector::RegisterExternalEnemy(AEnemyParentNative* Enemy, bool bEnterCombatState)
 {
-	if (GetNetMode() == NM_Client || !IsValid(Enemy))
+	if (!HasAuthority() || !IsValid(Enemy) || Enemy->GetWorld() != GetWorld())
 	{
 		return;
 	}
@@ -338,7 +547,7 @@ void AAeyerjiEncounterDirector::RegisterExternalEnemy(AEnemyParentNative* Enemy,
 
 void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy, const int32 ProgressPoints, const int32 RunSerial)
 {
-	if (GetNetMode() == NM_Client || !IsValid(Enemy))
+	if (!HasAuthority() || !IsValid(Enemy) || Enemy->GetWorld() != GetWorld())
 	{
 		return;
 	}
@@ -357,7 +566,7 @@ void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy,
 		{
 			return;
 		}
-		RegisteredProgressEnemyPoints.Add(EnemyKey, FMath::Max(ProgressPoints, 1));
+		RegisteredProgressEnemyPoints.Add(EnemyKey, FMath::Clamp(ProgressPoints, 1, MaxProgressPoints));
 	}
 	else
 	{
@@ -371,13 +580,17 @@ void AAeyerjiEncounterDirector::RegisterProgressEnemy(AEnemyParentNative* Enemy,
 	}
 
 	ProgressOnlyEnemies.Add(Enemy);
+	if (WeightedProgressRunSerial > 0)
+	{
+		RegisterSpawnedEnemy(Enemy);
+	}
 	Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
 	Enemy->OnEnemyDied.AddDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
 	Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
 	Enemy->OnDestroyed.AddDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
 	UE_LOG(LogEncounterDirector, Verbose,
 		TEXT("[RiftRun][Registration] RunSerial=%d Enemy=%s Points=%d Registered=%d"),
-		WeightedProgressRunSerial, *GetNameSafe(Enemy), FMath::Max(ProgressPoints, 1),
+		WeightedProgressRunSerial, *GetNameSafe(Enemy), FMath::Clamp(ProgressPoints, 1, MaxProgressPoints),
 		RegisteredProgressEnemyPoints.Num());
 }
 
@@ -401,11 +614,11 @@ void AAeyerjiEncounterDirector::BeginWeightedProgressRun(const int32 RunSerial, 
 	}
 	ProgressOnlyEnemies.Reset();
 	RegisteredProgressEnemyPoints.Reset();
-	WeightedProgressRunSerial = RunSerial;
+	WeightedProgressRunSerial = FMath::Clamp(RunSerial, 1, MAX_int32);
 	bWeightedProgressFrozen = false;
 	EnemiesDefeated = 0;
 	WeightedProgressPoints = 0;
-	WeightedProgressTarget = FMath::Max(ProgressTargetPoints, 1);
+	WeightedProgressTarget = FMath::Clamp(ProgressTargetPoints, 1, MaxProgressPoints);
 	KilledCount = 0;
 	TotalToKill = WeightedProgressTarget;
 	bBossSpawned = false;
@@ -429,17 +642,31 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 	FString& OutReason)
 {
 	OutReason.Reset();
-	if (!HasAuthority() || RunSerial <= 0 || ProgressTargetPoints <= 0 || EnemyBudget <= 0)
+	if (!HasAuthority()
+		|| RunSerial <= 0
+		|| ProgressTargetPoints <= 0
+		|| EnemyBudget <= 0
+		|| !FMath::IsFinite(ActivationDistance)
+		|| !FMath::IsFinite(DensityMultiplier)
+		|| !FMath::IsFinite(EliteRateMultiplier)
+		|| !FMath::IsFinite(EncounterSizeMultiplier)
+		|| !FMath::IsFinite(ProgressMultiplier))
 	{
 		OutReason = TEXT("Invalid Rift region run serial, target, or enemy budget");
 		return false;
 	}
+	if ((IsValid(SpawnManager) && SpawnManager->GetWorld() != GetWorld())
+		|| (IsValid(LevelDirector) && LevelDirector->GetWorld() != GetWorld()))
+	{
+		OutReason = TEXT("Rift population executor and level director must belong to this world");
+		return false;
+	}
 
 	ResetRiftRegionRun();
-	RiftRegionRunSerial = RunSerial;
-	RiftRegionActivationDistance = FMath::Max(ActivationDistance, 0.f);
-	RiftEliteRateMultiplier = FMath::Max(EliteRateMultiplier, 0.f);
-	RiftProgressMultiplier = FMath::Max(ProgressMultiplier, 0.1f);
+	RiftRegionRunSerial = FMath::Clamp(RunSerial, 1, MAX_int32);
+	RiftRegionActivationDistance = ResolveFiniteFloat(ActivationDistance, 2500.f, 0.f, MaxWorldDistance);
+	RiftEliteRateMultiplier = ResolveFiniteFloat(EliteRateMultiplier, 1.f, 0.f, MaxRuntimeMultiplier);
+	RiftProgressMultiplier = ResolveFiniteFloat(ProgressMultiplier, 1.f, 0.1f, MaxRuntimeMultiplier);
 	NextRiftPressureEvaluationTime = 0.0;
 	RiftSpawnStream.Initialize(RunSeed != 0 ? RunSeed : RunSerial);
 	// Never repurpose the boss executor as the common population manager. A missing
@@ -458,6 +685,10 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 	TArray<const UEnemySpawnGroupDefinition*> ValidGroups;
 	for (const UEnemySpawnGroupDefinition* Group : SpawnGroups)
 	{
+		if (ValidGroups.Num() >= MaxEncounterSpawnGroups)
+		{
+			break;
+		}
 		if (IsValid(Group) && !Group->EnemyTypes.IsEmpty())
 		{
 			ValidGroups.Add(Group);
@@ -477,6 +708,10 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 
 	for (TActorIterator<AAeyerjiSpawnRegion> It(World); It; ++It)
 	{
+		if (RiftRegionPlans.Num() >= MaxRiftRegions)
+		{
+			break;
+		}
 		AAeyerjiSpawnRegion* Region = *It;
 		if (!IsValid(Region) || !Region->IsRiftEncounterEligible())
 		{
@@ -486,9 +721,22 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 		FRiftRegionPlan Plan;
 		Plan.Region = Region;
 		Plan.Bounds = Region->GetRegionBounds();
+		if (!IsFiniteBox(Plan.Bounds))
+		{
+			continue;
+		}
 		Plan.StableKey = Region->GetPathName();
-		Plan.Weight = FMath::Max(Region->RegionWeight, 0.f);
+		Plan.Weight = ResolveFiniteFloat(Region->RegionWeight, 0.f, 0.f, MaxRuntimeMultiplier);
 		Plan.EncounterGroup = Region->RiftEncounterGroup;
+		Plan.ProgressionIndex = Region->RiftProgressionIndex;
+		if (Plan.ProgressionIndex < 0 || Plan.ProgressionIndex >= MaxRiftRegions)
+		{
+			OutReason = FString::Printf(
+				TEXT("Rift SpawnRegion %s is missing a non-negative RiftProgressionIndex"),
+				*Plan.StableKey);
+			ResetRiftRegionRun();
+			return false;
+		}
 		if (Plan.EncounterGroup.IsValid() && Plan.EncounterGroup->EnemyTypes.IsEmpty())
 		{
 			OutReason = FString::Printf(TEXT("Encounter anchor %s references empty group %s"),
@@ -500,6 +748,10 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 	}
 	RiftRegionPlans.Sort([](const FRiftRegionPlan& Left, const FRiftRegionPlan& Right)
 	{
+		if (Left.ProgressionIndex != Right.ProgressionIndex)
+		{
+			return Left.ProgressionIndex < Right.ProgressionIndex;
+		}
 		return Left.StableKey < Right.StableKey;
 	});
 	if (RiftRegionPlans.IsEmpty())
@@ -529,14 +781,20 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 	{
 		RegionWeights.Add(Plan.Weight);
 	}
-	const int32 EffectiveEnemyBudget = FMath::Max(FMath::RoundToInt(EnemyBudget
-		* FMath::Max(DensityMultiplier, 0.1f)
-		* FMath::Max(EncounterSizeMultiplier, 0.1f)), 1);
+	const int32 SafeEnemyBudget = FMath::Clamp(EnemyBudget, 1, MaxEncounterPopulation);
+	const double SafeDensityMultiplier = FMath::Clamp(static_cast<double>(DensityMultiplier), 0.1, static_cast<double>(MaxRuntimeMultiplier));
+	const double SafeEncounterSizeMultiplier = FMath::Clamp(static_cast<double>(EncounterSizeMultiplier), 0.1, static_cast<double>(MaxRuntimeMultiplier));
+	const double EffectiveBudgetValue = FMath::Clamp(
+		static_cast<double>(SafeEnemyBudget) * SafeDensityMultiplier * SafeEncounterSizeMultiplier,
+		1.0,
+		static_cast<double>(MaxEncounterPopulation));
+	const int32 EffectiveEnemyBudget = static_cast<int32>(FMath::RoundToDouble(EffectiveBudgetValue));
+	const int32 SafeProgressTarget = FMath::Clamp(ProgressTargetPoints, 1, MaxProgressPoints);
 	const TArray<int32> RegionBudgets = AeyerjiRiftRules::AllocateLargestRemainder(RegionWeights, EffectiveEnemyBudget);
 	RiftReservedRegionRequests.SetNum(RiftRegionPlans.Num());
 
 	const UEnemySpawnGroupDefinition* LastPlannedGroup = nullptr;
-	int32 PlannedProgressPoints = 0;
+	int64 PlannedProgressPoints = 0;
 	for (int32 RegionIndex = 0; RegionIndex < RiftRegionPlans.Num(); ++RegionIndex)
 	{
 		FRiftRegionPlan& Plan = RiftRegionPlans[RegionIndex];
@@ -571,8 +829,15 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 
 			const AAeyerjiSpawnRegion* Region = Plan.Region.Get();
 			const bool bCanUseElitePool = Region && Region->bAllowElites && !Group->EliteEnemyTypes.IsEmpty();
+			const float GroupEliteChance = ResolveFiniteFloat(Group->RiftEliteChance, 0.f, 0.f, 1.f);
+			const float RegionEliteBonus = Region
+				? ResolveFiniteFloat(Region->EliteChanceBonus, 0.f, -1.f, 1.f)
+				: 0.f;
 			const float EliteChance = Region
-				? FMath::Clamp((Group->RiftEliteChance + Region->EliteChanceBonus) * RiftEliteRateMultiplier, 0.f, 1.f)
+				? static_cast<float>(FMath::Clamp(
+					(static_cast<double>(GroupEliteChance) + RegionEliteBonus) * RiftEliteRateMultiplier,
+					0.0,
+					1.0))
 				: 0.f;
 			const bool bPlanElite = bCanUseElitePool && RiftSpawnStream.FRand() <= EliteChance;
 			const TArray<TSubclassOf<AEnemyParentNative>>& ClassPool = bPlanElite
@@ -581,6 +846,10 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 			TArray<TSubclassOf<AEnemyParentNative>> ValidClasses;
 			for (const TSubclassOf<AEnemyParentNative> EnemyClass : ClassPool)
 			{
+				if (ValidClasses.Num() >= MaxEnemyClassesPerGroup)
+				{
+					break;
+				}
 				if (*EnemyClass)
 				{
 					ValidClasses.Add(EnemyClass);
@@ -598,31 +867,40 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 			Request.RegionPlanIndex = RegionIndex;
 			Request.EnemyClass = ValidClasses[RiftSpawnStream.RandRange(0, ValidClasses.Num() - 1)];
 			Request.bIsElite = bPlanElite;
-			Request.ProgressPoints = FMath::Max(FMath::RoundToInt(
-				(bPlanElite ? Group->RiftEliteProgressPoints : Group->RiftProgressPoints) * RiftProgressMultiplier), 1);
-			PlannedProgressPoints += Request.ProgressPoints;
-			Plan.ReservedProgress += Request.ProgressPoints;
+			const int32 BaseProgressPoints = FMath::Clamp(
+				bPlanElite ? Group->RiftEliteProgressPoints : Group->RiftProgressPoints,
+				1,
+				MaxProgressPoints);
+			const double ResolvedProgressPoints = FMath::Clamp(
+				static_cast<double>(BaseProgressPoints) * RiftProgressMultiplier,
+				1.0,
+				static_cast<double>(MaxProgressPoints));
+			Request.ProgressPoints = static_cast<int32>(FMath::RoundToDouble(ResolvedProgressPoints));
+			PlannedProgressPoints = FMath::Min<int64>(
+				static_cast<int64>(MaxProgressPoints),
+				PlannedProgressPoints + Request.ProgressPoints);
+			Plan.ReservedProgress = FMath::Min(MaxProgressPoints, Plan.ReservedProgress + Request.ProgressPoints);
 		}
 
 		UE_LOG(LogEncounterDirector, Display,
-			TEXT("[RiftRun][EncounterPlan] RunSerial=%d Seed=%d EncounterGroup=%s Anchor=%s Weight=%.3f Budget=%d ReservedProgress=%d"),
-			RunSerial, RunSeed, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), Plan.Weight,
+			TEXT("[RiftRun][EncounterPlan] RunSerial=%d Seed=%d Anchor=%s Index=%d EncounterGroup=%s Weight=%.3f Budget=%d ReservedProgress=%d"),
+			RunSerial, RunSeed, *Plan.StableKey, Plan.ProgressionIndex, *GetNameSafe(Plan.EncounterGroup.Get()), Plan.Weight,
 			Plan.Budget, Plan.ReservedProgress);
 	}
 
-	const float ReserveRatio = static_cast<float>(PlannedProgressPoints) / static_cast<float>(ProgressTargetPoints);
-	if (ReserveRatio < 1.2f)
+	const double ReserveRatio = static_cast<double>(PlannedProgressPoints) / static_cast<double>(SafeProgressTarget);
+	if (ReserveRatio < 1.2)
 	{
-		OutReason = FString::Printf(TEXT("Reserved progress %d is below 120%% of target %d"),
-			PlannedProgressPoints, ProgressTargetPoints);
+		OutReason = FString::Printf(TEXT("Reserved progress %lld is below 120%% of target %d"),
+			PlannedProgressPoints, SafeProgressTarget);
 		ResetRiftRegionRun();
 		return false;
 	}
-	if (ReserveRatio > 1.3f)
+	if (ReserveRatio > 1.3)
 	{
 		UE_LOG(LogEncounterDirector, Warning,
-			TEXT("[RiftRun][RegionPlan] RunSerial=%d reserved progress %d is %.1f%% of target %d (above 130%%)"),
-			RunSerial, PlannedProgressPoints, ReserveRatio * 100.f, ProgressTargetPoints);
+			TEXT("[RiftRun][RegionPlan] RunSerial=%d reserved progress %lld is %.1f%% of target %d (above 130%%)"),
+			RunSerial, PlannedProgressPoints, ReserveRatio * 100.0, SafeProgressTarget);
 	}
 
 	if (!RiftPopulationSpawner.IsValid())
@@ -641,7 +919,7 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 			Spawned->bSuppressDoorControl = true;
 			Spawned->bAllowManualActivationWithoutWaves = true;
 			Spawned->PoolSettings.bEnablePooling = true;
-			Spawned->PoolSettings.bPrewarmDuringWorldFlowLoading = false;
+			Spawned->PoolSettings.bPrewarmDuringWorldFlowLoading = true;
 			UGameplayStatics::FinishSpawningActor(Spawned, SpawnTransform);
 			RiftPopulationSpawner = Spawned;
 			bSpawnedRiftPopulationSpawner = true;
@@ -656,15 +934,67 @@ bool AAeyerjiEncounterDirector::BeginRiftRegionRun(
 	}
 	ResolvedSpawner->ResetEncounter();
 	ResolvedSpawner->ConfigureAsRiftPopulationExecutor(LevelDirector);
+	ResolvedSpawner->BeginExactPoolPrewarm(EffectiveEnemyBudget);
 
-	BeginWeightedProgressRun(RunSerial, ProgressTargetPoints);
-	bRiftRegionActivationEnabled = true;
+	RiftPrewarmQueue.Reset();
+	RiftPrewarmQueue.Reserve(EffectiveEnemyBudget);
+	for (const TArray<FRiftSpawnRequest>& ReservedRequests : RiftReservedRegionRequests)
+	{
+		for (const FRiftSpawnRequest& Request : ReservedRequests)
+		{
+			FEnemySet& EnemyTemplate = RiftPrewarmQueue.AddDefaulted_GetRef();
+			EnemyTemplate.EnemyClass = Request.EnemyClass;
+			EnemyTemplate.Count = 1;
+			EnemyTemplate.ProgressPoints = FMath::Max(Request.ProgressPoints, 1);
+			EnemyTemplate.SpawnInterval = 0.f;
+			EnemyTemplate.EnemyArchetypeTag = ResolveArchetypeTagFromClass(Request.EnemyClass);
+			EnemyTemplate.bIsElite = Request.bIsElite;
+		}
+	}
+
+	BeginWeightedProgressRun(RunSerial, SafeProgressTarget);
+	bRiftRegionActivationEnabled = false;
+	bRiftPopulationPrewarmInProgress = !RiftPrewarmQueue.IsEmpty();
+	bRiftPopulationPrewarmComplete = RiftPrewarmQueue.IsEmpty();
+	RiftPrewarmFinalizeTime = 0.0;
+	RiftPrewarmStartPlatformSeconds = bRiftPopulationPrewarmInProgress ? FPlatformTime::Seconds() : 0.0;
+	RiftPrewarmGameThreadWorkSeconds = 0.0;
+	RiftPrewarmConstructionPasses = 0;
+	RiftPrewarmInitialPopulation = RiftPrewarmQueue.Num();
+	if (bRiftPopulationPrewarmInProgress)
+	{
+		// Actor/UObject construction is game-thread only, so remove the director's normal 0.2 s
+		// scheduling gap while the loading screen is already gating gameplay.
+		SetActorTickInterval(0.f);
+	}
+	HighestRiftProgressionIndex = INDEX_NONE;
+	if (bRiftPopulationPrewarmComplete)
+	{
+		ResolvedSpawner->FinalizeExactPoolPrewarm();
+		OnRiftPopulationPrewarmComplete.Broadcast(this);
+	}
 	UE_LOG(LogEncounterDirector, Display,
-		TEXT("[RiftRun][EncounterPlan] Ready RunSerial=%d Seed=%d Anchors=%d BaseBudget=%d EffectiveBudget=%d ReservedProgress=%d Target=%d ActivationDistance=%.1f Density=%.2f Elite=%.2f EncounterSize=%.2f Progress=%.2f"),
-		RunSerial, RunSeed, RiftRegionPlans.Num(), EnemyBudget, EffectiveEnemyBudget, PlannedProgressPoints,
-		ProgressTargetPoints, RiftRegionActivationDistance, DensityMultiplier, RiftEliteRateMultiplier,
+		TEXT("[RiftRun][EncounterPlan] Prewarming RunSerial=%d Seed=%d Anchors=%d BaseBudget=%d EffectiveBudget=%d ReservedProgress=%lld Target=%d ActivationDistance=%.1f StagingDistance=%.1f Density=%.2f Elite=%.2f EncounterSize=%.2f Progress=%.2f"),
+		RunSerial, RunSeed, RiftRegionPlans.Num(), SafeEnemyBudget, EffectiveEnemyBudget, PlannedProgressPoints,
+		SafeProgressTarget, RiftRegionActivationDistance, RiftRegionStagingDistance,
+		DensityMultiplier, RiftEliteRateMultiplier,
 		EncounterSizeMultiplier, RiftProgressMultiplier);
 	return true;
+}
+
+void AAeyerjiEncounterDirector::ActivatePreparedRiftRun()
+{
+	if (!HasAuthority() || RiftRegionRunSerial <= 0 || !bRiftPopulationPrewarmComplete)
+	{
+		return;
+	}
+
+	bRiftRegionActivationEnabled = true;
+	NextRiftPressureEvaluationTime = 0.0;
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][EncounterPlan] Activated prewarmed population RunSerial=%d InactivePool=%d"),
+		RiftRegionRunSerial,
+		RiftPopulationSpawner.IsValid() ? RiftPopulationSpawner->GetInactivePooledEnemyCount() : 0);
 }
 
 void AAeyerjiEncounterDirector::StopRiftRegionActivation()
@@ -681,17 +1011,60 @@ void AAeyerjiEncounterDirector::StopRiftRegionActivation()
 
 void AAeyerjiEncounterDirector::ResetRiftRegionRun()
 {
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// A new run must not inherit prior Rift enemies in pressure/LOD or objective
+	// ledgers. The pool executor owns their physical teardown/reuse below.
+	if (WeightedProgressRunSerial > 0)
+	{
+		for (const TWeakObjectPtr<AActor>& EnemyPtr : ProgressOnlyEnemies)
+		{
+			if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPtr.Get()))
+			{
+				Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDied);
+				Enemy->OnEnemyDied.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleTrackedEnemyDied);
+				Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleProgressEnemyDestroyed);
+				Enemy->OnDestroyed.RemoveDynamic(this, &AAeyerjiEncounterDirector::HandleTrackedEnemyDestroyed);
+				LiveEnemies.RemoveSingleSwap(Enemy, EAllowShrinking::No);
+				RemoveEnemyLODState(Enemy);
+			}
+		}
+		ProgressOnlyEnemies.Reset();
+		RegisteredProgressEnemyPoints.Reset();
+		ActiveEnemyCount = LiveEnemies.Num();
+		WeightedProgressRunSerial = 0;
+		bWeightedProgressFrozen = false;
+	}
+
 	bRiftRegionActivationEnabled = false;
 	RiftRegionPlans.Reset();
 	RiftReservedRegionRequests.Reset();
 	RiftSpawnQueue.Reset();
+	RiftPrewarmQueue.Reset();
 	RiftParticipantRegionLatch.Reset();
 	RiftRegionRunSerial = 0;
 	RiftRegionActivationDistance = 2500.f;
 	RiftEliteRateMultiplier = 1.f;
 	RiftProgressMultiplier = 1.f;
 	NextRiftPressureEvaluationTime = 0.0;
+	RiftPrewarmFinalizeTime = 0.0;
+	HighestRiftProgressionIndex = INDEX_NONE;
+	bRiftPopulationPrewarmInProgress = false;
+	bRiftPopulationPrewarmComplete = false;
+	SetActorTickInterval(TickIntervalSeconds);
+	RiftPrewarmStartPlatformSeconds = 0.0;
+	RiftPrewarmGameThreadWorkSeconds = 0.0;
+	RiftPrewarmConstructionPasses = 0;
+	RiftPrewarmInitialPopulation = 0;
 	RiftLevelDirector.Reset();
+
+	if (AAeyerjiSpawnerGroup* ExistingSpawner = RiftPopulationSpawner.Get())
+	{
+		ExistingSpawner->ReleaseEnemyPool(/*bDestroyInactiveEnemies=*/true);
+	}
 
 	if (bSpawnedRiftPopulationSpawner)
 	{
@@ -702,6 +1075,108 @@ void AAeyerjiEncounterDirector::ResetRiftRegionRun()
 	}
 	RiftPopulationSpawner.Reset();
 	bSpawnedRiftPopulationSpawner = false;
+}
+
+void AAeyerjiEncounterDirector::ProcessRiftPopulationPrewarm()
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Aeyerji_RiftPopulationPrewarm);
+	SCOPE_CYCLE_COUNTER(STAT_AeyerjiRiftPopulationPrewarm);
+
+	if (!HasAuthority() || !bRiftPopulationPrewarmInProgress || bRiftPopulationPrewarmComplete)
+	{
+		return;
+	}
+
+	AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get();
+	UWorld* World = GetWorld();
+	if (!Spawner || !World)
+	{
+		return;
+	}
+
+	if (RiftPrewarmQueue.IsEmpty())
+	{
+		if (RiftPrewarmFinalizeTime <= 0.0)
+		{
+			const float SettleSeconds = World->GetNetMode() == NM_Standalone
+				? 0.f
+				: ResolveFiniteFloat(RiftPrewarmReplicationSettleSeconds, 1.f, 0.f, MaxDirectorSeconds);
+			RiftPrewarmFinalizeTime = World->GetTimeSeconds()
+				+ SettleSeconds;
+		}
+		if (World->GetTimeSeconds() >= RiftPrewarmFinalizeTime)
+		{
+			FinalizeRiftPopulationPrewarm();
+		}
+		return;
+	}
+
+	const int32 ActorBudget = FMath::Clamp(RiftPrewarmActorsPerTick, 1, MaxSpawnsPerDirectorTick);
+	const float WorkMilliseconds = ResolveFiniteFloat(
+		RiftPrewarmWorkMillisecondsPerTick,
+		4.f,
+		0.f,
+		MaxDirectorWorkMilliseconds);
+	const double Deadline = FPlatformTime::Seconds()
+		+ (WorkMilliseconds / 1000.0);
+	const double PassStartSeconds = FPlatformTime::Seconds();
+	++RiftPrewarmConstructionPasses;
+	int32 Attempted = 0;
+	while (Attempted < ActorBudget
+		&& !RiftPrewarmQueue.IsEmpty()
+		&& (Attempted == 0 || WorkMilliseconds <= 0.f || FPlatformTime::Seconds() < Deadline))
+	{
+		// Construction order does not affect the frozen encounter plan. Pop from the end to
+		// avoid shifting the remaining array after every one of potentially hundreds of actors.
+		const FEnemySet ExactEnemySet = RiftPrewarmQueue.Pop(EAllowShrinking::No);
+		if (Spawner->PrewarmExactEnemy(ExactEnemySet))
+		{
+		}
+		else
+		{
+			UE_LOG(LogEncounterDirector, Error,
+				TEXT("[RiftRun][Prewarm] Skipped invalid exact entry RunSerial=%d Class=%s Remaining=%d"),
+				RiftRegionRunSerial,
+				*GetNameSafe(ExactEnemySet.EnemyClass),
+				RiftPrewarmQueue.Num());
+			// A bad class must not hold the loading gate forever. Runtime spawning can
+			// still use the spawner's bounded emergency-construction path.
+		}
+		++Attempted;
+	}
+	RiftPrewarmGameThreadWorkSeconds += FPlatformTime::Seconds() - PassStartSeconds;
+}
+
+void AAeyerjiEncounterDirector::FinalizeRiftPopulationPrewarm()
+{
+	if (!HasAuthority() || bRiftPopulationPrewarmComplete)
+	{
+		return;
+	}
+
+	if (AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get())
+	{
+		Spawner->FinalizeExactPoolPrewarm();
+	}
+	bRiftPopulationPrewarmInProgress = false;
+	bRiftPopulationPrewarmComplete = true;
+	RiftPrewarmFinalizeTime = 0.0;
+	SetActorTickInterval(TickIntervalSeconds);
+	const double WallMilliseconds = RiftPrewarmStartPlatformSeconds > 0.0
+		? (FPlatformTime::Seconds() - RiftPrewarmStartPlatformSeconds) * 1000.0
+		: 0.0;
+	const double WorkMilliseconds = RiftPrewarmGameThreadWorkSeconds * 1000.0;
+
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][Prewarm] Complete RunSerial=%d Planned=%d Constructed=%d Inactive=%d Passes=%d WallMs=%.1f GameThreadWorkMs=%.1f"),
+		RiftRegionRunSerial,
+		RiftPrewarmInitialPopulation,
+		RiftPopulationSpawner.IsValid() ? RiftPopulationSpawner->GetPrewarmConstructionCount() : 0,
+		RiftPopulationSpawner.IsValid() ? RiftPopulationSpawner->GetInactivePooledEnemyCount() : 0,
+		RiftPrewarmConstructionPasses,
+		WallMilliseconds,
+		WorkMilliseconds);
+	OnRiftPopulationPrewarmComplete.Broadcast(this);
 }
 
 void AAeyerjiEncounterDirector::ProcessRiftRegionActivation()
@@ -722,37 +1197,39 @@ void AAeyerjiEncounterDirector::ProcessRiftRegionActivation()
 		return;
 	}
 
-	const float ActivationDistanceSquared = FMath::Square(FMath::Max(RiftRegionActivationDistance, 0.f));
-	int32 BestRegionIndex = INDEX_NONE;
-	APawn* BestParticipant = nullptr;
-	float BestDistanceSquared = TNumericLimits<float>::Max();
+	TArray<APawn*> LivingParticipants;
+	GetLivingRiftParticipants(LivingParticipants);
+	if (LivingParticipants.IsEmpty())
+	{
+		return;
+	}
+
+	const float SafeStagingDistance = ResolveFiniteFloat(RiftRegionStagingDistance, 6500.f, 0.f, MaxWorldDistance);
+	const float SafeActivationDistance = ResolveFiniteFloat(RiftRegionActivationDistance, 2500.f, 0.f, MaxWorldDistance);
+	const float StagingDistance = FMath::Max(SafeStagingDistance, SafeActivationDistance);
+	const float StagingDistanceSquared = FMath::Square(StagingDistance);
+	int32 BestStageRegionIndex = INDEX_NONE;
+	APawn* BestStageParticipant = nullptr;
+	float BestStageDistanceSquared = TNumericLimits<float>::Max();
+	int32 BestStageProgressionIndex = MAX_int32;
 	for (int32 RegionIndex = 0; RegionIndex < RiftRegionPlans.Num(); ++RegionIndex)
 	{
 		const FRiftRegionPlan& Plan = RiftRegionPlans[RegionIndex];
-		if (Plan.bConsumed || Plan.Budget <= 0 || !Plan.Region.IsValid() || !Plan.Bounds.IsValid)
+		if (Plan.State != FRiftRegionPlan::EState::Planned
+			|| Plan.Budget <= 0
+			|| !AeyerjiRiftRules::CanStageProgressionIndex(
+				Plan.ProgressionIndex,
+				HighestRiftProgressionIndex)
+			|| !Plan.Region.IsValid()
+			|| !Plan.Bounds.IsValid)
 		{
 			continue;
 		}
 
-		TArray<APawn*> LivingParticipants;
-		GetLivingRiftParticipants(LivingParticipants);
 		for (APawn* Participant : LivingParticipants)
 		{
-			const TWeakObjectPtr<APawn> ParticipantKey(Participant);
-			if (const TWeakObjectPtr<AAeyerjiSpawnRegion>* LatchedRegionPtr = RiftParticipantRegionLatch.Find(ParticipantKey))
-			{
-				const AAeyerjiSpawnRegion* LatchedRegion = LatchedRegionPtr->Get();
-				if (IsValid(LatchedRegion)
-					&& LatchedRegion->GetRegionBounds().ComputeSquaredDistanceToPoint(Participant->GetActorLocation())
-						<= ActivationDistanceSquared)
-				{
-					continue;
-				}
-				RiftParticipantRegionLatch.Remove(ParticipantKey);
-			}
-
 			const float DistanceSquared = Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation());
-			if (DistanceSquared > ActivationDistanceSquared || DistanceSquared >= BestDistanceSquared)
+			if (DistanceSquared > StagingDistanceSquared)
 			{
 				continue;
 			}
@@ -761,14 +1238,57 @@ void AAeyerjiEncounterDirector::ProcessRiftRegionActivation()
 				continue;
 			}
 
-			BestRegionIndex = RegionIndex;
-			BestDistanceSquared = DistanceSquared;
-			BestParticipant = Participant;
+			const bool bEarlierProgression = Plan.ProgressionIndex < BestStageProgressionIndex;
+			const bool bSameProgressionCloser = Plan.ProgressionIndex == BestStageProgressionIndex
+				&& DistanceSquared < BestStageDistanceSquared;
+			if (bEarlierProgression || bSameProgressionCloser)
+			{
+				BestStageRegionIndex = RegionIndex;
+				BestStageProgressionIndex = Plan.ProgressionIndex;
+				BestStageDistanceSquared = DistanceSquared;
+				BestStageParticipant = Participant;
+			}
 		}
 	}
-	if (RiftRegionPlans.IsValidIndex(BestRegionIndex) && IsValid(BestParticipant))
+	if (RiftRegionPlans.IsValidIndex(BestStageRegionIndex) && IsValid(BestStageParticipant))
 	{
-		if (TryActivateRiftEncounterGroup(BestRegionIndex, BestParticipant, TEXT("Proximity")))
+		TryStageRiftEncounterGroup(BestStageRegionIndex, BestStageParticipant, TEXT("Proximity"));
+	}
+
+	const float ActivationDistanceSquared = FMath::Square(SafeActivationDistance);
+	int32 BestRevealRegionIndex = INDEX_NONE;
+	APawn* BestRevealParticipant = nullptr;
+	float BestRevealDistanceSquared = TNumericLimits<float>::Max();
+	for (int32 RegionIndex = 0; RegionIndex < RiftRegionPlans.Num(); ++RegionIndex)
+	{
+		const FRiftRegionPlan& Plan = RiftRegionPlans[RegionIndex];
+		if (Plan.State != FRiftRegionPlan::EState::Staged)
+		{
+			continue;
+		}
+
+		const bool bAmbientEngaged = IsRiftAmbientGroupEngaged(Plan);
+		for (APawn* Participant : LivingParticipants)
+		{
+			const float DistanceSquared = Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation());
+			if (!bAmbientEngaged && DistanceSquared > ActivationDistanceSquared)
+			{
+				continue;
+			}
+			if (DistanceSquared < BestRevealDistanceSquared)
+			{
+				BestRevealRegionIndex = RegionIndex;
+				BestRevealDistanceSquared = DistanceSquared;
+				BestRevealParticipant = Participant;
+			}
+		}
+	}
+	if (RiftRegionPlans.IsValidIndex(BestRevealRegionIndex) && IsValid(BestRevealParticipant))
+	{
+		if (TryBeginRiftEncounterReveal(
+			BestRevealRegionIndex,
+			BestRevealParticipant,
+			IsRiftAmbientGroupEngaged(RiftRegionPlans[BestRevealRegionIndex]) ? TEXT("Engaged") : TEXT("Proximity")))
 		{
 			return;
 		}
@@ -779,9 +1299,10 @@ void AAeyerjiEncounterDirector::ProcessRiftRegionActivation()
 	{
 		return;
 	}
-	NextRiftPressureEvaluationTime = WorldTime + FMath::Max(RiftPressureEvaluationInterval, 0.1f);
+	NextRiftPressureEvaluationTime = WorldTime
+		+ ResolveFiniteFloat(RiftPressureEvaluationInterval, 2.f, 0.1f, MaxDirectorSeconds);
 	const int32 ActivePressure = GetActiveRiftEnemyPressure();
-	if (ActivePressure >= RiftMinimumActiveEnemyPressure)
+	if (ActivePressure >= FMath::Clamp(RiftMinimumActiveEnemyPressure, 0, MaxEncounterPopulation))
 	{
 		return;
 	}
@@ -789,76 +1310,270 @@ void AAeyerjiEncounterDirector::ProcessRiftRegionActivation()
 	const int32 PressurePlanIndex = FindRiftPressureActivationCandidate(PressureParticipant);
 	if (RiftRegionPlans.IsValidIndex(PressurePlanIndex) && IsValid(PressureParticipant))
 	{
-		TryActivateRiftEncounterGroup(PressurePlanIndex, PressureParticipant, TEXT("Timer"));
+		TryStageRiftEncounterGroup(PressurePlanIndex, PressureParticipant, TEXT("Pressure"));
 	}
 }
 
-bool AAeyerjiEncounterDirector::TryActivateRiftEncounterGroup(
+bool AAeyerjiEncounterDirector::TryStageRiftEncounterGroup(
 	const int32 PlanIndex,
 	APawn* Participant,
 	const TCHAR* ActivationReason)
 {
-	if (!RiftRegionPlans.IsValidIndex(PlanIndex) || !IsValid(Participant)
+	TRACE_CPUPROFILER_EVENT_SCOPE(Aeyerji_RiftRegionStaging);
+	SCOPE_CYCLE_COUNTER(STAT_AeyerjiRiftRegionStaging);
+
+	if (!HasAuthority()
+		|| !RiftRegionPlans.IsValidIndex(PlanIndex)
+		|| !IsValid(Participant)
+		|| Participant->GetWorld() != GetWorld()
 		|| !RiftReservedRegionRequests.IsValidIndex(PlanIndex))
 	{
 		return false;
 	}
 	FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
 	TArray<FRiftSpawnRequest>& ReservedRequests = RiftReservedRegionRequests[PlanIndex];
-	if (Plan.bConsumed || ReservedRequests.IsEmpty() || bWeightedProgressFrozen
+	if (Plan.State != FRiftRegionPlan::EState::Planned
+		|| ReservedRequests.IsEmpty()
+		|| !AeyerjiRiftRules::CanStageProgressionIndex(
+			Plan.ProgressionIndex,
+			HighestRiftProgressionIndex)
+		|| bWeightedProgressFrozen
 		|| WeightedProgressPoints >= WeightedProgressTarget)
 	{
 		UE_LOG(LogEncounterDirector, Verbose,
-			TEXT("[RiftRun][EncounterActivation] Rejected RunSerial=%d Anchor=%s Group=%s Reason=%s State=ConsumedOrComplete"),
-			RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason);
+			TEXT("[RiftRun][EncounterStage] Rejected RunSerial=%d Anchor=%s Group=%s Reason=%s State=%d Frontier=%d"),
+			RiftRegionRunSerial,
+			*Plan.StableKey,
+			*GetNameSafe(Plan.EncounterGroup.Get()),
+			ActivationReason,
+			static_cast<int32>(Plan.State),
+			HighestRiftProgressionIndex);
 		return false;
 	}
 
-	FVector SafeLocation;
-	FString RejectReason;
-	const float HalfHeight = GetEnemyHalfHeight(ReservedRequests[0].EnemyClass);
-	if (!ResolveRiftSpawnLocation(Plan, HalfHeight, Participant, SafeLocation, RejectReason))
+	RetireAndRedistributeSkippedRiftRegions(Plan.ProgressionIndex);
+	HighestRiftProgressionIndex = FMath::Max(HighestRiftProgressionIndex, Plan.ProgressionIndex);
+	Plan.State = FRiftRegionPlan::EState::Staged;
+
+	const float AmbientFraction = ResolveFiniteFloat(RiftAmbientEnemyFraction, 0.33f, 0.f, 1.f);
+	const int32 AmbientTarget = FMath::Clamp(
+		FMath::RoundToInt(static_cast<float>(ReservedRequests.Num()) * AmbientFraction),
+		ReservedRequests.IsEmpty() ? 0 : 1,
+		ReservedRequests.Num());
+	int32 AmbientSpawned = 0;
+	for (int32 AmbientIndex = 0; AmbientIndex < AmbientTarget && !ReservedRequests.IsEmpty();)
 	{
-		UE_LOG(LogEncounterDirector, Display,
-			TEXT("[RiftRun][EncounterActivation] Rejected RunSerial=%d Anchor=%s Group=%s Reason=%s Rejected=%s"),
-			RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason,
-			*RejectReason);
-		return false;
+		FRiftSpawnRequest Request = ReservedRequests[0];
+		Request.RevealStyle = EAeyerjiEnemyRevealStyle::Immediate;
+		AEnemyParentNative* SpawnedEnemy = nullptr;
+		if (!SpawnRiftRequest(Request, &SpawnedEnemy))
+		{
+			break;
+		}
+		ReservedRequests.RemoveAt(0, 1, EAllowShrinking::No);
+		if (SpawnedEnemy)
+		{
+			Plan.AmbientEnemies.Add(SpawnedEnemy);
+		}
+		++AmbientIndex;
+		++AmbientSpawned;
 	}
 
-	// Mark consumed before queueing. Both proximity and pressure evaluation execute on
-	// the server, and this is the shared one-shot reservation guard for both paths.
-	Plan.bConsumed = true;
-	RiftSpawnQueue.Append(ReservedRequests);
-	ReservedRequests.Reset();
-	if (FCString::Strcmp(ActivationReason, TEXT("Proximity")) == 0)
+	if (AmbientSpawned <= 0)
 	{
-		TArray<APawn*> LivingParticipants;
-		GetLivingRiftParticipants(LivingParticipants);
-		const float LatchDistanceSquared = FMath::Square(FMath::Max(RiftRegionActivationDistance, 0.f));
-		for (APawn* NearbyParticipant : LivingParticipants)
-		{
-			if (Plan.Bounds.ComputeSquaredDistanceToPoint(NearbyParticipant->GetActorLocation()) <= LatchDistanceSquared)
-			{
-				RiftParticipantRegionLatch.Add(NearbyParticipant, Plan.Region);
-			}
-		}
+		Plan.State = FRiftRegionPlan::EState::Planned;
+		return false;
 	}
-	if (AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get())
+	if (ReservedRequests.IsEmpty())
 	{
-		if (Spawner->IsCleared())
-		{
-			Spawner->ResetEncounter();
-			Spawner->ConfigureAsRiftPopulationExecutor(RiftLevelDirector.Get());
-		}
+		Plan.State = FRiftRegionPlan::EState::Active;
 	}
 
 	const float ActivationDistance = FMath::Sqrt(Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation()));
 	UE_LOG(LogEncounterDirector, Display,
-		TEXT("[RiftRun][EncounterActivation] RunSerial=%d Anchor=%s Group=%s Reason=%s Participant=%s Distance=%.1f Budget=%d PendingSpawns=%d"),
-		RiftRegionRunSerial, *Plan.StableKey, *GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason,
-		*GetNameSafe(Participant), ActivationDistance, Plan.Budget, RiftSpawnQueue.Num());
+		TEXT("[RiftRun][EncounterStage] RunSerial=%d Anchor=%s Index=%d Group=%s Reason=%s Participant=%s Distance=%.1f Ambient=%d Reinforcements=%d Frontier=%d"),
+		RiftRegionRunSerial, *Plan.StableKey, Plan.ProgressionIndex,
+		*GetNameSafe(Plan.EncounterGroup.Get()), ActivationReason,
+		*GetNameSafe(Participant), ActivationDistance, AmbientSpawned, ReservedRequests.Num(),
+		HighestRiftProgressionIndex);
 	return true;
+}
+
+bool AAeyerjiEncounterDirector::TryBeginRiftEncounterReveal(
+	const int32 PlanIndex,
+	APawn* Participant,
+	const TCHAR* ActivationReason)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(Aeyerji_RiftReinforcementReveal);
+	SCOPE_CYCLE_COUNTER(STAT_AeyerjiRiftReinforcementReveal);
+
+	if (!HasAuthority()
+		|| !RiftRegionPlans.IsValidIndex(PlanIndex)
+		|| !RiftReservedRegionRequests.IsValidIndex(PlanIndex)
+		|| !IsValid(Participant)
+		|| Participant->GetWorld() != GetWorld())
+	{
+		return false;
+	}
+
+	FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
+	TArray<FRiftSpawnRequest>& ReservedRequests = RiftReservedRegionRequests[PlanIndex];
+	if (Plan.State != FRiftRegionPlan::EState::Staged || ReservedRequests.IsEmpty())
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	const int32 BatchSize = FMath::Clamp(RiftRevealBatchSize, 1, MaxSpawnsPerDirectorTick);
+	const float BatchInterval = ResolveFiniteFloat(RiftRevealBatchInterval, 0.15f, 0.f, MaxDirectorSeconds);
+	const float RevealDuration = ResolveFiniteFloat(RiftRevealDurationSeconds, 1.f, 0.f, MaxDirectorSeconds);
+	const double Now = World->GetTimeSeconds();
+	for (int32 RequestIndex = 0; RequestIndex < ReservedRequests.Num(); ++RequestIndex)
+	{
+		FRiftSpawnRequest Request = ReservedRequests[RequestIndex];
+		Request.RevealStyle = ResolveRiftRevealStyle();
+		Request.EarliestSpawnTime = Now
+			+ static_cast<double>(RequestIndex / BatchSize) * BatchInterval;
+		RiftSpawnQueue.Add(MoveTemp(Request));
+	}
+	Plan.PendingRevealCount = ReservedRequests.Num();
+	Plan.RevealCompleteTime = Now
+		+ static_cast<double>((FMath::Max(ReservedRequests.Num(), 1) - 1) / BatchSize)
+			* BatchInterval
+		+ RevealDuration;
+	ReservedRequests.Reset();
+	Plan.State = FRiftRegionPlan::EState::Revealing;
+
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][EncounterReveal] RunSerial=%d Anchor=%s Index=%d Reason=%s Participant=%s Reinforcements=%d"),
+		RiftRegionRunSerial,
+		*Plan.StableKey,
+		Plan.ProgressionIndex,
+		ActivationReason,
+		*GetNameSafe(Participant),
+		Plan.PendingRevealCount);
+	return true;
+}
+
+void AAeyerjiEncounterDirector::RetireAndRedistributeSkippedRiftRegions(const int32 NewFrontierIndex)
+{
+	TArray<FRiftSpawnRequest> RetiredRequests;
+	for (int32 PlanIndex = 0; PlanIndex < RiftRegionPlans.Num(); ++PlanIndex)
+	{
+		FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
+		if (Plan.State != FRiftRegionPlan::EState::Planned || Plan.ProgressionIndex >= NewFrontierIndex)
+		{
+			continue;
+		}
+
+		if (RiftReservedRegionRequests.IsValidIndex(PlanIndex))
+		{
+			RetiredRequests.Append(RiftReservedRegionRequests[PlanIndex]);
+			RiftReservedRegionRequests[PlanIndex].Reset();
+		}
+		Plan.State = FRiftRegionPlan::EState::Retired;
+		Plan.Budget = 0;
+		Plan.ReservedProgress = 0;
+	}
+
+	if (RetiredRequests.IsEmpty())
+	{
+		return;
+	}
+
+	TArray<int32> ForwardPlans;
+	for (int32 PlanIndex = 0; PlanIndex < RiftRegionPlans.Num(); ++PlanIndex)
+	{
+		const FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
+		if (Plan.State == FRiftRegionPlan::EState::Planned
+			&& Plan.ProgressionIndex >= NewFrontierIndex
+			&& RiftReservedRegionRequests.IsValidIndex(PlanIndex))
+		{
+			ForwardPlans.Add(PlanIndex);
+		}
+	}
+
+	if (ForwardPlans.IsEmpty())
+	{
+		UE_LOG(LogEncounterDirector, Error,
+			TEXT("[RiftRun][Progression] Unable to redistribute %d skipped requests at frontier %d"),
+			RetiredRequests.Num(),
+			NewFrontierIndex);
+		return;
+	}
+
+	const TArray<int32> DestinationCounts =
+		AeyerjiRiftRules::AllocateTransferredPopulation(RetiredRequests.Num(), ForwardPlans.Num());
+	int32 RequestIndex = 0;
+	for (int32 DestinationOffset = 0; DestinationOffset < ForwardPlans.Num(); ++DestinationOffset)
+	{
+		const int32 DestinationIndex = ForwardPlans[DestinationOffset];
+		const int32 DestinationCount = DestinationCounts.IsValidIndex(DestinationOffset)
+			? DestinationCounts[DestinationOffset]
+			: 0;
+		for (int32 DestinationRequestIndex = 0;
+			DestinationRequestIndex < DestinationCount && RetiredRequests.IsValidIndex(RequestIndex);
+			++DestinationRequestIndex, ++RequestIndex)
+		{
+			FRiftSpawnRequest Request = RetiredRequests[RequestIndex];
+			Request.RegionPlanIndex = DestinationIndex;
+			RiftReservedRegionRequests[DestinationIndex].Add(Request);
+			RiftRegionPlans[DestinationIndex].Budget = FMath::Min(
+				MaxEncounterPopulation,
+				RiftRegionPlans[DestinationIndex].Budget + 1);
+			RiftRegionPlans[DestinationIndex].ReservedProgress = static_cast<int32>(FMath::Min<int64>(
+				MaxProgressPoints,
+				static_cast<int64>(RiftRegionPlans[DestinationIndex].ReservedProgress) + Request.ProgressPoints));
+		}
+	}
+
+	UE_LOG(LogEncounterDirector, Display,
+		TEXT("[RiftRun][Progression] Redistributed skipped requests=%d Frontier=%d Destinations=%d"),
+		RetiredRequests.Num(),
+		NewFrontierIndex,
+		ForwardPlans.Num());
+}
+
+EAeyerjiEnemyRevealStyle AAeyerjiEncounterDirector::ResolveRiftRevealStyle()
+{
+	const float GroundWeight = ResolveFiniteFloat(RiftGroundRevealWeight, 0.75f, 0.f, MaxRuntimeMultiplier);
+	const float SkyWeight = ResolveFiniteFloat(RiftSkyRevealWeight, 0.25f, 0.f, MaxRuntimeMultiplier);
+	const float TotalWeight = GroundWeight + SkyWeight;
+	if (TotalWeight <= UE_SMALL_NUMBER)
+	{
+		return EAeyerjiEnemyRevealStyle::GroundEmergence;
+	}
+	return RiftSpawnStream.FRandRange(0.f, TotalWeight) <= GroundWeight
+		? EAeyerjiEnemyRevealStyle::GroundEmergence
+		: EAeyerjiEnemyRevealStyle::SkyDrop;
+}
+
+bool AAeyerjiEncounterDirector::IsRiftAmbientGroupEngaged(const FRiftRegionPlan& Plan) const
+{
+	for (const TWeakObjectPtr<AEnemyParentNative>& EnemyPtr : Plan.AmbientEnemies)
+	{
+		const AEnemyParentNative* Enemy = EnemyPtr.Get();
+		if (!IsValid(Enemy)
+			|| Enemy->GetEncounterPhase() == EAeyerjiEnemyEncounterPhase::PooledInactive)
+		{
+			// A defeated/destroyed attractor is itself engagement and must not strand the
+			// region in Staged after its visible pack has been cleared.
+			return true;
+		}
+		const AEnemyAIController* EnemyAI = Enemy ? Cast<AEnemyAIController>(Enemy->GetController()) : nullptr;
+		if (Enemy
+			&& (Enemy->HasTakenDamageSincePooledActivation()
+				|| (EnemyAI && IsValid(EnemyAI->GetTargetActor()))))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 int32 AAeyerjiEncounterDirector::FindRiftPressureActivationCandidate(APawn*& OutParticipant) const
@@ -866,23 +1581,37 @@ int32 AAeyerjiEncounterDirector::FindRiftPressureActivationCandidate(APawn*& Out
 	OutParticipant = nullptr;
 	TArray<APawn*> LivingParticipants;
 	GetLivingRiftParticipants(LivingParticipants);
-	const float ActivationDistanceSquared = FMath::Square(FMath::Max(RiftRegionActivationDistance, 0.f));
+	const float StagingDistanceSquared = FMath::Square(FMath::Max(
+		ResolveFiniteFloat(RiftRegionStagingDistance, 6500.f, 0.f, MaxWorldDistance),
+		ResolveFiniteFloat(RiftRegionActivationDistance, 2500.f, 0.f, MaxWorldDistance)));
 	float BestDistanceSquared = TNumericLimits<float>::Max();
+	int32 BestProgressionIndex = MAX_int32;
 	int32 BestPlanIndex = INDEX_NONE;
 	for (int32 PlanIndex = 0; PlanIndex < RiftRegionPlans.Num(); ++PlanIndex)
 	{
 		const FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
-		if (Plan.bConsumed || Plan.Budget <= 0 || !Plan.Region.IsValid() || !Plan.Bounds.IsValid)
+		if (Plan.State != FRiftRegionPlan::EState::Planned
+			|| !AeyerjiRiftRules::CanStageProgressionIndex(
+				Plan.ProgressionIndex,
+				HighestRiftProgressionIndex)
+			|| Plan.Budget <= 0
+			|| !Plan.Region.IsValid()
+			|| !Plan.Bounds.IsValid)
 		{
 			continue;
 		}
 		for (APawn* Participant : LivingParticipants)
 		{
 			const float DistanceSquared = Plan.Bounds.ComputeSquaredDistanceToPoint(Participant->GetActorLocation());
-			if (DistanceSquared <= ActivationDistanceSquared && DistanceSquared < BestDistanceSquared
+			const bool bBetterProgression = Plan.ProgressionIndex < BestProgressionIndex;
+			const bool bSameProgressionCloser = Plan.ProgressionIndex == BestProgressionIndex
+				&& DistanceSquared < BestDistanceSquared;
+			if (DistanceSquared <= StagingDistanceSquared
+				&& (bBetterProgression || bSameProgressionCloser)
 				&& IsRiftRegionReachableFromParticipant(Plan.Anchor, Participant))
 			{
 				BestPlanIndex = PlanIndex;
+				BestProgressionIndex = Plan.ProgressionIndex;
 				BestDistanceSquared = DistanceSquared;
 				OutParticipant = Participant;
 			}
@@ -893,10 +1622,38 @@ int32 AAeyerjiEncounterDirector::FindRiftPressureActivationCandidate(APawn*& Out
 
 int32 AAeyerjiEncounterDirector::GetActiveRiftEnemyPressure() const
 {
+	TArray<APawn*> LivingParticipants;
+	GetLivingRiftParticipants(LivingParticipants);
+	const float PressureRadiusSquared = FMath::Square(
+		ResolveFiniteFloat(RiftPressureRadius, 8000.f, 0.f, MaxWorldDistance));
 	int32 ActivePressure = 0;
-	for (const TWeakObjectPtr<AActor>& Enemy : LiveEnemies)
+	for (const TWeakObjectPtr<AActor>& EnemyPtr : LiveEnemies)
 	{
-		ActivePressure += Enemy.IsValid() ? 1 : 0;
+		const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPtr.Get());
+		if (!IsValid(Enemy) || !Enemy->IsEncounterCombatActive())
+		{
+			continue;
+		}
+		const FEnemyLODState* LODState =
+			EnemyLODStates.Find(TWeakObjectPtr<AEnemyParentNative>(const_cast<AEnemyParentNative*>(Enemy)));
+		if (LODState && LODState->bSleeping)
+		{
+			continue;
+		}
+
+		for (const APawn* Participant : LivingParticipants)
+		{
+			if (IsValid(Participant)
+				&& FVector::DistSquared2D(Enemy->GetActorLocation(), Participant->GetActorLocation()) <= PressureRadiusSquared)
+			{
+				++ActivePressure;
+				break;
+			}
+		}
+		if (ActivePressure >= FMath::Clamp(RiftMaximumAwakeEnemies, 1, MaxEncounterPopulation))
+		{
+			break;
+		}
 	}
 	return ActivePressure;
 }
@@ -939,14 +1696,41 @@ void AAeyerjiEncounterDirector::ProcessRiftSpawnQueue()
 		return;
 	}
 
-	const int32 SpawnBudget = FMath::Min(FMath::Max(MaxSpawnsPerTick, 1), RiftSpawnQueue.Num());
-	for (int32 AttemptIndex = 0; AttemptIndex < SpawnBudget && !RiftSpawnQueue.IsEmpty(); ++AttemptIndex)
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+	const int32 SpawnBudget = FMath::Min(
+		FMath::Clamp(MaxSpawnsPerTick, 1, MaxSpawnsPerDirectorTick),
+		RiftSpawnQueue.Num());
+	const float WorkMilliseconds = ResolveFiniteFloat(
+		MaxSpawnWorkMillisecondsPerTick,
+		2.f,
+		0.f,
+		MaxDirectorWorkMilliseconds);
+	const double SpawnDeadline = FPlatformTime::Seconds() + (WorkMilliseconds / 1000.0);
+	const double WorldTime = World->GetTimeSeconds();
+	for (int32 AttemptIndex = 0;
+		AttemptIndex < SpawnBudget
+		&& !RiftSpawnQueue.IsEmpty()
+		&& (AttemptIndex == 0 || WorkMilliseconds <= 0.f || FPlatformTime::Seconds() < SpawnDeadline);
+		++AttemptIndex)
 	{
 		FRiftSpawnRequest Request = RiftSpawnQueue[0];
-		RiftSpawnQueue.RemoveAt(0, 1, EAllowShrinking::No);
-		if (!SpawnRiftRequest(Request))
+		if (!FMath::IsFinite(Request.EarliestSpawnTime))
 		{
-			Request.FailedAttempts++;
+			Request.EarliestSpawnTime = WorldTime;
+		}
+		if (Request.EarliestSpawnTime > WorldTime)
+		{
+			break;
+		}
+		RiftSpawnQueue.RemoveAt(0, 1, EAllowShrinking::No);
+		AEnemyParentNative* SpawnedEnemy = nullptr;
+		if (!SpawnRiftRequest(Request, &SpawnedEnemy))
+		{
+			Request.FailedAttempts = FMath::Min(Request.FailedAttempts + 1, MaxRiftSpawnFailures);
 			if (Request.FailedAttempts == 1 || Request.FailedAttempts % 20 == 0)
 			{
 				const FRiftRegionPlan* Plan = RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex)
@@ -958,14 +1742,80 @@ void AAeyerjiEncounterDirector::ProcessRiftSpawnQueue()
 					Plan ? *GetNameSafe(Plan->EncounterGroup.Get()) : TEXT("None"),
 					*GetNameSafe(Request.EnemyClass), Request.FailedAttempts);
 			}
-			RiftSpawnQueue.Add(MoveTemp(Request));
+			if (Request.FailedAttempts < MaxRiftSpawnFailures)
+			{
+				RiftSpawnQueue.Add(MoveTemp(Request));
+			}
+			else if (RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex))
+			{
+				FRiftRegionPlan& Plan = RiftRegionPlans[Request.RegionPlanIndex];
+				Plan.Budget = FMath::Max(0, Plan.Budget - 1);
+				Plan.ReservedProgress = FMath::Max(0, Plan.ReservedProgress - FMath::Clamp(Request.ProgressPoints, 1, MaxProgressPoints));
+				Plan.PendingRevealCount = FMath::Max(0, Plan.PendingRevealCount - 1);
+				if (Plan.PendingRevealCount == 0 && Plan.State == FRiftRegionPlan::EState::Revealing)
+				{
+					Plan.RevealCompleteTime = WorldTime;
+				}
+				UE_LOG(LogEncounterDirector, Error,
+					TEXT("[RiftRun][EncounterSpawn] Abandoned invalid request after %d attempts RunSerial=%d Anchor=%s Class=%s"),
+					MaxRiftSpawnFailures,
+					RiftRegionRunSerial,
+					*Plan.StableKey,
+					*GetNameSafe(Request.EnemyClass));
+			}
 		}
+		else if (RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex))
+		{
+			FRiftRegionPlan& Plan = RiftRegionPlans[Request.RegionPlanIndex];
+			const double ActualRevealEndTime = WorldTime
+				+ (Request.RevealStyle == EAeyerjiEnemyRevealStyle::Immediate
+					? 0.0
+					: static_cast<double>(ResolveFiniteFloat(RiftRevealDurationSeconds, 1.f, 0.f, MaxDirectorSeconds)));
+			Plan.RevealCompleteTime = FMath::Max(Plan.RevealCompleteTime, ActualRevealEndTime);
+			Plan.PendingRevealCount = FMath::Max(0, Plan.PendingRevealCount - 1);
+			if (Plan.PendingRevealCount == 0 && Plan.State == FRiftRegionPlan::EState::Revealing)
+			{
+				UE_LOG(LogEncounterDirector, Display,
+					TEXT("[RiftRun][EncounterReveal] Population placed RunSerial=%d Anchor=%s Index=%d UnlockAt=%.3f"),
+					RiftRegionRunSerial,
+					*Plan.StableKey,
+					Plan.ProgressionIndex,
+					Plan.RevealCompleteTime);
+			}
+		}
+	}
+}
+
+void AAeyerjiEncounterDirector::UpdateRiftRevealStates()
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	const double Now = World->GetTimeSeconds();
+	for (FRiftRegionPlan& Plan : RiftRegionPlans)
+	{
+		if (Plan.State != FRiftRegionPlan::EState::Revealing
+			|| Plan.PendingRevealCount > 0
+			|| Now < Plan.RevealCompleteTime)
+		{
+			continue;
+		}
+
+		Plan.State = FRiftRegionPlan::EState::Active;
+		UE_LOG(LogEncounterDirector, Display,
+			TEXT("[RiftRun][EncounterReveal] Complete RunSerial=%d Anchor=%s Index=%d"),
+			RiftRegionRunSerial,
+			*Plan.StableKey,
+			Plan.ProgressionIndex);
 	}
 }
 
 bool AAeyerjiEncounterDirector::ResolveRiftRegionAnchor(const FBox& Bounds, FVector& OutAnchor)
 {
-	if (!Bounds.IsValid)
+	if (!IsFiniteBox(Bounds))
 	{
 		return false;
 	}
@@ -1005,7 +1855,10 @@ bool AAeyerjiEncounterDirector::ResolveRiftRegionAnchor(const FBox& Bounds, FVec
 
 bool AAeyerjiEncounterDirector::IsRiftRegionReachableFromParticipant(const FVector& RegionAnchor, const APawn* Participant) const
 {
-	if (!IsValid(Participant))
+	if (!IsValid(Participant)
+		|| Participant->GetWorld() != GetWorld()
+		|| RegionAnchor.ContainsNaN()
+		|| Participant->GetActorLocation().ContainsNaN())
 	{
 		return false;
 	}
@@ -1021,6 +1874,10 @@ bool AAeyerjiEncounterDirector::IsRiftRegionReachableFromParticipant(const FVect
 
 APawn* AAeyerjiEncounterDirector::ResolveNearestLiveParticipant(const FVector& FromLocation) const
 {
+	if (FromLocation.ContainsNaN())
+	{
+		return nullptr;
+	}
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -1066,7 +1923,7 @@ bool AAeyerjiEncounterDirector::ResolveRiftSpawnLocation(
 {
 	OutRejectReason.Reset();
 	UWorld* World = GetWorld();
-	if (!World || !Plan.Bounds.IsValid)
+	if (!World || !IsFiniteBox(Plan.Bounds) || !FMath::IsFinite(HalfHeight))
 	{
 		OutRejectReason = TEXT("Missing world or invalid encounter-anchor bounds");
 		return false;
@@ -1090,7 +1947,7 @@ bool AAeyerjiEncounterDirector::ResolveRiftSpawnLocation(
 		FMath::Max(Plan.Bounds.GetExtent().Z + 1000.f, 1000.f));
 	bool bFoundVisibleFallback = false;
 	FVector VisibleFallback = FVector::ZeroVector;
-	for (int32 Attempt = 0; Attempt < FMath::Max(SpawnLocationSearchAttempts, 1); ++Attempt)
+	for (int32 Attempt = 0; Attempt < FMath::Clamp(SpawnLocationSearchAttempts, 1, MaxSpawnAttempts); ++Attempt)
 	{
 		FVector Candidate(
 			RiftSpawnStream.FRandRange(Plan.Bounds.Min.X, Plan.Bounds.Max.X),
@@ -1153,7 +2010,13 @@ bool AAeyerjiEncounterDirector::IsRiftSpawnLocationSafe(
 {
 	bOutVisibleToParticipant = false;
 	OutRejectReason.Reset();
-	const float MinimumDistanceSquared = FMath::Square(FMath::Max(RiftMinimumSpawnDistanceFromPlayers, 0.f));
+	if (Candidate.ContainsNaN())
+	{
+		OutRejectReason = TEXT("Spawn candidate is non-finite");
+		return false;
+	}
+	const float MinimumDistanceSquared = FMath::Square(
+		ResolveFiniteFloat(RiftMinimumSpawnDistanceFromPlayers, 1200.f, 0.f, MaxWorldDistance));
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -1186,9 +2049,17 @@ bool AAeyerjiEncounterDirector::IsRiftSpawnLocationSafe(
 	return true;
 }
 
-bool AAeyerjiEncounterDirector::SpawnRiftRequest(FRiftSpawnRequest& Request)
+bool AAeyerjiEncounterDirector::SpawnRiftRequest(
+	FRiftSpawnRequest& Request,
+	AEnemyParentNative** OutSpawnedEnemy)
 {
-	if (!Request.EnemyClass || !RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex))
+	if (OutSpawnedEnemy)
+	{
+		*OutSpawnedEnemy = nullptr;
+	}
+	if (!HasAuthority()
+		|| !Request.EnemyClass
+		|| !RiftRegionPlans.IsValidIndex(Request.RegionPlanIndex))
 	{
 		return false;
 	}
@@ -1212,7 +2083,17 @@ bool AAeyerjiEncounterDirector::SpawnRiftRequest(FRiftSpawnRequest& Request)
 	const float HalfHeight = GetEnemyHalfHeight(Request.EnemyClass);
 	FVector SpawnLocation;
 	FString RejectReason;
-	if (!ResolveRiftSpawnLocation(Plan, HalfHeight, Participant, SpawnLocation, RejectReason))
+	bool bResolvedSpawnLocation = false;
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Aeyerji_RiftNavigationPlacement);
+		bResolvedSpawnLocation = ResolveRiftSpawnLocation(
+			Plan,
+			HalfHeight,
+			Participant,
+			SpawnLocation,
+			RejectReason);
+	}
+	if (!bResolvedSpawnLocation)
 	{
 		UE_LOG(LogEncounterDirector, Verbose,
 			TEXT("[RiftRun][EncounterSpawn] Deferred RunSerial=%d Anchor=%s Group=%s Reason=%s"),
@@ -1224,11 +2105,10 @@ bool AAeyerjiEncounterDirector::SpawnRiftRequest(FRiftSpawnRequest& Request)
 	FEnemySet EnemyTemplate;
 	EnemyTemplate.EnemyClass = Request.EnemyClass;
 	EnemyTemplate.Count = 1;
-	EnemyTemplate.ProgressPoints = FMath::Max(Request.ProgressPoints, 1);
+	EnemyTemplate.ProgressPoints = FMath::Clamp(Request.ProgressPoints, 1, MaxProgressPoints);
 	EnemyTemplate.SpawnInterval = 0.f;
 	EnemyTemplate.EnemyArchetypeTag = ResolveArchetypeTagFromClass(Request.EnemyClass);
 	EnemyTemplate.bIsElite = Request.bIsElite;
-	EnemyTemplate.bSkipEliteAutoScaling = Request.bIsElite;
 
 	const FTransform SpawnTransform(SpawnRotation, SpawnLocation);
 	APawn* SpawnedPawn = UAeyerjiEnemyManagementBPFL::SpawnAndRegisterEnemyFromSet(
@@ -1239,7 +2119,7 @@ bool AAeyerjiEncounterDirector::SpawnRiftRequest(FRiftSpawnRequest& Request)
 		this,
 		Participant,
 		true,
-		true,
+		Request.RevealStyle == EAeyerjiEnemyRevealStyle::Immediate,
 		false,
 		true,
 		Participant,
@@ -1248,6 +2128,23 @@ bool AAeyerjiEncounterDirector::SpawnRiftRequest(FRiftSpawnRequest& Request)
 	if (!IsValid(SpawnedPawn))
 	{
 		return false;
+	}
+	AEnemyParentNative* SpawnedEnemy = Cast<AEnemyParentNative>(SpawnedPawn);
+	if (SpawnedEnemy)
+	{
+		FEnemyLODState& LODState = GetOrCreateEnemyLODState(SpawnedEnemy);
+		LODState.bHasRiftHome = true;
+		LODState.RiftRegionPlanIndex = Request.RegionPlanIndex;
+		LODState.RiftHomeLocation = SpawnLocation;
+		SpawnedEnemy->BeginEncounterReveal(
+			Request.RevealStyle,
+			Request.RevealStyle == EAeyerjiEnemyRevealStyle::Immediate
+				? 0.f
+				: ResolveFiniteFloat(RiftRevealDurationSeconds, 1.f, 0.f, MaxDirectorSeconds));
+	}
+	if (OutSpawnedEnemy)
+	{
+		*OutSpawnedEnemy = SpawnedEnemy;
 	}
 
 	UE_LOG(LogEncounterDirector, Verbose,
@@ -1268,6 +2165,27 @@ void AAeyerjiEncounterDirector::FreezeWeightedProgress()
 	StopRiftRegionActivation();
 	WeightedProgressPoints = FMath::Min(WeightedProgressPoints, WeightedProgressTarget);
 	KilledCount = WeightedProgressPoints;
+	if (const AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get())
+	{
+		const int32 EmergencySpawns = Spawner->GetEmergencyRuntimeSpawnCount();
+		if (EmergencySpawns == 0)
+		{
+			UE_LOG(LogEncounterDirector, Display,
+				TEXT("[RiftRun][PoolAcceptance] RunSerial=%d FreshSpawnsDuringGameplay=0 PrewarmConstructed=%d PooledCheckouts=%d"),
+				RiftRegionRunSerial,
+				Spawner->GetPrewarmConstructionCount(),
+				Spawner->GetPooledCheckoutCount());
+		}
+		else
+		{
+			UE_LOG(LogEncounterDirector, Warning,
+				TEXT("[RiftRun][PoolAcceptance] RunSerial=%d FreshSpawnsDuringGameplay=%d PrewarmConstructed=%d PooledCheckouts=%d"),
+				RiftRegionRunSerial,
+				EmergencySpawns,
+				Spawner->GetPrewarmConstructionCount(),
+				Spawner->GetPooledCheckoutCount());
+		}
+	}
 	HandleProgressChanged();
 }
 
@@ -1288,11 +2206,37 @@ void AAeyerjiEncounterDirector::NotifyProgressEnemyDestroyedForAutomation(AActor
 {
 	HandleProgressEnemyDestroyed(Enemy);
 }
+
+void AAeyerjiEncounterDirector::ConfigureRiftEnemyHomeForAutomation(
+	AEnemyParentNative* Enemy,
+	const int32 RegionPlanIndex,
+	const FVector& HomeLocation)
+{
+	FEnemyLODState& State = GetOrCreateEnemyLODState(Enemy);
+	State.bHasRiftHome = true;
+	State.RiftRegionPlanIndex = RegionPlanIndex;
+	State.RiftHomeLocation = HomeLocation;
+}
+
+void AAeyerjiEncounterDirector::SetEnemySleepingForAutomation(
+	AEnemyParentNative* Enemy,
+	const bool bSleeping)
+{
+	ApplyEnemySleepState(Enemy, bSleeping);
+}
+
+bool AAeyerjiEncounterDirector::IsEnemySleepingForAutomation(const AEnemyParentNative* Enemy) const
+{
+	const FEnemyLODState* State = Enemy
+		? EnemyLODStates.Find(TWeakObjectPtr<AEnemyParentNative>(const_cast<AEnemyParentNative*>(Enemy)))
+		: nullptr;
+	return State && State->bSleeping;
+}
 #endif
 
 bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProfile* Profile, AAeyerjiSpawnerGroup* SpawnManager, AAeyerjiLevelDirector* LevelDirector)
 {
-	if (GetNetMode() == NM_Client)
+	if (!HasAuthority())
 	{
 		return false;
 	}
@@ -1300,6 +2244,12 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 	if (!Profile)
 	{
 		UE_LOG(LogEncounterDirector, Warning, TEXT("Fixed population start skipped: missing profile on %s"), *GetNameSafe(this));
+		return false;
+	}
+	if ((IsValid(SpawnManager) && SpawnManager->GetWorld() != GetWorld())
+		|| (IsValid(LevelDirector) && LevelDirector->GetWorld() != GetWorld()))
+	{
+		UE_LOG(LogEncounterDirector, Warning, TEXT("Fixed population start skipped: collaborators belong to another world on %s"), *GetNameSafe(this));
 		return false;
 	}
 
@@ -1364,13 +2314,17 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 		TArray<FEnemySet> WarmSets;
 		auto AddGroupToWarmSets = [this, &WarmSets](const UEnemySpawnGroupDefinition* Group)
 		{
-			if (!IsValid(Group))
+			if (!IsValid(Group) || WarmSets.Num() >= MaxPoolWarmSets)
 			{
 				return;
 			}
 
 			for (TSubclassOf<AEnemyParentNative> EnemyClass : Group->EnemyTypes)
 			{
+				if (WarmSets.Num() >= MaxPoolWarmSets)
+				{
+					break;
+				}
 				if (!*EnemyClass)
 				{
 					continue;
@@ -1385,6 +2339,10 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 
 			for (TSubclassOf<AEnemyParentNative> EliteClass : Group->EliteEnemyTypes)
 			{
+				if (WarmSets.Num() >= MaxPoolWarmSets)
+				{
+					break;
+				}
 				if (!*EliteClass)
 				{
 					continue;
@@ -1394,7 +2352,6 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 				WarmSet.EnemyClass = EliteClass;
 				WarmSet.Count = 1;
 				WarmSet.bIsElite = true;
-				WarmSet.bSkipEliteAutoScaling = true;
 				WarmSet.EnemyArchetypeTag = ResolveArchetypeTagFromClass(EliteClass);
 				WarmSets.Add(WarmSet);
 			}
@@ -1402,16 +2359,18 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 
 		if (!Profile->SpawnGroups.IsEmpty())
 		{
-			for (const FWeightedSpawnGroup& WeightedGroup : Profile->SpawnGroups)
+			const int32 GroupCount = FMath::Min(Profile->SpawnGroups.Num(), MaxEncounterSpawnGroups);
+			for (int32 GroupIndex = 0; GroupIndex < GroupCount; ++GroupIndex)
 			{
-				AddGroupToWarmSets(WeightedGroup.Group);
+				AddGroupToWarmSets(Profile->SpawnGroups[GroupIndex].Group);
 			}
 		}
 		else
 		{
-			for (const UEnemySpawnGroupDefinition* Group : SpawnGroups)
+			const int32 GroupCount = FMath::Min(SpawnGroups.Num(), MaxEncounterSpawnGroups);
+			for (int32 GroupIndex = 0; GroupIndex < GroupCount; ++GroupIndex)
 			{
-				AddGroupToWarmSets(Group);
+				AddGroupToWarmSets(SpawnGroups[GroupIndex]);
 			}
 		}
 
@@ -1422,6 +2381,7 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 	if (FixedPopulationTarget <= 0 || FixedSpawnQueue.IsEmpty())
 	{
 		UE_LOG(LogEncounterDirector, Warning, TEXT("Fixed population start skipped: no spawn requests generated on %s"), *GetNameSafe(this));
+		StopFixedWorldPopulation();
 		return false;
 	}
 
@@ -1435,7 +2395,7 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 
 void AAeyerjiEncounterDirector::StopFixedWorldPopulation()
 {
-	if (GetNetMode() == NM_Client)
+	if (!HasAuthority())
 	{
 		return;
 	}
@@ -1674,9 +2634,12 @@ void AAeyerjiEncounterDirector::Tick(float DeltaSeconds)
 	CleanupInactiveEnemies();
 	UpdateKillWindow();
 	ProcessFixedSpawnQueue();
+	ProcessRiftPopulationPrewarm();
 	ProcessRiftRegionActivation();
 	ProcessRiftSpawnQueue();
+	UpdateRiftRevealStates();
 	UpdateEnemyLOD(DeltaSeconds);
+	UpdateRiftTraceCounters();
 
 	if (bFixedPopulationActive)
 	{
@@ -1696,7 +2659,9 @@ void AAeyerjiEncounterDirector::Tick(float DeltaSeconds)
 		return;
 	}
 
-	DistanceFromLastEncounter = FVector::Dist(CachedPlayerPawn->GetActorLocation(), LastEncounterLocation);
+	DistanceFromLastEncounter = (!CachedPlayerPawn->GetActorLocation().ContainsNaN() && !LastEncounterLocation.ContainsNaN())
+		? FMath::Min(FVector::Dist(CachedPlayerPawn->GetActorLocation(), LastEncounterLocation), MaxWorldDistance)
+		: 0.f;
 
 	switch (DirectorState)
 	{
@@ -1715,7 +2680,7 @@ void AAeyerjiEncounterDirector::Tick(float DeltaSeconds)
 		break;
 
 	case EEncounterDirectorState::PostCombat:
-		PostCombatTimeRemaining -= DeltaSeconds;
+		PostCombatTimeRemaining -= FMath::IsFinite(DeltaSeconds) ? FMath::Max(0.f, DeltaSeconds) : 0.f;
 		if (PostCombatTimeRemaining <= 0.f)
 		{
 			EnterState(EEncounterDirectorState::Idle);
@@ -1766,6 +2731,10 @@ void AAeyerjiEncounterDirector::UpdateRecentPlayerPath()
 
 	FRecentPlayerSample Sample;
 	Sample.Location = CachedPlayerPawn->GetActorLocation();
+	if (Sample.Location.ContainsNaN())
+	{
+		return;
+	}
 	Sample.Timestamp = Now;
 	RecentPlayerSamples.Add(Sample);
 
@@ -1778,7 +2747,7 @@ void AAeyerjiEncounterDirector::UpdateRecentPlayerPath()
 		}
 	}
 
-	const int32 MaxSamples = FMath::Max(1, RecentPathMaxSamples);
+	const int32 MaxSamples = FMath::Clamp(RecentPathMaxSamples, 1, MaxRecentPathSamples);
 	if (RecentPlayerSamples.Num() > MaxSamples)
 	{
 		const int32 TrimCount = RecentPlayerSamples.Num() - MaxSamples;
@@ -1801,35 +2770,47 @@ void AAeyerjiEncounterDirector::CleanupInactiveEnemies()
 
 void AAeyerjiEncounterDirector::UpdateEnemyLOD(float DeltaSeconds)
 {
-	if (!CachedPlayerPawn.IsValid())
+	TArray<APawn*> LivingParticipants;
+	GetLivingRiftParticipants(LivingParticipants);
+	if (LivingParticipants.IsEmpty())
 	{
 		return;
 	}
 
-	if (EnemyLODUpdateInterval > 0.f)
+	const float SafeDeltaSeconds = FMath::IsFinite(DeltaSeconds) ? FMath::Max(0.f, DeltaSeconds) : 0.f;
+	const float SafeLODUpdateInterval = ResolveFiniteFloat(EnemyLODUpdateInterval, 0.5f, 0.05f, MaxDirectorSeconds);
+	if (SafeLODUpdateInterval > 0.f)
 	{
-		EnemyLODTimeAccumulator += DeltaSeconds;
-		if (EnemyLODTimeAccumulator < EnemyLODUpdateInterval)
+		EnemyLODTimeAccumulator = FMath::Min(
+			EnemyLODTimeAccumulator + SafeDeltaSeconds,
+			MaxDirectorSeconds);
+		if (EnemyLODTimeAccumulator < SafeLODUpdateInterval)
 		{
 			return;
 		}
 		EnemyLODTimeAccumulator = 0.f;
 	}
 
-	const FVector PlayerLocation = CachedPlayerPawn->GetActorLocation();
-	UpdateFixedClusterLOD(PlayerLocation);
+	UpdateFixedClusterLOD(LivingParticipants);
 
 	if (!bEnableEnemyLODThrottling)
 	{
 		return;
 	}
 
-	const float NearDistance = FMath::Max(0.f, EnemyLODNearDistance);
-	const float MidDistance = FMath::Max(NearDistance, EnemyLODMidDistance);
-	const float FarDistance = FMath::Max(MidDistance, EnemyLODFarDistance);
+	const float NearDistance = ResolveFiniteFloat(EnemyLODNearDistance, 4000.f, 0.f, MaxWorldDistance);
+	const float MidDistance = ResolveFiniteFloat(EnemyLODMidDistance, 8000.f, NearDistance, MaxWorldDistance);
+	const float FarDistance = ResolveFiniteFloat(EnemyLODFarDistance, 12000.f, MidDistance, MaxWorldDistance);
 	const float MidDistSq = FMath::Square(MidDistance);
 	const float FarDistSq = FMath::Square(FarDistance);
 
+	struct FEnemyDistanceEntry
+	{
+		TWeakObjectPtr<AEnemyParentNative> Enemy;
+		float DistanceSquared = TNumericLimits<float>::Max();
+	};
+	TArray<FEnemyDistanceEntry> DistanceEntries;
+	DistanceEntries.Reserve(LiveEnemies.Num());
 	for (const TWeakObjectPtr<AActor>& Tracked : LiveEnemies)
 	{
 		AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(Tracked.Get());
@@ -1837,16 +2818,84 @@ void AAeyerjiEncounterDirector::UpdateEnemyLOD(float DeltaSeconds)
 		{
 			continue;
 		}
-
-		FEnemyLODState& State = GetOrCreateEnemyLODState(Enemy);
-		if (State.bSleeping)
+		const FVector EnemyLocation = Enemy->GetActorLocation();
+		if (EnemyLocation.ContainsNaN())
 		{
 			continue;
 		}
 
-		const float DistSq = FVector::DistSquared2D(Enemy->GetActorLocation(), PlayerLocation);
+		float DistSq = TNumericLimits<float>::Max();
+		for (const APawn* Participant : LivingParticipants)
+		{
+			if (IsValid(Participant) && !Participant->GetActorLocation().ContainsNaN())
+			{
+				DistSq = FMath::Min(DistSq, FVector::DistSquared2D(EnemyLocation, Participant->GetActorLocation()));
+			}
+		}
+		FEnemyDistanceEntry& Entry = DistanceEntries.AddDefaulted_GetRef();
+		Entry.Enemy = Enemy;
+		Entry.DistanceSquared = DistSq;
+	}
+	DistanceEntries.Sort([](const FEnemyDistanceEntry& Left, const FEnemyDistanceEntry& Right)
+	{
+		return Left.DistanceSquared < Right.DistanceSquared;
+	});
+
+	const bool bRiftPopulationActive = WeightedProgressRunSerial > 0;
+	const float SafeRiftWakeDistance = ResolveFiniteFloat(RiftEnemyWakeDistance, 8000.f, 0.f, MaxWorldDistance);
+	const float SafeRiftSleepDistance = ResolveFiniteFloat(RiftEnemySleepDistance, 10000.f, SafeRiftWakeDistance, MaxWorldDistance);
+	const float RiftWakeDistanceSquared = FMath::Square(SafeRiftWakeDistance);
+	const float RiftSleepDistanceSquared = FMath::Square(SafeRiftSleepDistance);
+	const int32 MaxAwakeRiftEnemies = FMath::Clamp(RiftMaximumAwakeEnemies, 1, MaxEncounterPopulation);
+	int32 RiftAwakeCandidateIndex = 0;
+	for (int32 EnemyIndex = 0; EnemyIndex < DistanceEntries.Num(); ++EnemyIndex)
+	{
+		AEnemyParentNative* Enemy = DistanceEntries[EnemyIndex].Enemy.Get();
+		if (!IsValid(Enemy))
+		{
+			continue;
+		}
+
+		FEnemyLODState& State = GetOrCreateEnemyLODState(Enemy);
+		const float DistSq = DistanceEntries[EnemyIndex].DistanceSquared;
+		if (bRiftPopulationActive
+			&& State.bHasRiftHome
+			&& Enemy->GetEncounterPhase() != EAeyerjiEnemyEncounterPhase::Revealing)
+		{
+			const bool bBeyondAwakeBudget = RiftAwakeCandidateIndex >= MaxAwakeRiftEnemies;
+			++RiftAwakeCandidateIndex;
+			const bool bBeyondSleepDistance = DistSq >= RiftSleepDistanceSquared;
+			if (!State.bSleeping && (bBeyondAwakeBudget || bBeyondSleepDistance))
+			{
+				if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(Enemy->GetController()))
+				{
+					EnemyAI->SetTargetActor(nullptr);
+					EnemyAI->ClearLastKnownTarget();
+				}
+				ApplyEnemySleepState(Enemy, true);
+				continue;
+			}
+			if (State.bSleeping)
+			{
+				if (bBeyondAwakeBudget || DistSq > RiftWakeDistanceSquared)
+				{
+					continue;
+				}
+				ApplyEnemySleepState(Enemy, false);
+			}
+		}
+		else if (State.bSleeping)
+		{
+			ApplyEnemySleepState(Enemy, false);
+		}
+
 		uint8 NewBucket = 0;
-		if (DistSq > FarDistSq)
+		const AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(Enemy->GetController());
+		if (EnemyAI && IsValid(EnemyAI->GetTargetActor()))
+		{
+			NewBucket = 0;
+		}
+		else if (DistSq > FarDistSq)
 		{
 			NewBucket = 2;
 		}
@@ -1862,22 +2911,33 @@ void AAeyerjiEncounterDirector::UpdateEnemyLOD(float DeltaSeconds)
 	}
 }
 
-void AAeyerjiEncounterDirector::UpdateFixedClusterLOD(const FVector& PlayerLocation)
+void AAeyerjiEncounterDirector::UpdateFixedClusterLOD(const TArray<APawn*>& LivingParticipants)
 {
 	if (!bEnableFixedClusterSleeping || !bFixedPopulationActive || FixedClusters.IsEmpty())
 	{
 		return;
 	}
 
-	const float SleepDistance = FMath::Max(FixedClusterSleepDistance, FixedClusterWakeDistance);
-	const float WakeDistance = FMath::Max(0.f, FMath::Min(FixedClusterWakeDistance, SleepDistance));
+	const float SleepDistance = ResolveFiniteFloat(FixedClusterSleepDistance, 14000.f, 0.f, MaxWorldDistance);
+	const float WakeDistance = ResolveFiniteFloat(FixedClusterWakeDistance, 11000.f, 0.f, SleepDistance);
 	const float SleepDistSq = FMath::Square(SleepDistance);
 	const float WakeDistSq = FMath::Square(WakeDistance);
 
 	for (TPair<int32, FFixedSpawnCluster>& Pair : FixedClusters)
 	{
 		FFixedSpawnCluster& Cluster = Pair.Value;
-		const float DistSq = FVector::DistSquared2D(PlayerLocation, Cluster.Center);
+		float DistSq = TNumericLimits<float>::Max();
+		if (Cluster.Center.ContainsNaN())
+		{
+			continue;
+		}
+		for (const APawn* Participant : LivingParticipants)
+		{
+			if (IsValid(Participant) && !Participant->GetActorLocation().ContainsNaN())
+			{
+				DistSq = FMath::Min(DistSq, FVector::DistSquared2D(Participant->GetActorLocation(), Cluster.Center));
+			}
+		}
 
 		if (!Cluster.bSleeping && DistSq >= SleepDistSq)
 		{
@@ -1920,7 +2980,7 @@ void AAeyerjiEncounterDirector::ApplyFixedClusterSleepState(int32 ClusterId, boo
 
 void AAeyerjiEncounterDirector::ApplyEnemySleepState(AEnemyParentNative* Enemy, bool bSleep)
 {
-	if (!IsValid(Enemy))
+	if (!HasAuthority() || !IsValid(Enemy) || Enemy->GetWorld() != GetWorld())
 	{
 		return;
 	}
@@ -1941,9 +3001,14 @@ void AAeyerjiEncounterDirector::ApplyEnemySleepState(AEnemyParentNative* Enemy, 
 
 	if (bSleep)
 	{
+		Enemy->ForceNetUpdate();
 		if (AIController)
 		{
 			AIController->StopMovement();
+			if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AIController))
+			{
+				EnemyAI->SetPathFollowingGameplayEnabled(false, TEXT("EncounterDirectorLODSleep"));
+			}
 		}
 
 		if (Brain && !State.bPausedByLOD && !Brain->IsPaused())
@@ -1966,9 +3031,17 @@ void AAeyerjiEncounterDirector::ApplyEnemySleepState(AEnemyParentNative* Enemy, 
 		{
 			Perception->SetComponentTickEnabled(false);
 		}
+		Enemy->SetNetDormancy(DORM_DormantAll);
 	}
 	else
 	{
+		Enemy->SetNetDormancy(DORM_Awake);
+		Enemy->FlushNetDormancy();
+		if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AIController))
+		{
+			// Reacquire a Detour slot before the StateTree resumes and can issue a move.
+			EnemyAI->SetPathFollowingGameplayEnabled(true, TEXT("EncounterDirectorLODWake"));
+		}
 		if (MoveComp)
 		{
 			MoveComp->SetComponentTickEnabled(State.bMovementTickEnabled);
@@ -2013,7 +3086,11 @@ void AAeyerjiEncounterDirector::ApplyEnemyLODBucket(AEnemyParentNative* Enemy, F
 		return;
 	}
 
-	const float DesiredInterval = (NewBucket == 1) ? EnemyLODMidTickInterval : (NewBucket == 2 ? EnemyLODFarTickInterval : 0.f);
+	const float DesiredInterval = NewBucket == 1
+		? ResolveFiniteFloat(EnemyLODMidTickInterval, 0.1f, 0.f, MaxDirectorSeconds)
+		: (NewBucket == 2
+			? ResolveFiniteFloat(EnemyLODFarTickInterval, 0.25f, 0.f, MaxDirectorSeconds)
+			: 0.f);
 	auto ApplyTickSettings = [NewBucket, DesiredInterval](UActorComponent* Component, bool bEnabled, float BaseInterval)
 	{
 		if (!Component)
@@ -2024,13 +3101,29 @@ void AAeyerjiEncounterDirector::ApplyEnemyLODBucket(AEnemyParentNative* Enemy, F
 		Component->SetComponentTickEnabled(bEnabled);
 		if (bEnabled)
 		{
-			const float Interval = (NewBucket == 0) ? BaseInterval : FMath::Max(BaseInterval, DesiredInterval);
+			const float SafeBaseInterval = ResolveFiniteFloat(BaseInterval, 0.f, 0.f, MaxDirectorSeconds);
+			const float Interval = (NewBucket == 0) ? SafeBaseInterval : FMath::Max(SafeBaseInterval, DesiredInterval);
 			Component->SetComponentTickInterval(Interval);
 		}
 	};
 
 	ApplyTickSettings(Enemy->GetCharacterMovement(), State.bMovementTickEnabled, State.BaseMovementTickInterval);
 	ApplyTickSettings(Enemy->GetMesh(), State.bMeshTickEnabled, State.BaseMeshTickInterval);
+	if (NewBucket == 0)
+	{
+		Enemy->SetNetUpdateFrequency(30.f);
+		Enemy->SetMinNetUpdateFrequency(10.f);
+	}
+	else if (NewBucket == 1)
+	{
+		Enemy->SetNetUpdateFrequency(15.f);
+		Enemy->SetMinNetUpdateFrequency(5.f);
+	}
+	else
+	{
+		Enemy->SetNetUpdateFrequency(5.f);
+		Enemy->SetMinNetUpdateFrequency(2.f);
+	}
 
 	if (AAIController* AIController = Cast<AAIController>(Enemy->GetController()))
 	{
@@ -2062,7 +3155,11 @@ AAeyerjiEncounterDirector::FEnemyLODState& AAeyerjiEncounterDirector::GetOrCreat
 		if (UCharacterMovementComponent* MoveComp = Enemy->GetCharacterMovement())
 		{
 			State.bCachedMovement = true;
-			State.BaseMovementTickInterval = MoveComp->PrimaryComponentTick.TickInterval;
+			State.BaseMovementTickInterval = ResolveFiniteFloat(
+				MoveComp->PrimaryComponentTick.TickInterval,
+				0.f,
+				0.f,
+				MaxDirectorSeconds);
 			State.bMovementTickEnabled = MoveComp->IsComponentTickEnabled();
 		}
 	}
@@ -2072,7 +3169,11 @@ AAeyerjiEncounterDirector::FEnemyLODState& AAeyerjiEncounterDirector::GetOrCreat
 		if (USkeletalMeshComponent* MeshComp = Enemy->GetMesh())
 		{
 			State.bCachedMesh = true;
-			State.BaseMeshTickInterval = MeshComp->PrimaryComponentTick.TickInterval;
+			State.BaseMeshTickInterval = ResolveFiniteFloat(
+				MeshComp->PrimaryComponentTick.TickInterval,
+				0.f,
+				0.f,
+				MaxDirectorSeconds);
 			State.bMeshTickEnabled = MeshComp->IsComponentTickEnabled();
 		}
 	}
@@ -2084,7 +3185,11 @@ AAeyerjiEncounterDirector::FEnemyLODState& AAeyerjiEncounterDirector::GetOrCreat
 			if (UAIPerceptionComponent* Perception = AIController->GetPerceptionComponent())
 			{
 				State.bCachedPerception = true;
-				State.BasePerceptionTickInterval = Perception->PrimaryComponentTick.TickInterval;
+				State.BasePerceptionTickInterval = ResolveFiniteFloat(
+					Perception->PrimaryComponentTick.TickInterval,
+					0.f,
+					0.f,
+					MaxDirectorSeconds);
 				State.bPerceptionTickEnabled = Perception->IsComponentTickEnabled();
 			}
 		}
@@ -2102,6 +3207,61 @@ void AAeyerjiEncounterDirector::RemoveEnemyLODState(AActor* Enemy)
 	}
 
 	EnemyLODStates.Remove(TypedEnemy);
+}
+
+void AAeyerjiEncounterDirector::UpdateRiftTraceCounters() const
+{
+	int32 AwakeCount = 0;
+	int32 SleepingCount = 0;
+	int32 RevealingCount = 0;
+	for (const TWeakObjectPtr<AActor>& EnemyPtr : LiveEnemies)
+	{
+		const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPtr.Get());
+		if (!IsValid(Enemy))
+		{
+			continue;
+		}
+
+		if (Enemy->GetEncounterPhase() == EAeyerjiEnemyEncounterPhase::Revealing)
+		{
+			++RevealingCount;
+			continue;
+		}
+
+		const FEnemyLODState* State = EnemyLODStates.Find(Enemy);
+		if (State && State->bSleeping)
+		{
+			++SleepingCount;
+		}
+		else if (Enemy->IsEncounterCombatActive())
+		{
+			++AwakeCount;
+		}
+	}
+
+	int32 StagedPopulation = 0;
+	for (int32 PlanIndex = 0; PlanIndex < RiftRegionPlans.Num(); ++PlanIndex)
+	{
+		const FRiftRegionPlan& Plan = RiftRegionPlans[PlanIndex];
+		if (Plan.State == FRiftRegionPlan::EState::Staged
+			&& RiftReservedRegionRequests.IsValidIndex(PlanIndex))
+		{
+			StagedPopulation += RiftReservedRegionRequests[PlanIndex].Num();
+		}
+		else if (Plan.State == FRiftRegionPlan::EState::Revealing)
+		{
+			StagedPopulation += Plan.PendingRevealCount;
+		}
+	}
+
+	const AAeyerjiSpawnerGroup* Spawner = RiftPopulationSpawner.Get();
+	TRACE_COUNTER_SET(AeyerjiRiftAwakeEnemies, AwakeCount);
+	TRACE_COUNTER_SET(AeyerjiRiftSleepingEnemies, SleepingCount);
+	TRACE_COUNTER_SET(AeyerjiRiftRevealingEnemies, RevealingCount);
+	TRACE_COUNTER_SET(AeyerjiRiftStagedPopulation, StagedPopulation);
+	TRACE_COUNTER_SET(AeyerjiRiftPooledEnemies, Spawner ? Spawner->GetInactivePooledEnemyCount() : 0);
+	TRACE_COUNTER_SET(AeyerjiRiftFreshConstructions, Spawner ? Spawner->GetFreshEnemyConstructionCount() : 0);
+	TRACE_COUNTER_SET(AeyerjiRiftEmergencySpawns, Spawner ? Spawner->GetEmergencyRuntimeSpawnCount() : 0);
 }
 
 void AAeyerjiEncounterDirector::RemoveFixedClusterMember(int32 ClusterId, AActor* Enemy)
@@ -2177,7 +3337,12 @@ void AAeyerjiEncounterDirector::UpdateKillWindow()
 	}
 
 	const double Now = World->GetTimeSeconds();
-	const double WindowStart = Now - KillVelocityWindowSeconds;
+	const float SafeWindowSeconds = ResolveFiniteFloat(
+		KillVelocityWindowSeconds,
+		6.f,
+		0.1f,
+		MaxDirectorSeconds);
+	const double WindowStart = Now - SafeWindowSeconds;
 
 	for (int32 Index = KillTimestampHistory.Num() - 1; Index >= 0; --Index)
 	{
@@ -2187,14 +3352,9 @@ void AAeyerjiEncounterDirector::UpdateKillWindow()
 		}
 	}
 
-	if (KillVelocityWindowSeconds <= 0.f)
-	{
-		CurrentKillVelocity = KillTimestampHistory.Num();
-	}
-	else
-	{
-		CurrentKillVelocity = static_cast<float>(KillTimestampHistory.Num()) / KillVelocityWindowSeconds;
-	}
+	CurrentKillVelocity = FMath::Min(
+		static_cast<float>(KillTimestampHistory.Num()) / SafeWindowSeconds,
+		MaxRuntimeMultiplier);
 }
 
 void AAeyerjiEncounterDirector::ResetProgress(int32 NewTotal)
@@ -2204,7 +3364,7 @@ void AAeyerjiEncounterDirector::ResetProgress(int32 NewTotal)
 		return;
 	}
 
-	TotalToKill = FMath::Max(0, NewTotal);
+	TotalToKill = FMath::Clamp(NewTotal, 0, MaxProgressPoints);
 	KilledCount = 0;
 	EnemiesDefeated = 0;
 	WeightedProgressPoints = 0;
@@ -2223,7 +3383,7 @@ void AAeyerjiEncounterDirector::UpdateTotalToKill(int32 NewTotal)
 		return;
 	}
 
-	const int32 ClampedTotal = FMath::Max(0, NewTotal);
+	const int32 ClampedTotal = FMath::Clamp(NewTotal, 0, MaxProgressPoints);
 	if (TotalToKill == ClampedTotal)
 	{
 		return;
@@ -2347,11 +3507,18 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	{
 		for (const FWeightedSpawnGroup& Weighted : Profile->SpawnGroups)
 		{
-			if (IsValid(Weighted.Group) && !Weighted.Group->EnemyTypes.IsEmpty() && Weighted.Weight > 0.f)
+			if (GroupEntries.Num() >= MaxEncounterSpawnGroups)
+			{
+				break;
+			}
+			if (IsValid(Weighted.Group)
+				&& !Weighted.Group->EnemyTypes.IsEmpty()
+				&& FMath::IsFinite(Weighted.Weight)
+				&& Weighted.Weight > 0.f)
 			{
 				FFixedSpawnGroupEntry Entry;
 				Entry.Group = Weighted.Group;
-				Entry.Weight = Weighted.Weight;
+				Entry.Weight = FMath::Min(Weighted.Weight, MaxRuntimeMultiplier);
 				GroupEntries.Add(Entry);
 			}
 		}
@@ -2360,6 +3527,10 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	{
 		for (const UEnemySpawnGroupDefinition* Group : SpawnGroups)
 		{
+			if (GroupEntries.Num() >= MaxEncounterSpawnGroups)
+			{
+				break;
+			}
 			if (IsValid(Group) && !Group->EnemyTypes.IsEmpty())
 			{
 				FFixedSpawnGroupEntry Entry;
@@ -2376,9 +3547,11 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 		return;
 	}
 
-	const int32 BaseMinEnemyCount = FMath::Max(0, Profile->MinimumEnemyCount);
-	const int32 BaseTargetEnemyCount = FMath::Max(0, Profile->TargetEnemyCount);
-	int32 BaseMaxEnemyCount = Profile->MaximumEnemyCount > 0 ? Profile->MaximumEnemyCount : BaseTargetEnemyCount;
+	const int32 BaseMinEnemyCount = FMath::Clamp(Profile->MinimumEnemyCount, 0, MaxEncounterPopulation);
+	const int32 BaseTargetEnemyCount = FMath::Clamp(Profile->TargetEnemyCount, 0, MaxEncounterPopulation);
+	int32 BaseMaxEnemyCount = Profile->MaximumEnemyCount > 0
+		? FMath::Min(Profile->MaximumEnemyCount, MaxEncounterPopulation)
+		: BaseTargetEnemyCount;
 	BaseMaxEnemyCount = FMath::Max(BaseMaxEnemyCount, BaseMinEnemyCount);
 
 	int32 MaxDifficultyMinEnemyCount = Profile->MinimumEnemyCountAtMaxDifficulty > 0
@@ -2387,14 +3560,22 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	int32 MaxDifficultyMaxEnemyCount = Profile->MaximumEnemyCountAtMaxDifficulty > 0
 		? Profile->MaximumEnemyCountAtMaxDifficulty
 		: BaseMaxEnemyCount;
-	MaxDifficultyMinEnemyCount = FMath::Max(0, MaxDifficultyMinEnemyCount);
-	MaxDifficultyMaxEnemyCount = FMath::Max(MaxDifficultyMaxEnemyCount, MaxDifficultyMinEnemyCount);
+	MaxDifficultyMinEnemyCount = FMath::Clamp(MaxDifficultyMinEnemyCount, 0, MaxEncounterPopulation);
+	MaxDifficultyMaxEnemyCount = FMath::Clamp(
+		MaxDifficultyMaxEnemyCount,
+		MaxDifficultyMinEnemyCount,
+		MaxEncounterPopulation);
 
 	float BudgetAlpha = 0.f;
 	if (Profile->bScaleBudgetByDifficulty && FixedPopulationLevelDirector.IsValid())
 	{
-		const float Difficulty = FixedPopulationLevelDirector->GetCurvedDifficulty();
-		BudgetAlpha = FMath::Clamp(Profile->DifficultyBudgetFloor + (1.f - Profile->DifficultyBudgetFloor) * Difficulty, 0.f, 1.f);
+		const float Difficulty = ResolveFiniteFloat(
+			FixedPopulationLevelDirector->GetCurvedDifficulty(),
+			0.f,
+			0.f,
+			1.f);
+		const float DifficultyFloor = ResolveFiniteFloat(Profile->DifficultyBudgetFloor, 0.f, 0.f, 1.f);
+		BudgetAlpha = FMath::Clamp(DifficultyFloor + (1.f - DifficultyFloor) * Difficulty, 0.f, 1.f);
 	}
 	const int32 MinEnemyCount = FMath::RoundToInt(FMath::Lerp(static_cast<float>(BaseMinEnemyCount), static_cast<float>(MaxDifficultyMinEnemyCount), BudgetAlpha));
 	const int32 MaxEnemyCount = FMath::RoundToInt(FMath::Lerp(static_cast<float>(BaseMaxEnemyCount), static_cast<float>(MaxDifficultyMaxEnemyCount), BudgetAlpha));
@@ -2412,7 +3593,11 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	ResolvedTarget = FMath::Clamp(ResolvedTarget, MinEnemyCount, ClampedMaxEnemyCount);
 
 	// Allow runtime scaling/caps to keep fixed population counts playable.
-	const float BudgetScale = FMath::Clamp(GetFixedPopulationBudgetScaleCVar().GetValueOnGameThread(), 0.f, 1.f);
+	const float BudgetScale = ResolveFiniteFloat(
+		GetFixedPopulationBudgetScaleCVar().GetValueOnGameThread(),
+		1.f,
+		0.f,
+		1.f);
 	if (BudgetScale < 1.f)
 	{
 		ResolvedTarget = FMath::RoundToInt(ResolvedTarget * BudgetScale);
@@ -2421,8 +3606,9 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	const int32 BudgetCap = GetFixedPopulationBudgetCapCVar().GetValueOnGameThread();
 	if (BudgetCap > 0)
 	{
-		ResolvedTarget = FMath::Min(ResolvedTarget, BudgetCap);
+		ResolvedTarget = FMath::Min(ResolvedTarget, FMath::Min(BudgetCap, MaxEncounterPopulation));
 	}
+	ResolvedTarget = FMath::Clamp(ResolvedTarget, 0, MaxEncounterPopulation);
 
 	if (ResolvedTarget <= 0)
 	{
@@ -2434,11 +3620,11 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	FixedSpawnSeed = Profile->Seed != 0 ? Profile->Seed : FMath::Rand();
 	FixedSpawnStream.Initialize(FixedSpawnSeed);
 
-	const int32 MinClusterSize = FMath::Max(1, Profile->MinClusterSize);
-	const int32 MaxClusterSize = FMath::Max(MinClusterSize, Profile->MaxClusterSize);
-	const int32 MinClusterCount = FMath::Max(1, Profile->MinClusterCount);
-	const int32 MaxClusterCount = FMath::Max(MinClusterCount, Profile->MaxClusterCount);
-	const float AvgClusterSize = (Profile->MinClusterSize + Profile->MaxClusterSize) * 0.5f;
+	const int32 MinClusterSize = FMath::Clamp(Profile->MinClusterSize, 1, ResolvedTarget);
+	const int32 MaxClusterSize = FMath::Clamp(Profile->MaxClusterSize, MinClusterSize, ResolvedTarget);
+	const int32 MinClusterCount = FMath::Clamp(Profile->MinClusterCount, 1, MaxFixedClusters);
+	const int32 MaxClusterCount = FMath::Clamp(Profile->MaxClusterCount, MinClusterCount, MaxFixedClusters);
+	const float AvgClusterSize = (static_cast<float>(MinClusterSize) + static_cast<float>(MaxClusterSize)) * 0.5f;
 	int32 ClusterCount = AvgClusterSize > 0.f ? FMath::RoundToInt(ResolvedTarget / AvgClusterSize) : MinClusterCount;
 	ClusterCount = FMath::Clamp(ClusterCount, MinClusterCount, MaxClusterCount);
 	const int32 MaxPossibleClusters = FMath::Max(1, ResolvedTarget / MinClusterSize);
@@ -2449,6 +3635,10 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	{
 		for (TActorIterator<AAeyerjiSpawnRegion> It(GetWorld()); It; ++It)
 		{
+			if (Regions.Num() >= MaxFixedSpawnRegions)
+			{
+				break;
+			}
 			AAeyerjiSpawnRegion* Region = *It;
 			if (!IsValid(Region))
 			{
@@ -2456,7 +3646,7 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 			}
 
 			const FBox Bounds = Region->GetRegionBounds();
-			if (!Bounds.IsValid)
+			if (!IsFiniteBox(Bounds))
 			{
 				continue;
 			}
@@ -2465,11 +3655,18 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 			Entry.Region = Region;
 			Entry.Bounds = Bounds;
 			const FVector RegionSize = Bounds.GetSize();
-			const float SizeScore = FMath::Max(0.f, RegionSize.X + RegionSize.Y);
-			Entry.Weight = FMath::Max(0.f, Region->RegionWeight) * SizeScore;
-			Entry.DensityScale = FMath::Max(0.f, Region->DensityScale);
-			Entry.EliteChanceBonus = FMath::Max(0.f, Region->EliteChanceBonus);
-			Entry.RadiusScale = FMath::Max(0.f, Region->ClusterRadiusScale);
+			const double SizeScore = FMath::Clamp(
+				static_cast<double>(RegionSize.X) + static_cast<double>(RegionSize.Y),
+				0.0,
+				static_cast<double>(MaxWorldDistance) * 2.0);
+			const double RegionWeight = ResolveFiniteFloat(Region->RegionWeight, 0.f, 0.f, MaxRuntimeMultiplier);
+			Entry.Weight = static_cast<float>(FMath::Clamp(
+				RegionWeight * SizeScore,
+				0.0,
+				static_cast<double>(MaxRuntimeMultiplier)));
+			Entry.DensityScale = ResolveFiniteFloat(Region->DensityScale, 1.f, 0.f, MaxRuntimeMultiplier);
+			Entry.EliteChanceBonus = ResolveFiniteFloat(Region->EliteChanceBonus, 0.f, -1.f, 1.f);
+			Entry.RadiusScale = ResolveFiniteFloat(Region->ClusterRadiusScale, 1.f, 0.f, MaxRuntimeMultiplier);
 			Entry.bAllowElites = Region->bAllowElites;
 
 			if (Entry.Weight > 0.f)
@@ -2510,21 +3707,24 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 
 	auto ChooseRegionIndex = [this](const TArray<FFixedSpawnRegionEntry>& Entries) -> int32
 	{
-		float TotalWeight = 0.f;
+		double TotalWeight = 0.0;
 		for (const FFixedSpawnRegionEntry& Entry : Entries)
 		{
-			TotalWeight += FMath::Max(0.f, Entry.Weight);
+			if (FMath::IsFinite(Entry.Weight))
+			{
+				TotalWeight += FMath::Max(0.f, Entry.Weight);
+			}
 		}
 
-		if (TotalWeight <= KINDA_SMALL_NUMBER)
+		if (!FMath::IsFinite(TotalWeight) || TotalWeight <= KINDA_SMALL_NUMBER)
 		{
 			return INDEX_NONE;
 		}
 
-		float Roll = FixedSpawnStream.FRandRange(0.f, TotalWeight);
+		double Roll = static_cast<double>(FixedSpawnStream.FRand()) * TotalWeight;
 		for (int32 Index = 0; Index < Entries.Num(); ++Index)
 		{
-			Roll -= FMath::Max(0.f, Entries[Index].Weight);
+			Roll -= FMath::IsFinite(Entries[Index].Weight) ? FMath::Max(0.f, Entries[Index].Weight) : 0.f;
 			if (Roll <= 0.f)
 			{
 				return Index;
@@ -2594,10 +3794,11 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 		}
 		else
 		{
-			DensityAlpha = FMath::Pow(DensityAlpha, FMath::Max(0.01f, Profile->DensityExponent));
+			const float DensityExponent = ResolveFiniteFloat(Profile->DensityExponent, 1.5f, 0.01f, 100.f);
+			DensityAlpha = FMath::Pow(DensityAlpha, DensityExponent);
 		}
 
-		DensityAlpha = FMath::Clamp(DensityAlpha, 0.f, 1.f);
+		DensityAlpha = ResolveFiniteFloat(DensityAlpha, 0.f, 0.f, 1.f);
 		if (RegionEntry)
 		{
 			DensityAlpha = FMath::Clamp(DensityAlpha * RegionEntry->DensityScale, 0.f, 1.f);
@@ -2606,15 +3807,18 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 		int32 ClusterSize = FMath::RoundToInt(FMath::Lerp(static_cast<float>(MinAllowed), static_cast<float>(MaxAllowed), DensityAlpha));
 		ClusterSize = FMath::Clamp(ClusterSize, MinAllowed, MaxAllowed);
 
-		float Radius = FMath::Lerp(Profile->ClusterRadiusMin, Profile->ClusterRadiusMax, DensityAlpha);
+		const float RadiusMin = ResolveFiniteFloat(Profile->ClusterRadiusMin, 500.f, 0.f, MaxWorldDistance);
+		const float RadiusMax = ResolveFiniteFloat(Profile->ClusterRadiusMax, 1400.f, RadiusMin, MaxWorldDistance);
+		float Radius = FMath::Lerp(RadiusMin, RadiusMax, DensityAlpha);
 		if (RegionEntry)
 		{
 			Radius *= RegionEntry->RadiusScale;
 		}
-		Radius = FMath::Max(0.f, Radius);
+		Radius = ResolveFiniteFloat(Radius, RadiusMin, 0.f, MaxWorldDistance);
 
 		FVector ClusterCenter = GetActorLocation();
-		if (!ResolveFixedClusterCenter(RegionEntry, FixedClusterCenters, Profile->MinClusterSpacing, ClusterCenter))
+		const float MinClusterSpacing = ResolveFiniteFloat(Profile->MinClusterSpacing, 1500.f, 0.f, MaxWorldDistance);
+		if (!ResolveFixedClusterCenter(RegionEntry, FixedClusterCenters, MinClusterSpacing, ClusterCenter))
 		{
 			if (RegionEntry)
 			{
@@ -2624,6 +3828,10 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 			{
 				ClusterCenter = CachedPlayerPawn->GetActorLocation();
 			}
+		}
+		if (ClusterCenter.ContainsNaN())
+		{
+			continue;
 		}
 
 		if (RegionEntry && RegionEntry->Bounds.IsValid)
@@ -2678,7 +3886,7 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 	}
 
 	float DenseThreshold = 1.0f;
-	const float DensePercentile = FMath::Clamp(Profile->DenseClusterPercentile, 0.f, 1.f);
+	const float DensePercentile = ResolveFiniteFloat(Profile->DenseClusterPercentile, 0.2f, 0.f, 1.f);
 	if (DensePercentile > 0.f && DensitySamples.Num() > 0)
 	{
 		DensitySamples.Sort();
@@ -2734,7 +3942,7 @@ void AAeyerjiEncounterDirector::BuildFixedPopulationPlan()
 
 void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 {
-	if (!bFixedPopulationActive)
+	if (!HasAuthority() || !bFixedPopulationActive)
 	{
 		return;
 	}
@@ -2751,8 +3959,18 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 		return;
 	}
 
-	const int32 SpawnBudget = Profile->MaxFixedSpawnsPerTickOverride > 0 ? Profile->MaxFixedSpawnsPerTickOverride : FMath::Max(1, MaxSpawnsPerTick);
+	const int32 RawSpawnBudget = Profile->MaxFixedSpawnsPerTickOverride > 0
+		? Profile->MaxFixedSpawnsPerTickOverride
+		: MaxSpawnsPerTick;
+	const int32 SpawnBudget = FMath::Clamp(RawSpawnBudget, 1, MaxSpawnsPerDirectorTick);
 	int32 SpawnedThisTick = 0;
+	int32 AttemptsThisTick = 0;
+	const float WorkMilliseconds = ResolveFiniteFloat(
+		MaxSpawnWorkMillisecondsPerTick,
+		2.f,
+		0.f,
+		MaxDirectorWorkMilliseconds);
+	const double SpawnDeadline = FPlatformTime::Seconds() + (WorkMilliseconds / 1000.0);
 	const auto HandleSpawnSkip = [this](int32 ClusterId)
 	{
 		HandleFixedPopulationClusterDecrement(ClusterId);
@@ -2761,10 +3979,13 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 		UpdateTotalToKill(FixedPopulationTarget);
 	};
 
-	while (SpawnedThisTick < SpawnBudget && FixedSpawnQueue.Num() > 0)
+	while (AttemptsThisTick < SpawnBudget
+		&& FixedSpawnQueue.Num() > 0
+		&& (AttemptsThisTick == 0 || WorkMilliseconds <= 0.f || FPlatformTime::Seconds() < SpawnDeadline))
 	{
 		const FFixedSpawnRequest Request = FixedSpawnQueue[0];
 		FixedSpawnQueue.RemoveAtSwap(0);
+		++AttemptsThisTick;
 
 		const UEnemySpawnGroupDefinition* Group = Request.Group.Get();
 		if (!Group)
@@ -2784,15 +4005,18 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 
 		if (Request.bAllowElites)
 		{
-			float EliteChance = Profile->BaseEliteChance + Request.EliteChanceBonus;
-			EliteChance += FMath::Clamp(Request.DensityAlpha, 0.f, 1.f) * Profile->DensityEliteChanceScale;
+			float EliteChance = ResolveFiniteFloat(Profile->BaseEliteChance, 0.12f, 0.f, 1.f)
+				+ ResolveFiniteFloat(Request.EliteChanceBonus, 0.f, -1.f, 1.f);
+			EliteChance += ResolveFiniteFloat(Request.DensityAlpha, 0.f, 0.f, 1.f)
+				* ResolveFiniteFloat(Profile->DensityEliteChanceScale, 0.2f, 0.f, 1.f);
 
 			if (Request.bDenseCluster)
 			{
-				EliteChance += Profile->DenseEliteChanceBonus;
+				EliteChance += ResolveFiniteFloat(Profile->DenseEliteChanceBonus, 0.25f, 0.f, 1.f);
 			}
 
-			EliteChance = FMath::Clamp(EliteChance, 0.f, Profile->EliteChanceCap);
+			const float EliteChanceCap = ResolveFiniteFloat(Profile->EliteChanceCap, 0.6f, 0.f, 1.f);
+			EliteChance = ResolveFiniteFloat(EliteChance, 0.f, 0.f, EliteChanceCap);
 			bSpawnElite = FixedSpawnStream.FRand() <= EliteChance;
 		}
 
@@ -2825,11 +4049,6 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 		EnemyTemplate.SpawnInterval = 0.0f;
 		EnemyTemplate.EnemyArchetypeTag = ResolveArchetypeTagFromClass(EnemyClass);
 		EnemyTemplate.bIsElite = bSpawnElite;
-		if (bSpawnElite)
-		{
-			// Elite pool classes are authored as final variants, so skip automatic elite multipliers/affixes.
-			EnemyTemplate.bSkipEliteAutoScaling = true;
-		}
 
 		UE_LOG(LogEncounterDirector, Log,
 			TEXT("FixedSpawn request: Director=%s ClusterId=%d Group=%s Class=%s Elite=%d SkipEliteAutoScaling=%d Density=%.2f EliteChanceBonus=%.2f"),
@@ -2888,21 +4107,21 @@ void AAeyerjiEncounterDirector::ProcessFixedSpawnQueue()
 
 const UEnemySpawnGroupDefinition* AAeyerjiEncounterDirector::ChooseFixedSpawnGroup(const TArray<FFixedSpawnGroupEntry>& Groups)
 {
-	float TotalWeight = 0.f;
+	double TotalWeight = 0.0;
 	for (const FFixedSpawnGroupEntry& Entry : Groups)
 	{
-		if (Entry.Group.IsValid())
+		if (Entry.Group.IsValid() && FMath::IsFinite(Entry.Weight))
 		{
 			TotalWeight += FMath::Max(0.f, Entry.Weight);
 		}
 	}
 
-	if (TotalWeight <= KINDA_SMALL_NUMBER)
+	if (!FMath::IsFinite(TotalWeight) || TotalWeight <= KINDA_SMALL_NUMBER)
 	{
 		return nullptr;
 	}
 
-	float Roll = FixedSpawnStream.FRandRange(0.f, TotalWeight);
+	double Roll = static_cast<double>(FixedSpawnStream.FRand()) * TotalWeight;
 	for (const FFixedSpawnGroupEntry& Entry : Groups)
 	{
 		if (!Entry.Group.IsValid())
@@ -2910,7 +4129,7 @@ const UEnemySpawnGroupDefinition* AAeyerjiEncounterDirector::ChooseFixedSpawnGro
 			continue;
 		}
 
-		Roll -= FMath::Max(0.f, Entry.Weight);
+		Roll -= FMath::IsFinite(Entry.Weight) ? FMath::Max(0.f, Entry.Weight) : 0.f;
 		if (Roll <= 0.f)
 		{
 			return Entry.Group.Get();
@@ -2935,11 +4154,12 @@ bool AAeyerjiEncounterDirector::ResolveFixedClusterCenter(const FFixedSpawnRegio
 	}
 
 	const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-	const int32 Attempts = FMath::Max(1, Profile->ClusterCenterSearchAttempts);
-	const float MinSpacingSq = MinSpacing > 0.f ? FMath::Square(MinSpacing) : 0.f;
-	const FVector ProjectionExtent(Profile->NavProjectionExtent);
+	const int32 Attempts = FMath::Clamp(Profile->ClusterCenterSearchAttempts, 1, MaxSpawnAttempts);
+	const float SafeMinSpacing = ResolveFiniteFloat(MinSpacing, 0.f, 0.f, MaxWorldDistance);
+	const float MinSpacingSq = SafeMinSpacing > 0.f ? FMath::Square(SafeMinSpacing) : 0.f;
+	const FVector ProjectionExtent(ResolveFiniteFloat(Profile->NavProjectionExtent, 1200.f, 0.f, MaxWorldDistance));
 	const FVector FallbackOrigin = CachedPlayerPawn.IsValid() ? CachedPlayerPawn->GetActorLocation() : GetActorLocation();
-	const float FallbackRadius = FMath::Max(0.f, Profile->FallbackSpawnRadius);
+	const float FallbackRadius = ResolveFiniteFloat(Profile->FallbackSpawnRadius, 6000.f, 0.f, MaxWorldDistance);
 	const bool bHasRegion = RegionEntry != nullptr;
 
 	static int32 FallbackLogCount = 0;
@@ -2955,7 +4175,7 @@ bool AAeyerjiEncounterDirector::ResolveFixedClusterCenter(const FFixedSpawnRegio
 	{
 		FVector Candidate = FallbackOrigin;
 
-		if (RegionEntry)
+		if (RegionEntry && IsFiniteBox(RegionEntry->Bounds))
 		{
 			const FBox& Bounds = RegionEntry->Bounds;
 			Candidate.X = FixedSpawnStream.FRandRange(Bounds.Min.X, Bounds.Max.X);
@@ -2984,6 +4204,11 @@ bool AAeyerjiEncounterDirector::ResolveFixedClusterCenter(const FFixedSpawnRegio
 					Candidate = Reachable.Location;
 				}
 			}
+		}
+
+		if (Candidate.ContainsNaN())
+		{
+			continue;
 		}
 
 		if (bHasRegion && !RegionEntry->Bounds.IsInsideXY(Candidate))
@@ -3018,6 +4243,10 @@ bool AAeyerjiEncounterDirector::ResolveFixedClusterCenter(const FFixedSpawnRegio
 
 FVector AAeyerjiEncounterDirector::ResolveFixedSpawnLocation(const FVector& ClusterCenter, float Radius, float HalfHeight, const FBox& RegionBounds, bool bHasRegion)
 {
+	if (ClusterCenter.ContainsNaN() || !FMath::IsFinite(HalfHeight))
+	{
+		return GetActorLocation();
+	}
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -3025,9 +4254,9 @@ FVector AAeyerjiEncounterDirector::ResolveFixedSpawnLocation(const FVector& Clus
 	}
 
 	const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-	const int32 Attempts = FMath::Max(1, SpawnLocationSearchAttempts);
-	const bool bUseRegionBounds = bHasRegion && RegionBounds.IsValid;
-	float SafeRadius = FMath::Max(0.f, Radius);
+	const int32 Attempts = FMath::Clamp(SpawnLocationSearchAttempts, 1, MaxSpawnAttempts);
+	const bool bUseRegionBounds = bHasRegion && IsFiniteBox(RegionBounds);
+	float SafeRadius = ResolveFiniteFloat(Radius, 0.f, 0.f, MaxWorldDistance);
 	if (bUseRegionBounds)
 	{
 		const float MaxRadiusX = FMath::Min(ClusterCenter.X - RegionBounds.Min.X, RegionBounds.Max.X - ClusterCenter.X);
@@ -3035,7 +4264,7 @@ FVector AAeyerjiEncounterDirector::ResolveFixedSpawnLocation(const FVector& Clus
 		const float MaxRadius = FMath::Max(0.f, FMath::Min(MaxRadiusX, MaxRadiusY));
 		SafeRadius = FMath::Min(SafeRadius, MaxRadius);
 	}
-	const float MinDistance = FMath::Max(0.f, MinSpawnDistanceFromPlayer);
+	const float MinDistance = ResolveFiniteFloat(MinSpawnDistanceFromPlayer, 0.f, 0.f, MaxWorldDistance);
 	static int32 OutOfBoundsLogCount = 0;
 	static int32 FallbackLogCount = 0;
 
@@ -3228,11 +4457,17 @@ FGameplayTag AAeyerjiEncounterDirector::ResolveArchetypeTagFromClass(TSubclassOf
 
 bool AAeyerjiEncounterDirector::IsSpawnCandidateAllowed(const FVector& Candidate, float MinDistance) const
 {
+	if (Candidate.ContainsNaN())
+	{
+		return false;
+	}
+
 	if (!CachedPlayerPawn.IsValid())
 	{
 		return true;
 	}
 
+	MinDistance = ResolveFiniteFloat(MinDistance, 0.f, 0.f, MaxWorldDistance);
 	if (MinDistance > 0.f)
 	{
 		const float MinDistanceSq = FMath::Square(MinDistance);
@@ -3257,12 +4492,17 @@ bool AAeyerjiEncounterDirector::IsSpawnCandidateAllowed(const FVector& Candidate
 
 bool AAeyerjiEncounterDirector::IsNearRecentPlayerPath(const FVector& Candidate) const
 {
+	if (Candidate.ContainsNaN())
+	{
+		return true;
+	}
+
 	if (!bAvoidRecentPlayerPath || RecentPlayerSamples.IsEmpty())
 	{
 		return false;
 	}
 
-	const float Radius = FMath::Max(0.f, RecentPathAvoidRadius);
+	const float Radius = ResolveFiniteFloat(RecentPathAvoidRadius, 600.f, 0.f, MaxWorldDistance);
 	if (Radius <= 0.f)
 	{
 		return false;
@@ -3271,7 +4511,8 @@ bool AAeyerjiEncounterDirector::IsNearRecentPlayerPath(const FVector& Candidate)
 	const float RadiusSq = FMath::Square(Radius);
 	for (const FRecentPlayerSample& Sample : RecentPlayerSamples)
 	{
-		if (FVector::DistSquared2D(Candidate, Sample.Location) <= RadiusSq)
+		if (!Sample.Location.ContainsNaN()
+			&& FVector::DistSquared2D(Candidate, Sample.Location) <= RadiusSq)
 		{
 			return true;
 		}
@@ -3282,12 +4523,18 @@ bool AAeyerjiEncounterDirector::IsNearRecentPlayerPath(const FVector& Candidate)
 
 bool AAeyerjiEncounterDirector::IsSpawnLocationVisible(const FVector& Candidate) const
 {
+	if (Candidate.ContainsNaN())
+	{
+		return true;
+	}
+
 	if (!bAvoidPlayerForwardSpawnCone || !CachedPlayerPawn.IsValid())
 	{
 		return false;
 	}
 
-	if (ForwardSpawnConeDegrees <= 0.f)
+	const float SafeForwardConeDegrees = ResolveFiniteFloat(ForwardSpawnConeDegrees, 120.f, 0.f, 180.f);
+	if (SafeForwardConeDegrees <= 0.f)
 	{
 		return false;
 	}
@@ -3302,7 +4549,7 @@ bool AAeyerjiEncounterDirector::IsSpawnLocationVisible(const FVector& Candidate)
 		return true;
 	}
 
-	const float CosHalfAngle = FMath::Cos(FMath::DegreesToRadians(ForwardSpawnConeDegrees * 0.5f));
+	const float CosHalfAngle = FMath::Cos(FMath::DegreesToRadians(SafeForwardConeDegrees * 0.5f));
 	const float Dot = FVector::DotProduct(Forward2D, ToCandidate2D.GetSafeNormal());
 
 	if (Dot < CosHalfAngle)
@@ -3445,7 +4692,7 @@ bool AAeyerjiEncounterDirector::ShouldTriggerEncounter()
 
 void AAeyerjiEncounterDirector::TriggerEncounter()
 {
-	if (GetNetMode() == NM_Client)
+	if (!HasAuthority())
 	{
 		return;
 	}
@@ -3472,7 +4719,11 @@ void AAeyerjiEncounterDirector::TriggerEncounter()
 	}
 
 	const float SpeedAlpha = GetKillSpeedAlpha();
-	const int32 BurstCount = FMath::Clamp(1 + FMath::RoundToInt(SpeedAlpha * (MaxGroupsPerTrigger - 1)), 1, MaxGroupsPerTrigger);
+	const int32 SafeMaxGroups = FMath::Clamp(MaxGroupsPerTrigger, 1, MaxEncounterSpawnGroups);
+	const int32 BurstCount = FMath::Clamp(
+		1 + FMath::RoundToInt(SpeedAlpha * (SafeMaxGroups - 1)),
+		1,
+		SafeMaxGroups);
 	int32 Enqueued = 0;
 	for (int32 Burst = 0; Burst < BurstCount; ++Burst)
 	{
@@ -3499,9 +4750,10 @@ void AAeyerjiEncounterDirector::TriggerEncounter()
 const UEnemySpawnGroupDefinition* AAeyerjiEncounterDirector::ChooseSpawnGroup() const
 {
 	const UEnemySpawnGroupDefinition* Fallback = nullptr;
-
-	for (const UEnemySpawnGroupDefinition* Group : SpawnGroups)
+	const int32 GroupCount = FMath::Min(SpawnGroups.Num(), MaxEncounterSpawnGroups);
+	for (int32 GroupIndex = 0; GroupIndex < GroupCount; ++GroupIndex)
 	{
+		const UEnemySpawnGroupDefinition* Group = SpawnGroups[GroupIndex];
 		if (IsValid(Group) && !Group->EnemyTypes.IsEmpty())
 		{
 			Fallback = Group;
@@ -3514,10 +4766,10 @@ const UEnemySpawnGroupDefinition* AAeyerjiEncounterDirector::ChooseSpawnGroup() 
 		return nullptr;
 	}
 
-	const int32 Attempts = SpawnGroups.Num() * 2;
+	const int32 Attempts = GroupCount * 2;
 	for (int32 Attempt = 0; Attempt < Attempts; ++Attempt)
 	{
-		const int32 Index = FMath::RandHelper(SpawnGroups.Num());
+		const int32 Index = FMath::RandHelper(GroupCount);
 		const UEnemySpawnGroupDefinition* Candidate = SpawnGroups[Index];
 
 		if (!IsValid(Candidate) || Candidate->EnemyTypes.IsEmpty())
@@ -3543,18 +4795,19 @@ void AAeyerjiEncounterDirector::SpawnFromGroup(const UEnemySpawnGroupDefinition*
 
 int32 AAeyerjiEncounterDirector::QueueSpawnsFromGroup(const UEnemySpawnGroupDefinition* Group)
 {
-	if (GetNetMode() == NM_Client || !Group)
+	if (!HasAuthority() || !IsValid(Group))
 	{
 		return 0;
 	}
 
-	const int32 SpawnCount = Group->ResolveSpawnCount();
+	const int32 RemainingCapacity = FMath::Max(0, MaxEncounterPopulation - PendingSpawnRequests.Num());
+	const int32 SpawnCount = FMath::Min(Group->ResolveSpawnCount(), RemainingCapacity);
 	if (SpawnCount <= 0)
 	{
 		return 0;
 	}
 
-	PendingSpawnRequests.Reserve(PendingSpawnRequests.Num() + SpawnCount);
+	PendingSpawnRequests.Reserve(FMath::Min(MaxEncounterPopulation, PendingSpawnRequests.Num() + SpawnCount));
 	for (int32 Index = 0; Index < SpawnCount; ++Index)
 	{
 		PendingSpawnRequests.Add(Group);
@@ -3565,7 +4818,7 @@ int32 AAeyerjiEncounterDirector::QueueSpawnsFromGroup(const UEnemySpawnGroupDefi
 
 void AAeyerjiEncounterDirector::ProcessSpawnQueue()
 {
-	if (GetNetMode() == NM_Client)
+	if (!HasAuthority())
 	{
 		return;
 	}
@@ -3580,13 +4833,23 @@ void AAeyerjiEncounterDirector::ProcessSpawnQueue()
 		return;
 	}
 
-	const int32 SpawnBudget = FMath::Max(1, MaxSpawnsPerTick);
+	const int32 SpawnBudget = FMath::Clamp(MaxSpawnsPerTick, 1, MaxSpawnsPerDirectorTick);
 	int32 SpawnedThisTick = 0;
+	int32 AttemptsThisTick = 0;
+	const float WorkMilliseconds = ResolveFiniteFloat(
+		MaxSpawnWorkMillisecondsPerTick,
+		2.f,
+		0.f,
+		MaxDirectorWorkMilliseconds);
+	const double SpawnDeadline = FPlatformTime::Seconds() + (WorkMilliseconds / 1000.0);
 
-	while (SpawnedThisTick < SpawnBudget && PendingSpawnRequests.Num() > 0)
+	while (AttemptsThisTick < SpawnBudget
+		&& PendingSpawnRequests.Num() > 0
+		&& (AttemptsThisTick == 0 || WorkMilliseconds <= 0.f || FPlatformTime::Seconds() < SpawnDeadline))
 	{
 		const TWeakObjectPtr<const UEnemySpawnGroupDefinition> GroupPtr = PendingSpawnRequests[0];
 		PendingSpawnRequests.RemoveAtSwap(0);
+		++AttemptsThisTick;
 
 		if (const UEnemySpawnGroupDefinition* Group = GroupPtr.Get())
 		{
@@ -3614,7 +4877,12 @@ bool AAeyerjiEncounterDirector::SpawnSingleFromGroup(const UEnemySpawnGroupDefin
 	}
 
 	const float HalfHeight = GetEnemyHalfHeight(EnemyClass);
-	const FVector SpawnLocation = ResolveSpawnLocation(Group->SpawnRadius, HalfHeight);
+	const float SpawnRadius = ResolveFiniteFloat(Group->SpawnRadius, 1000.f, 0.f, MaxWorldDistance);
+	const FVector SpawnLocation = ResolveSpawnLocation(SpawnRadius, HalfHeight);
+	if (SpawnLocation.ContainsNaN())
+	{
+		return false;
+	}
 	const FRotator SpawnRotation = (CachedPlayerPawn->GetActorLocation() - SpawnLocation).Rotation();
 
 	FEnemySet EnemyTemplate;
@@ -3628,7 +4896,7 @@ bool AAeyerjiEncounterDirector::SpawnSingleFromGroup(const UEnemySpawnGroupDefin
 		*GetNameSafe(this),
 		*GetNameSafe(Group),
 		*GetNameSafe(EnemyTemplate.EnemyClass),
-		Group->SpawnRadius,
+		SpawnRadius,
 		*SpawnLocation.ToCompactString());
 
 	const FTransform SpawnTransform(SpawnRotation, SpawnLocation);
@@ -3665,6 +4933,11 @@ FVector AAeyerjiEncounterDirector::ResolveSpawnLocation(float Radius, float Half
 	}
 
 	const FVector PlayerLocation = CachedPlayerPawn->GetActorLocation();
+	if (PlayerLocation.ContainsNaN() || !FMath::IsFinite(HalfHeight))
+	{
+		return GetActorLocation();
+	}
+	Radius = ResolveFiniteFloat(Radius, 1000.f, 0.f, MaxWorldDistance);
 	if (Radius <= 0.f)
 	{
 		return PlayerLocation + FVector(0.f, 0.f, HalfHeight);
@@ -3676,8 +4949,11 @@ FVector AAeyerjiEncounterDirector::ResolveSpawnLocation(float Radius, float Half
 		return PlayerLocation + FVector(0.f, 0.f, HalfHeight);
 	}
 
-	const float MinDistance = FMath::Clamp(MinSpawnDistanceFromPlayer, 0.f, Radius);
-	const int32 Attempts = FMath::Max(1, SpawnLocationSearchAttempts);
+	const float MinDistance = FMath::Clamp(
+		ResolveFiniteFloat(MinSpawnDistanceFromPlayer, 0.f, 0.f, MaxWorldDistance),
+		0.f,
+		Radius);
+	const int32 Attempts = FMath::Clamp(SpawnLocationSearchAttempts, 1, MaxSpawnAttempts);
 	const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 
 	for (int32 Attempt = 0; Attempt < Attempts; ++Attempt)
@@ -3752,7 +5028,11 @@ FVector AAeyerjiEncounterDirector::ResolveSpawnLocation(float Radius, float Half
 
 void AAeyerjiEncounterDirector::SnapActorToGround(AActor* SpawnedActor, float HalfHeight) const
 {
-	if (!SpawnedActor || !CachedPlayerPawn.IsValid())
+	if (!IsValid(SpawnedActor)
+		|| SpawnedActor->GetWorld() != GetWorld()
+		|| !CachedPlayerPawn.IsValid()
+		|| !FMath::IsFinite(HalfHeight)
+		|| SpawnedActor->GetActorLocation().ContainsNaN())
 	{
 		return;
 	}
@@ -3763,8 +5043,11 @@ void AAeyerjiEncounterDirector::SnapActorToGround(AActor* SpawnedActor, float Ha
 		return;
 	}
 
-	const FVector Start = SpawnedActor->GetActorLocation() + FVector(0.f, 0.f, GroundTraceUpOffset);
-	const FVector End = Start - FVector(0.f, 0.f, GroundTraceDownDistance);
+	const float TraceUp = ResolveFiniteFloat(GroundTraceUpOffset, 120.f, 0.f, MaxWorldDistance);
+	const float TraceDown = ResolveFiniteFloat(GroundTraceDownDistance, 2000.f, 10.f, MaxWorldDistance);
+	const float GroundOffset = ResolveFiniteFloat(SpawnGroundOffset, 5.f, 0.f, MaxWorldDistance);
+	const FVector Start = SpawnedActor->GetActorLocation() + FVector(0.f, 0.f, TraceUp);
+	const FVector End = Start - FVector(0.f, 0.f, TraceDown);
 
 	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(EncounterDirector_SnapTrace), false, CachedPlayerPawn.Get());
@@ -3773,7 +5056,11 @@ void AAeyerjiEncounterDirector::SnapActorToGround(AActor* SpawnedActor, float Ha
 	if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
 	{
 		FVector Adjusted = SpawnedActor->GetActorLocation();
-		Adjusted.Z = Hit.ImpactPoint.Z + SpawnGroundOffset + HalfHeight;
+		Adjusted.Z = Hit.ImpactPoint.Z + GroundOffset + HalfHeight;
+		if (Adjusted.ContainsNaN())
+		{
+			return;
+		}
 		SpawnedActor->SetActorLocation(Adjusted, false, nullptr, ETeleportType::TeleportPhysics);
 	}
 }
@@ -3789,7 +5076,7 @@ float AAeyerjiEncounterDirector::GetEnemyHalfHeight(TSubclassOf<AEnemyParentNati
 	{
 		if (const UCapsuleComponent* Capsule = CDO->GetCapsuleComponent())
 		{
-			return Capsule->GetScaledCapsuleHalfHeight();
+			return ResolveFiniteFloat(Capsule->GetScaledCapsuleHalfHeight(), 0.f, 0.f, MaxWorldDistance);
 		}
 	}
 
@@ -3798,13 +5085,16 @@ float AAeyerjiEncounterDirector::GetEnemyHalfHeight(TSubclassOf<AEnemyParentNati
 
 float AAeyerjiEncounterDirector::GetKillSpeedAlpha() const
 {
-	if (KillVelocitySpawnCeil <= KillVelocitySpawnFloor)
+	const float SafeFloor = ResolveFiniteFloat(KillVelocitySpawnFloor, 0.25f, 0.f, MaxRuntimeMultiplier);
+	const float SafeCeil = ResolveFiniteFloat(KillVelocitySpawnCeil, 1.5f, 0.01f, MaxRuntimeMultiplier);
+	const float SafeVelocity = ResolveFiniteFloat(CurrentKillVelocity, 0.f, 0.f, MaxRuntimeMultiplier);
+	if (SafeCeil <= SafeFloor)
 	{
 		return 0.f;
 	}
 
-	const float Range = KillVelocitySpawnCeil - KillVelocitySpawnFloor;
-	const float Clamped = FMath::Clamp(CurrentKillVelocity - KillVelocitySpawnFloor, 0.f, Range);
+	const float Range = SafeCeil - SafeFloor;
+	const float Clamped = FMath::Clamp(SafeVelocity - SafeFloor, 0.f, Range);
 	return Clamped / Range;
 }
 
@@ -3826,15 +5116,32 @@ void AAeyerjiEncounterDirector::EnterState(EEncounterDirectorState NewState)
 		PostCombatTimeRemaining = 0.0;
 		break;
 	case EEncounterDirectorState::PostCombat:
-		PostCombatTimeRemaining = PostCombatDelaySeconds;
+		PostCombatTimeRemaining = ResolveFiniteFloat(PostCombatDelaySeconds, 1.f, 0.f, MaxDirectorSeconds);
 		break;
 	}
 }
 
 void AAeyerjiEncounterDirector::RegisterSpawnedEnemy(AEnemyParentNative* Enemy)
 {
-	if (!IsValid(Enemy))
+	if (!HasAuthority()
+		|| !IsValid(Enemy)
+		|| Enemy->GetWorld() != GetWorld())
 	{
+		return;
+	}
+	for (const TWeakObjectPtr<AActor>& TrackedEnemy : LiveEnemies)
+	{
+		if (TrackedEnemy.Get() == Enemy)
+		{
+			return;
+		}
+	}
+	if (LiveEnemies.Num() >= MaxEncounterPopulation)
+	{
+		UE_LOG(LogEncounterDirector, Error,
+			TEXT("EncounterDirector %s reached its live-enemy tracking cap; enemy %s was not registered."),
+			*GetNameSafe(this),
+			*GetNameSafe(Enemy));
 		return;
 	}
 

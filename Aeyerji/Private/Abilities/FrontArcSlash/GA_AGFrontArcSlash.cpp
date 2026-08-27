@@ -1,7 +1,5 @@
 #include "Abilities/FrontArcSlash/GA_AGFrontArcSlash.h"
 
-#include "NativeGameplayTags.h"
-
 namespace AGFrontArcTags
 {
 	const FGameplayTag& AbilityTag()

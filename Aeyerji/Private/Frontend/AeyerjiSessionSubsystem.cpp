@@ -3,8 +3,12 @@
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "Interfaces/OnlineExternalUIInterface.h"
+#include "Interfaces/OnlineIdentityInterface.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/CommandLine.h"
 #include "Misc/NetworkVersion.h"
+#include "Misc/Parse.h"
 #include "Online/OnlineSessionNames.h"
 #include "OnlineSessionSettings.h"
 #include "OnlineSubsystem.h"
@@ -24,6 +28,94 @@ namespace
 	{
 		return LexToString(FNetworkVersion::GetLocalNetworkVersion());
 	}
+
+	FString GetExpectedSteamAppId()
+	{
+		FString ExpectedAppId;
+		FParse::Value(FCommandLine::Get(), TEXT("AeyerjiExpectedSteamAppId="), ExpectedAppId);
+		return ExpectedAppId;
+	}
+
+	bool IsSteamAcceptanceRequired()
+	{
+		return FParse::Param(FCommandLine::Get(), TEXT("AeyerjiRequireSteam"))
+			|| !GetExpectedSteamAppId().IsEmpty();
+	}
+
+	bool ValidateRequiredSteamEnvironment(const TCHAR* Context)
+	{
+		if (!IsSteamAcceptanceRequired())
+		{
+			return true;
+		}
+
+		IOnlineSubsystem* OSS = IOnlineSubsystem::Get();
+		const IOnlineIdentityPtr Identity = OSS ? OSS->GetIdentityInterface() : nullptr;
+		const ELoginStatus::Type LoginStatus = Identity.IsValid()
+			? Identity->GetLoginStatus(0)
+			: ELoginStatus::NotLoggedIn;
+		const FUniqueNetIdPtr UserId = Identity.IsValid() ? Identity->GetUniquePlayerId(0) : nullptr;
+		const FString ExpectedAppId = GetExpectedSteamAppId();
+		const bool bExpectedAppId = ExpectedAppId.IsEmpty()
+			|| (OSS && OSS->GetAppId() == ExpectedAppId);
+		const bool bValid = OSS
+			&& OSS->GetSubsystemName() == FName(TEXT("STEAM"))
+			&& LoginStatus == ELoginStatus::LoggedIn
+			&& UserId.IsValid()
+			&& UserId->IsValid()
+			&& bExpectedAppId;
+
+		if (bValid)
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[SteamTestGate] Context=%s Required=1 Result=1 Backend=%s AppId=%s ExpectedAppId=%s Login=%s UserId=%s"),
+				Context,
+				*OSS->GetSubsystemName().ToString(),
+				*OSS->GetAppId(),
+				ExpectedAppId.IsEmpty() ? TEXT("Any") : *ExpectedAppId,
+				ELoginStatus::ToString(LoginStatus),
+				*UserId->ToDebugString());
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error,
+				TEXT("[SteamTestGate] Context=%s Required=1 Result=0 Backend=%s AppId=%s ExpectedAppId=%s Login=%s UserId=%s"),
+				Context,
+				OSS ? *OSS->GetSubsystemName().ToString() : TEXT("None"),
+				OSS ? *OSS->GetAppId() : TEXT("None"),
+				ExpectedAppId.IsEmpty() ? TEXT("Any") : *ExpectedAppId,
+				ELoginStatus::ToString(LoginStatus),
+				UserId.IsValid() ? *UserId->ToDebugString() : TEXT("None"));
+		}
+		return bValid;
+	}
+
+	void LogOnlineEnvironment(const TCHAR* Context)
+	{
+		IOnlineSubsystem* OSS = IOnlineSubsystem::Get();
+		if (!OSS)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[SessionBootstrap] Context=%s Backend=None Sessions=0 Identity=0"), Context);
+			return;
+		}
+
+		const IOnlineSessionPtr Sessions = OSS->GetSessionInterface();
+		const IOnlineIdentityPtr Identity = OSS->GetIdentityInterface();
+		const ELoginStatus::Type LoginStatus = Identity.IsValid()
+			? Identity->GetLoginStatus(0)
+			: ELoginStatus::NotLoggedIn;
+		const FUniqueNetIdPtr UserId = Identity.IsValid() ? Identity->GetUniquePlayerId(0) : nullptr;
+
+		UE_LOG(LogTemp, Display,
+			TEXT("[SessionBootstrap] Context=%s Backend=%s AppId=%s Sessions=%d Identity=%d Login=%s UserId=%s"),
+			Context,
+			*OSS->GetSubsystemName().ToString(),
+			*OSS->GetAppId(),
+			Sessions.IsValid(),
+			Identity.IsValid(),
+			ELoginStatus::ToString(LoginStatus),
+			UserId.IsValid() ? *UserId->ToDebugString() : TEXT("None"));
+	}
 }
 
 void UAeyerjiSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -40,6 +132,9 @@ void UAeyerjiSessionSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		NetworkFailureHandle = GEngine->OnNetworkFailure().AddUObject(this, &ThisClass::HandleNetworkFailure);
 		TravelFailureHandle = GEngine->OnTravelFailure().AddUObject(this, &ThisClass::HandleTravelFailure);
 	}
+
+	LogOnlineEnvironment(TEXT("Initialize"));
+	ValidateRequiredSteamEnvironment(TEXT("Initialize"));
 }
 
 void UAeyerjiSessionSubsystem::Deinitialize()
@@ -100,6 +195,12 @@ void UAeyerjiSessionSubsystem::FinishOperation(const bool bSuccess, const EAeyer
 
 bool UAeyerjiSessionSubsystem::HostPublicParty(const FString& PartyName, const int32 PublicConnections)
 {
+	LogOnlineEnvironment(TEXT("Host"));
+	if (!ValidateRequiredSteamEnvironment(TEXT("Host")))
+	{
+		OnFailure.Broadcast(EAeyerjiFrontendFailure::OnlineUnavailable);
+		return false;
+	}
 	IOnlineSubsystem* OSS = IOnlineSubsystem::Get();
 	IOnlineSessionPtr Sessions = GetSessionInterface();
 	if (!OSS || !Sessions.IsValid())
@@ -117,7 +218,10 @@ bool UAeyerjiSessionSubsystem::HostPublicParty(const FString& PartyName, const i
 	Settings.NumPublicConnections = FMath::Clamp(PublicConnections, 1, 4);
 	Settings.NumPrivateConnections = 0;
 	Settings.bShouldAdvertise = true;
-	Settings.bAllowJoinInProgress = false;
+	// OnlineSubsystemSteam maps this flag directly to SetLobbyJoinable, even while the
+	// session is only Pending in the staging lobby. Keep it true during Waiting or Steam
+	// will hide the lobby from searches and deny accepted friend invitations.
+	Settings.bAllowJoinInProgress = true;
 	Settings.bAllowInvites = true;
 	Settings.bUsesPresence = true;
 	Settings.bAllowJoinViaPresence = true;
@@ -135,7 +239,13 @@ bool UAeyerjiSessionSubsystem::HostPublicParty(const FString& PartyName, const i
 
 	CreateHandle = Sessions->AddOnCreateSessionCompleteDelegate_Handle(
 		FOnCreateSessionCompleteDelegate::CreateUObject(this, &ThisClass::HandleCreateSessionComplete));
-	UE_LOG(LogTemp, Display, TEXT("[Session] Operation=Host Backend=%s LAN=%d Capacity=%d"), *OSS->GetSubsystemName().ToString(), Settings.bIsLANMatch, Settings.NumPublicConnections);
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=Host Backend=%s LAN=%d Capacity=%d BuildUniqueId=%d NetworkBuild=%s"),
+		*OSS->GetSubsystemName().ToString(),
+		Settings.bIsLANMatch,
+		Settings.NumPublicConnections,
+		Settings.BuildUniqueId,
+		*GetAeyerjiNetworkBuildId());
 	if (!Sessions->CreateSession(0, NAME_GameSession, Settings))
 	{
 		Sessions->ClearOnCreateSessionCompleteDelegate_Handle(CreateHandle);
@@ -148,6 +258,12 @@ bool UAeyerjiSessionSubsystem::HostPublicParty(const FString& PartyName, const i
 
 bool UAeyerjiSessionSubsystem::SearchPublicParties()
 {
+	LogOnlineEnvironment(TEXT("Search"));
+	if (!ValidateRequiredSteamEnvironment(TEXT("Search")))
+	{
+		OnFailure.Broadcast(EAeyerjiFrontendFailure::OnlineUnavailable);
+		return false;
+	}
 	IOnlineSubsystem* OSS = IOnlineSubsystem::Get();
 	IOnlineSessionPtr Sessions = GetSessionInterface();
 	if (!OSS || !Sessions.IsValid())
@@ -167,10 +283,21 @@ bool UAeyerjiSessionSubsystem::SearchPublicParties()
 	if (!ActiveSearch->bIsLanQuery)
 	{
 		ActiveSearch->QuerySettings.Set(SEARCH_LOBBIES, true, EOnlineComparisonOp::Equals);
+		// Apply the Aeyerji identity filters at the Steam lobby service as well as locally. This
+		// prevents App ID 480's unrelated public lobbies from exhausting MaxSearchResults before
+		// the matching Aeyerji lobby is returned.
+		ActiveSearch->QuerySettings.Set(AeyerjiGameKey, AeyerjiGameId, EOnlineComparisonOp::Equals);
+		ActiveSearch->QuerySettings.Set(AeyerjiBuildKey, GetAeyerjiNetworkBuildId(), EOnlineComparisonOp::Equals);
+		ActiveSearch->QuerySettings.Set(AeyerjiPhaseKey, LobbyPhaseWaiting, EOnlineComparisonOp::Equals);
 	}
 	FindHandle = Sessions->AddOnFindSessionsCompleteDelegate_Handle(
 		FOnFindSessionsCompleteDelegate::CreateUObject(this, &ThisClass::HandleFindSessionsComplete));
-	UE_LOG(LogTemp, Display, TEXT("[Session] Operation=Search Backend=%s LAN=%d"), *OSS->GetSubsystemName().ToString(), ActiveSearch->bIsLanQuery);
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=Search Backend=%s LAN=%d BuildUniqueId=%d NetworkBuild=%s"),
+		*OSS->GetSubsystemName().ToString(),
+		ActiveSearch->bIsLanQuery,
+		GetBuildUniqueId(),
+		*GetAeyerjiNetworkBuildId());
 	if (!Sessions->FindSessions(0, ActiveSearch.ToSharedRef()))
 	{
 		Sessions->ClearOnFindSessionsCompleteDelegate_Handle(FindHandle);
@@ -183,6 +310,11 @@ bool UAeyerjiSessionSubsystem::SearchPublicParties()
 
 bool UAeyerjiSessionSubsystem::JoinPublicParty(const int32 ResultId)
 {
+	if (!ValidateRequiredSteamEnvironment(TEXT("Join")))
+	{
+		OnFailure.Broadcast(EAeyerjiFrontendFailure::OnlineUnavailable);
+		return false;
+	}
 	IOnlineSessionPtr Sessions = GetSessionInterface();
 	if (!Sessions.IsValid() || !NativeSearchResults.IsValidIndex(ResultId))
 	{
@@ -240,6 +372,34 @@ bool UAeyerjiSessionSubsystem::LeaveCurrentParty()
 	return true;
 }
 
+bool UAeyerjiSessionSubsystem::OpenPartyInviteOverlay()
+{
+	if (!ValidateRequiredSteamEnvironment(TEXT("InviteOverlay")))
+	{
+		OnFailure.Broadcast(EAeyerjiFrontendFailure::OnlineUnavailable);
+		return false;
+	}
+	IOnlineSubsystem* OSS = IOnlineSubsystem::Get();
+	const IOnlineSessionPtr Sessions = GetSessionInterface();
+	const IOnlineExternalUIPtr ExternalUI = OSS ? OSS->GetExternalUIInterface() : nullptr;
+	const FNamedOnlineSession* NamedSession = Sessions.IsValid()
+		? Sessions->GetNamedSession(NAME_GameSession)
+		: nullptr;
+	const bool bHasParty = NamedSession != nullptr;
+	const bool bOpened = bHasParty && ExternalUI.IsValid()
+		&& ExternalUI->ShowInviteUI(0, NAME_GameSession);
+
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=OpenInviteOverlay Backend=%s HasParty=%d SessionId=%s State=%d ExternalUI=%d Result=%d"),
+		OSS ? *OSS->GetSubsystemName().ToString() : TEXT("None"),
+		bHasParty,
+		NamedSession ? *NamedSession->GetSessionIdStr() : TEXT("None"),
+		Sessions.IsValid() ? static_cast<int32>(Sessions->GetSessionState(NAME_GameSession)) : INDEX_NONE,
+		ExternalUI.IsValid(),
+		bOpened);
+	return bOpened;
+}
+
 bool UAeyerjiSessionSubsystem::HasOnlineParty() const
 {
 	IOnlineSessionPtr Sessions = GetSessionInterface();
@@ -268,7 +428,10 @@ bool UAeyerjiSessionSubsystem::UpdatePartyAdvertisement(const FString& Phase, co
 	FOnlineSessionSettings Updated = Named->SessionSettings;
 	Updated.bShouldAdvertise = bJoinable;
 	Updated.bAllowJoinViaPresence = bJoinable;
-	Updated.bAllowJoinInProgress = false;
+	// Steam treats bAllowJoinInProgress as the lobby's joinable bit rather than only as
+	// permission to enter an already-started match. Waiting must remain joinable, while
+	// Launching/InGameplay closes the lobby before authoritative travel begins.
+	Updated.bAllowJoinInProgress = bJoinable;
 	Updated.Set(AeyerjiPhaseKey, Phase, EOnlineDataAdvertisementType::ViaOnlineServiceAndPing);
 	Updated.Set(AeyerjiActivityKey, static_cast<int32>(ActivityType), EOnlineDataAdvertisementType::ViaOnlineServiceAndPing);
 	Updated.Set(AeyerjiTierKey, ExcursionTier, EOnlineDataAdvertisementType::ViaOnlineServiceAndPing);
@@ -336,10 +499,25 @@ bool UAeyerjiSessionSubsystem::UpdateWaitingPartySelection(const EAeyerjiRiftAct
 
 void UAeyerjiSessionSubsystem::HandleCreateSessionComplete(const FName SessionName, const bool bWasSuccessful)
 {
-	if (IOnlineSessionPtr Sessions = GetSessionInterface()) Sessions->ClearOnCreateSessionCompleteDelegate_Handle(CreateHandle);
+	const IOnlineSessionPtr Sessions = GetSessionInterface();
+	if (Sessions.IsValid())
+	{
+		Sessions->ClearOnCreateSessionCompleteDelegate_Handle(CreateHandle);
+	}
 	CreateHandle.Reset();
+	const FNamedOnlineSession* NamedSession = Sessions.IsValid()
+		? Sessions->GetNamedSession(SessionName)
+		: nullptr;
 	FinishOperation(bWasSuccessful, EAeyerjiFrontendFailure::SessionCreateFailed);
-	UE_LOG(LogTemp, Display, TEXT("[Session] Operation=Host Result=%d"), bWasSuccessful);
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=Host Result=%d SessionId=%s OwnerId=%s OwnerName=%s State=%d"),
+		bWasSuccessful,
+		NamedSession ? *NamedSession->GetSessionIdStr() : TEXT("None"),
+		NamedSession && NamedSession->OwningUserId.IsValid()
+			? *NamedSession->OwningUserId->ToDebugString()
+			: TEXT("None"),
+		NamedSession ? *NamedSession->OwningUserName : TEXT("None"),
+		Sessions.IsValid() ? static_cast<int32>(Sessions->GetSessionState(SessionName)) : INDEX_NONE);
 	if (bWasSuccessful)
 	{
 		UGameplayStatics::OpenLevel(this, FName(TEXT("/Game/Levels/L_MainMenu")), true, TEXT("listen"));
@@ -380,6 +558,17 @@ void UAeyerjiSessionSubsystem::HandleFindSessionsComplete(const bool bWasSuccess
 			View.ActivityType = static_cast<EAeyerjiRiftActivityType>(ActivityValue);
 			View.ExcursionTier = Tier;
 			View.bJoinable = Result.Session.NumOpenPublicConnections > 0;
+			UE_LOG(LogTemp, Display,
+				TEXT("[Session] Operation=SearchAccepted ResultId=%d SessionId=%s OwnerId=%s OwnerName=%s Ping=%d Open=%d/%d"),
+				ResultId,
+				*Result.Session.GetSessionIdStr(),
+				Result.Session.OwningUserId.IsValid()
+					? *Result.Session.OwningUserId->ToDebugString()
+					: TEXT("None"),
+				*Result.Session.OwningUserName,
+				Result.PingInMs,
+				Result.Session.NumOpenPublicConnections,
+				Result.Session.SessionSettings.NumPublicConnections);
 		}
 	}
 	OnSearchResultsChanged.Broadcast(SearchResultViews);
@@ -393,18 +582,26 @@ void UAeyerjiSessionSubsystem::HandleJoinSessionComplete(const FName SessionName
 	if (Sessions.IsValid()) Sessions->ClearOnJoinSessionCompleteDelegate_Handle(JoinHandle);
 	JoinHandle.Reset();
 	FString ConnectString;
-	const bool bSuccess = Result == EOnJoinSessionCompleteResult::Success && Sessions.IsValid()
+	const bool bResolvedConnectString = Sessions.IsValid()
 		&& Sessions->GetResolvedConnectString(SessionName, ConnectString);
+	APlayerController* LocalPlayerController = nullptr;
+	if (UGameInstance* GI = GetGameInstance())
+	{
+		LocalPlayerController = GI->GetFirstLocalPlayerController();
+	}
+	const bool bSuccess = Result == EOnJoinSessionCompleteResult::Success
+		&& bResolvedConnectString
+		&& IsValid(LocalPlayerController);
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=JoinComplete Result=%d Resolved=%d PlayerController=%s Connect=%s"),
+		static_cast<int32>(Result),
+		bResolvedConnectString,
+		*GetNameSafe(LocalPlayerController),
+		ConnectString.IsEmpty() ? TEXT("None") : *ConnectString);
 	FinishOperation(bSuccess, Result == EOnJoinSessionCompleteResult::SessionIsFull ? EAeyerjiFrontendFailure::SessionFull : EAeyerjiFrontendFailure::SessionJoinFailed);
 	if (bSuccess)
 	{
-		if (UGameInstance* GI = GetGameInstance())
-		{
-			if (APlayerController* PC = GI->GetFirstLocalPlayerController())
-			{
-				PC->ClientTravel(ConnectString, TRAVEL_Absolute);
-			}
-		}
+		LocalPlayerController->ClientTravel(ConnectString, TRAVEL_Absolute);
 	}
 }
 
@@ -469,6 +666,7 @@ void UAeyerjiSessionSubsystem::HandleStartSessionComplete(const FName SessionNam
 {
 	if (IOnlineSessionPtr Sessions = GetSessionInterface()) Sessions->ClearOnStartSessionCompleteDelegate_Handle(StartHandle);
 	StartHandle.Reset();
+	UE_LOG(LogTemp, Display, TEXT("[Session] Operation=Start Result=%d"), bWasSuccessful);
 }
 
 void UAeyerjiSessionSubsystem::HandleEndSessionComplete(const FName SessionName, const bool bWasSuccessful)
@@ -489,8 +687,21 @@ void UAeyerjiSessionSubsystem::HandleEndSessionComplete(const FName SessionName,
 void UAeyerjiSessionSubsystem::HandleInviteAccepted(const bool bWasSuccessful, const int32 LocalUserNum,
 	TSharedPtr<const FUniqueNetId> UserId, const FOnlineSessionSearchResult& InviteResult)
 {
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=InviteAccepted Result=%d LocalUser=%d UserId=%s InviteValid=%d SessionId=%s OwnerId=%s OwnerName=%s CurrentOperation=%d"),
+		bWasSuccessful,
+		LocalUserNum,
+		UserId.IsValid() ? *UserId->ToDebugString() : TEXT("None"),
+		InviteResult.IsValid(),
+		InviteResult.IsValid() ? *InviteResult.Session.GetSessionIdStr() : TEXT("None"),
+		InviteResult.IsValid() && InviteResult.Session.OwningUserId.IsValid()
+			? *InviteResult.Session.OwningUserId->ToDebugString()
+			: TEXT("None"),
+		InviteResult.IsValid() ? *InviteResult.Session.OwningUserName : TEXT("None"),
+		static_cast<int32>(OperationState));
 	if (!bWasSuccessful || !InviteResult.IsValid())
 	{
+		UE_LOG(LogTemp, Warning, TEXT("[Session] Operation=InviteRejected Reason=InvalidInvite"));
 		OnFailure.Broadcast(EAeyerjiFrontendFailure::SessionJoinFailed);
 		return;
 	}
@@ -498,8 +709,21 @@ void UAeyerjiSessionSubsystem::HandleInviteAccepted(const bool bWasSuccessful, c
 	InviteResult.Session.SessionSettings.Get(AeyerjiGameKey, GameId);
 	InviteResult.Session.SessionSettings.Get(AeyerjiBuildKey, BuildId);
 	InviteResult.Session.SessionSettings.Get(AeyerjiPhaseKey, Phase);
+	UE_LOG(LogTemp, Display,
+		TEXT("[Session] Operation=InviteMetadata Game=%s Build=%s ExpectedBuild=%s Phase=%s Open=%d/%d"),
+		GameId.IsEmpty() ? TEXT("None") : *GameId,
+		BuildId.IsEmpty() ? TEXT("None") : *BuildId,
+		*GetAeyerjiNetworkBuildId(),
+		Phase.IsEmpty() ? TEXT("None") : *Phase,
+		InviteResult.Session.NumOpenPublicConnections,
+		InviteResult.Session.SessionSettings.NumPublicConnections);
 	if (GameId != AeyerjiGameId || BuildId != GetAeyerjiNetworkBuildId() || Phase != LobbyPhaseWaiting)
 	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[Session] Operation=InviteRejected Reason=MetadataMismatch GameMatch=%d BuildMatch=%d PhaseMatch=%d"),
+			GameId == AeyerjiGameId,
+			BuildId == GetAeyerjiNetworkBuildId(),
+			Phase == LobbyPhaseWaiting);
 		OnFailure.Broadcast(EAeyerjiFrontendFailure::SessionInProgress);
 		return;
 	}
@@ -512,6 +736,7 @@ void UAeyerjiSessionSubsystem::HandleInviteAccepted(const bool bWasSuccessful, c
 		PendingInviteResult = InviteResult;
 		bInviteJoinPending = true;
 		bLeaveTravelPending = false;
+		UE_LOG(LogTemp, Display, TEXT("[Session] Operation=InviteJoin Action=ReplaceCurrentSession"));
 		DestroyHandle = Sessions->AddOnDestroySessionCompleteDelegate_Handle(
 			FOnDestroySessionCompleteDelegate::CreateUObject(this, &ThisClass::HandleDestroySessionComplete));
 		if (!Sessions->DestroySession(NAME_GameSession))
@@ -524,6 +749,7 @@ void UAeyerjiSessionSubsystem::HandleInviteAccepted(const bool bWasSuccessful, c
 		}
 		return;
 	}
+	UE_LOG(LogTemp, Display, TEXT("[Session] Operation=InviteJoin Action=JoinDirectly"));
 	NativeSearchResults = { InviteResult };
 	JoinPublicParty(0);
 }

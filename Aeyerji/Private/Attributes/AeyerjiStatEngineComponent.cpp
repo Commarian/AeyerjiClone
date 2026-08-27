@@ -13,6 +13,25 @@
 #include "AeyerjiGameplayTags.h"
 #include "Enemy/EnemyParentNative.h"
 
+namespace
+{
+	float StatEngineFiniteOrDefault(const float Value, const float DefaultValue = 0.f)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
+
+	float ResolveRegenInterval(const float ConfiguredInterval)
+	{
+		return FMath::Max(0.01f, StatEngineFiniteOrDefault(ConfiguredInterval, 0.1f));
+	}
+
+	float ResolveDerivedMagnitude(const float AttributeValue, const float Multiplier)
+	{
+		const float Result = FMath::Max(0.f, StatEngineFiniteOrDefault(AttributeValue)) * FMath::Max(0.f, StatEngineFiniteOrDefault(Multiplier));
+		return StatEngineFiniteOrDefault(Result);
+	}
+}
+
 UAeyerjiStatEngineComponent::UAeyerjiStatEngineComponent()
 {
     PrimaryComponentTick.bCanEverTick = false;
@@ -45,7 +64,21 @@ void UAeyerjiStatEngineComponent::EndPlay(const EEndPlayReason::Type EndPlayReas
     if (UWorld* World = GetWorld())
     {
         World->GetTimerManager().ClearTimer(RegenTickHandle);
+		World->GetTimerManager().ClearTimer(RegenRetryHandle);
     }
+
+	if (UAbilitySystemComponent* ASC = GetASC())
+	{
+		ASC->GetGameplayAttributeValueChangeDelegate(UAeyerjiAttributeSet::GetStrengthAttribute()).RemoveAll(this);
+		ASC->GetGameplayAttributeValueChangeDelegate(UAeyerjiAttributeSet::GetAgilityAttribute()).RemoveAll(this);
+		ASC->GetGameplayAttributeValueChangeDelegate(UAeyerjiAttributeSet::GetIntellectAttribute()).RemoveAll(this);
+		if (ActiveDerivedHandle.IsValid())
+		{
+			ASC->RemoveActiveGameplayEffect(ActiveDerivedHandle);
+			ActiveDerivedHandle.Invalidate();
+		}
+	}
+	StopRegeneration();
 
     Super::EndPlay(EndPlayReason);
 }
@@ -59,8 +92,7 @@ void UAeyerjiStatEngineComponent::EnsureRegenerationActive()
 
     if (UAbilitySystemComponent* ASC = GetASC())
     {
-        static const FGameplayTag DeadTag = FGameplayTag::RequestGameplayTag(TEXT("State.Dead"), false);
-        if (DeadTag.IsValid() && ASC->HasMatchingGameplayTag(DeadTag))
+		if (ASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
         {
             return;
         }
@@ -94,7 +126,7 @@ void UAeyerjiStatEngineComponent::StartRegenTimer()
 
     if (UWorld* World = GetWorld())
     {
-        const float SafeInterval = FMath::Max(0.01f, RegenTickInterval);
+		const float SafeInterval = ResolveRegenInterval(RegenTickInterval);
         World->GetTimerManager().SetTimer(RegenTickHandle, this, &UAeyerjiStatEngineComponent::TickRegeneration, SafeInterval, true);
     }
 }
@@ -112,24 +144,25 @@ void UAeyerjiStatEngineComponent::TickRegeneration()
         return;
     }
 
-    const float HP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
-    const float HPMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
-    const float HPRegen = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPRegenAttribute());
+	const float SafeInterval = ResolveRegenInterval(RegenTickInterval);
+	const float HP = FMath::Max(0.f, StatEngineFiniteOrDefault(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute())));
+	const float HPMax = FMath::Max(0.f, StatEngineFiniteOrDefault(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute())));
+	const float HPRegen = FMath::Max(0.f, StatEngineFiniteOrDefault(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPRegenAttribute())));
     if (HP > 0.f && HP < HPMax && HPRegen > 0.f)
     {
-        const float HPDelta = FMath::Min(HPRegen * FMath::Max(0.01f, RegenTickInterval), HPMax - HP);
+		const float HPDelta = FMath::Min(StatEngineFiniteOrDefault(HPRegen * SafeInterval), HPMax - HP);
         if (HPDelta > KINDA_SMALL_NUMBER)
         {
             ASC->ApplyModToAttributeUnsafe(UAeyerjiAttributeSet::GetHPAttribute(), EGameplayModOp::Additive, HPDelta);
         }
     }
 
-    const float Mana = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaAttribute());
-    const float ManaMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaMaxAttribute());
-    const float ManaRegen = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaRegenAttribute());
+	const float Mana = FMath::Max(0.f, StatEngineFiniteOrDefault(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaAttribute())));
+	const float ManaMax = FMath::Max(0.f, StatEngineFiniteOrDefault(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaMaxAttribute())));
+	const float ManaRegen = FMath::Max(0.f, StatEngineFiniteOrDefault(ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaRegenAttribute())));
     if (Mana < ManaMax && ManaRegen > 0.f)
     {
-        const float ManaDelta = FMath::Min(ManaRegen * FMath::Max(0.01f, RegenTickInterval), ManaMax - Mana);
+		const float ManaDelta = FMath::Min(StatEngineFiniteOrDefault(ManaRegen * SafeInterval), ManaMax - Mana);
         if (ManaDelta > KINDA_SMALL_NUMBER)
         {
             ASC->ApplyModToAttributeUnsafe(UAeyerjiAttributeSet::GetManaAttribute(), EGameplayModOp::Additive, ManaDelta);
@@ -185,8 +218,7 @@ void UAeyerjiStatEngineComponent::QueueRegenRetry()
     if (UWorld* World = GetWorld())
     {
         bRegenRetryQueued = true;
-        FTimerHandle LocalHandle;
-        World->GetTimerManager().SetTimer(LocalHandle, this, &UAeyerjiStatEngineComponent::StartRegenTimer, 0.1f, false);
+		World->GetTimerManager().SetTimer(RegenRetryHandle, this, &UAeyerjiStatEngineComponent::StartRegenTimer, 0.1f, false);
     }
 }
 
@@ -258,20 +290,28 @@ void UAeyerjiStatEngineComponent::ReapplyDerivedEffect()
 
     const UAeyerjiAttributeTuning* Tuning = UAeyerjiStatSettings::Get();
     FAeyerjiPrimaryToDerivedTuning Rules; // defaults
-    if (Tuning) { Rules = Tuning->Rules; }
+    FAeyerjiCombatLimitsTuning CombatLimits; // defaults
+    if (Tuning)
+    {
+        Rules = Tuning->Rules;
+        CombatLimits = Tuning->CombatLimits;
+    }
 
-    const float Strength  = FMath::Max(0.f, Attr->GetStrength());
-    const float Agility   = FMath::Max(0.f, Attr->GetAgility());
-    const float Intellect = FMath::Max(0.f, Attr->GetIntellect());
+	const float Strength = FMath::Max(0.f, StatEngineFiniteOrDefault(Attr->GetStrength()));
+	const float Agility = FMath::Max(0.f, StatEngineFiniteOrDefault(Attr->GetAgility()));
+	const float Intellect = FMath::Max(0.f, StatEngineFiniteOrDefault(Attr->GetIntellect()));
 
-    const float HpFromStr      = Strength  * Rules.StrengthToHP;
-    const float ArmorFromStr   = Strength  * Rules.StrengthToArmor;
-    const float DodgeFromAgi   = FMath::Clamp(Agility * Rules.AgilityToDodgeChance, 0.f, 1.f);
-    const float ASFromAgi      = FMath::Max(0.f, Agility * Rules.AgilityToAttackSpeed);
-    const float SpellFromInt   = FMath::Max(0.f, Intellect * Rules.IntellectToSpellPower);
-    const float ManaFromInt    = FMath::Max(0.f, Intellect * Rules.IntellectToManaMax);
-    const float ManaRegenFromInt = FMath::Max(0.f, Intellect * Rules.IntellectToManaRegen);
-    const float HPRegenFromStr   = FMath::Max(0.f, Strength  * Rules.StrengthToHPRegen);
+	const float HpFromStr = ResolveDerivedMagnitude(Strength, Rules.StrengthToHP);
+	const float ArmorFromStr = ResolveDerivedMagnitude(Strength, Rules.StrengthToArmor);
+	const float DodgeFromAgi = FMath::Clamp(
+		ResolveDerivedMagnitude(Agility, Rules.AgilityToDodgeChance),
+		0.f,
+		CombatLimits.GetSafeMaxDodgeChance());
+	const float ASFromAgi = ResolveDerivedMagnitude(Agility, Rules.AgilityToAttackSpeed);
+	const float SpellFromInt = ResolveDerivedMagnitude(Intellect, Rules.IntellectToSpellPower);
+	const float ManaFromInt = ResolveDerivedMagnitude(Intellect, Rules.IntellectToManaMax);
+	const float ManaRegenFromInt = ResolveDerivedMagnitude(Intellect, Rules.IntellectToManaRegen);
+	const float HPRegenFromStr = ResolveDerivedMagnitude(Strength, Rules.StrengthToHPRegen);
 
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_HPMax,           HpFromStr);
     SH.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_PrimaryDerived_Armor,           ArmorFromStr);
@@ -290,7 +330,9 @@ void UAeyerjiStatEngineComponent::StopRegeneration()
     if (UWorld* World = GetWorld())
     {
         World->GetTimerManager().ClearTimer(RegenTickHandle);
+		World->GetTimerManager().ClearTimer(RegenRetryHandle);
     }
+	bRegenRetryQueued = false;
 
     if (ActiveRegenHandle.IsValid())
     {

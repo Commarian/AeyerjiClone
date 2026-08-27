@@ -6,6 +6,8 @@
 #include "Engine/GameInstance.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
+#include "Interfaces/OnlineIdentityInterface.h"
 #include "Interfaces/OnlineUserCloudInterface.h"
 #include "Items/InventoryComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -14,6 +16,7 @@
 #include "Systems/AeyerjiRiftRules.h"
 #include "Systems/AeyerjiStreamingSaveGame.h"
 #include "Systems/AeyerjiWorldStateSaveGame.h"
+#include "TimerManager.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformProcess.h"
 #include "Misc/Paths.h"
@@ -24,6 +27,7 @@ namespace
 	const TCHAR* LegacyStreamingSlotName = TEXT("AeyerjiStreamingState");
 	const TCHAR* SharedWorldStateOwnerKey = TEXT("SharedWorld");
 	const TCHAR* SharedWorldStateSlotName = TEXT("AeyerjiWorldState");
+	constexpr float ProfileCloudResolveTimeoutSeconds = 15.0f;
 
 	FString GetLocalDevOwnerKey()
 	{
@@ -164,9 +168,12 @@ namespace
 
 	FString GetSanitizedPlayerStateSaveSlotOverride(const APlayerState* PlayerState)
 	{
-		if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PlayerState))
+		if (UAeyerjiSaveManagerSubsystem::IsExplicitSaveSlotOverrideAllowed(PlayerState))
 		{
-			return UCharacterStatsLibrary::SanitizeSaveSlotName(AeyerjiPS->GetSaveSlotOverride());
+			if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PlayerState))
+			{
+				return UCharacterStatsLibrary::SanitizeSaveSlotName(AeyerjiPS->GetSaveSlotOverride());
+			}
 		}
 
 		return FString();
@@ -189,6 +196,7 @@ struct UAeyerjiSaveManagerSubsystem::FPendingProfileResolve
 	TArray<FAeyerjiOnProfileResolved> Callbacks;
 	FDelegateHandle EnumerateHandle;
 	FDelegateHandle ReadHandle;
+	FTimerHandle TimeoutHandle;
 };
 
 UAeyerjiSaveManagerSubsystem* UAeyerjiSaveManagerSubsystem::Get(const UObject* WorldContextObject)
@@ -321,6 +329,23 @@ void UAeyerjiSaveManagerSubsystem::ResolveProfileForLocalOwner(const FAeyerjiOnP
 	Pending.UserCloud = UserCloud;
 	Pending.EnumerateHandle = UserCloud->AddOnEnumerateUserFilesCompleteDelegate_Handle(
 		FOnEnumerateUserFilesCompleteDelegate::CreateUObject(this, &UAeyerjiSaveManagerSubsystem::HandleEnumerateUserFilesComplete));
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(
+			Pending.TimeoutHandle,
+			this,
+			&UAeyerjiSaveManagerSubsystem::HandleProfileResolveTimeout,
+			ProfileCloudResolveTimeoutSeconds,
+			false);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ProfileResolve] Owner=%s Result=LocalFallback Reason=MissingWorld"),
+			*Pending.OwnerKey);
+		FinalizePendingProfileResolve(false);
+		return;
+	}
 	UserCloud->EnumerateUserFiles(*UserId.GetUniqueNetId());
 }
 
@@ -386,10 +411,12 @@ bool UAeyerjiSaveManagerSubsystem::CommitResolvedProfileForLocalOwner(const FAey
 		return false;
 	}
 
-	const FString ExplicitSlotOverride = GetSanitizedExplicitSaveSlotOverride(Header);
-	const FString OwnerKey = !ExplicitSlotOverride.IsEmpty()
-		? ExplicitSlotOverride
-		: (Header.OwnerKey.IsEmpty() ? ResolveOwnerKey(PreferredPlayerState) : Header.OwnerKey);
+	const FString ExplicitSlotOverride = IsExplicitSaveSlotOverrideAllowed(PreferredPlayerState)
+		? GetSanitizedExplicitSaveSlotOverride(Header)
+		: FString();
+	const FString OwnerKey = Header.OwnerKey.IsEmpty()
+		? ResolveOwnerKey(PreferredPlayerState)
+		: Header.OwnerKey;
 	const FString SlotName = !ExplicitSlotOverride.IsEmpty()
 		? ExplicitSlotOverride
 		: MakeProfileSlotNameForOwner(OwnerKey, PreferredPlayerState);
@@ -616,7 +643,9 @@ UAeyerjiSaveGame* UAeyerjiSaveManagerSubsystem::CreateDefaultProfile(const FStri
 
 UAeyerjiSaveGame* UAeyerjiSaveManagerSubsystem::DeserializeProfileFromTransport(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes) const
 {
-	if (Header.ArtifactKind != EAeyerjiSaveArtifactKind::Profile || Bytes.Num() <= 0)
+	if (Header.ArtifactKind != EAeyerjiSaveArtifactKind::Profile
+		|| Bytes.Num() <= 0
+		|| Bytes.Num() > MaximumProfileTransportBytes)
 	{
 		return nullptr;
 	}
@@ -631,8 +660,9 @@ UAeyerjiSaveGame* UAeyerjiSaveManagerSubsystem::DeserializeProfileFromTransport(
 	SaveData->SchemaVersion = FMath::Max(Header.SchemaVersion, SaveData->SchemaVersion);
 	SaveData->Revision = Header.Revision;
 	SaveData->LastModifiedUtc = Header.LastModifiedUtc;
-	const FString ExplicitSlotOverride = GetSanitizedExplicitSaveSlotOverride(Header);
-	SaveData->OwnerKey = !ExplicitSlotOverride.IsEmpty() ? ExplicitSlotOverride : Header.OwnerKey;
+	// ExplicitSaveSlotOverride selects offline storage only. It is client-controlled and must
+	// never replace the authenticated owner carried by the validated transport header.
+	SaveData->OwnerKey = Header.OwnerKey;
 	SaveData->ArtifactKind = EAeyerjiSaveArtifactKind::Profile;
 	AeyerjiRiftRules::NormalizeProfileTiers(
 		SaveData->HighestUnlockedRiftTier, SaveData->LastSelectedRiftTier);
@@ -659,7 +689,21 @@ bool UAeyerjiSaveManagerSubsystem::BuildTransportFromProfile(const UAeyerjiSaveG
 
 	UAeyerjiSaveGame* MutableSaveData = const_cast<UAeyerjiSaveGame*>(SaveData);
 	SanitizeProfileInventoryAttributes(MutableSaveData, TEXT("BuildTransport"));
-	return UGameplayStatics::SaveGameToMemory(MutableSaveData, OutBytes);
+	if (!UGameplayStatics::SaveGameToMemory(MutableSaveData, OutBytes)
+		|| OutBytes.Num() <= 0
+		|| OutBytes.Num() > MaximumProfileTransportBytes)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("[ProfileTransport] SerializeRejected Owner=%s Bytes=%d MaximumBytes=%d"),
+			*SaveData->OwnerKey,
+			OutBytes.Num(),
+			MaximumProfileTransportBytes);
+		OutBytes.Reset();
+		OutHeader = FAeyerjiSaveTransportHeader();
+		return false;
+	}
+
+	return true;
 }
 
 bool UAeyerjiSaveManagerSubsystem::PrepareProfileForServerCommit(APlayerState* PlayerState, UAeyerjiSaveGame* SaveData, const bool bBumpRevision, FAeyerjiSaveTransportHeader& OutHeader, TArray<uint8>& OutBytes)
@@ -673,10 +717,15 @@ bool UAeyerjiSaveManagerSubsystem::PrepareProfileForServerCommit(APlayerState* P
 	StampProfileMetadata(SaveData, OwnerKey, bBumpRevision);
 	SanitizeProfileInventoryAttributes(SaveData, TEXT("PrepareServerCommit"));
 
-	ServerProfileCache.Add(OwnerKey, DuplicateObject<UAeyerjiSaveGame>(SaveData, this));
 	const bool bBuilt = BuildTransportFromProfile(SaveData, OutHeader, OutBytes);
+	if (!bBuilt)
+	{
+		return false;
+	}
+
+	ServerProfileCache.Add(OwnerKey, DuplicateObject<UAeyerjiSaveGame>(SaveData, this));
 	OutHeader.ExplicitSaveSlotOverride = GetSanitizedPlayerStateSaveSlotOverride(PlayerState);
-	return bBuilt;
+	return true;
 }
 
 bool UAeyerjiSaveManagerSubsystem::IsManagerEraProfile(const UAeyerjiSaveGame* SaveData) const
@@ -689,15 +738,8 @@ bool UAeyerjiSaveManagerSubsystem::IsManagerEraProfile(const UAeyerjiSaveGame* S
 
 FString UAeyerjiSaveManagerSubsystem::ResolveOwnerKey(const APlayerState* PreferredPlayerState) const
 {
-	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PreferredPlayerState))
-	{
-		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
-		if (!OverrideSlot.IsEmpty())
-		{
-			return OverrideSlot;
-		}
-	}
-
+	// A non-NULL platform identity is the account boundary. It must outrank both a replicated
+	// frontend binding and editor-authored character slot overrides such as "Testxxxx".
 	if (PreferredPlayerState)
 	{
 		const FUniqueNetIdRepl& NetId = PreferredPlayerState->GetUniqueId();
@@ -709,7 +751,76 @@ FString UAeyerjiSaveManagerSubsystem::ResolveOwnerKey(const APlayerState* Prefer
 				return SafeNetId;
 			}
 		}
+	}
 
+	UGameInstance* GameInstance = GetGameInstance();
+	APlayerController* LocalPlayerController = GameInstance
+		? GameInstance->GetFirstLocalPlayerController()
+		: nullptr;
+	const APlayerController* PreferredPlayerController = PreferredPlayerState
+		? PreferredPlayerState->GetPlayerController()
+		: nullptr;
+	const bool bCanUseLocalPlatformIdentity = !PreferredPlayerState
+		|| (PreferredPlayerController && PreferredPlayerController->IsLocalController())
+		|| (LocalPlayerController && LocalPlayerController->GetPlayerState<APlayerState>() == PreferredPlayerState);
+	if (bCanUseLocalPlatformIdentity)
+	{
+		if (GameInstance)
+		{
+			if (const ULocalPlayer* LocalPlayer = GameInstance->GetFirstGamePlayer())
+			{
+				const FUniqueNetIdRepl NetId = LocalPlayer->GetPreferredUniqueNetId();
+				if (IsNetIdUsable(NetId))
+				{
+					const FString SafeNetId = UCharacterStatsLibrary::SanitizeSaveSlotName(NetId.GetUniqueNetId()->ToString());
+					if (!SafeNetId.IsEmpty())
+					{
+						return SafeNetId;
+					}
+				}
+			}
+		}
+
+		// GameInstance subsystems can initialize before the first ULocalPlayer. Steam identity is
+		// already available at that point, so use local user zero instead of a machine owner.
+		if (IOnlineSubsystem* OnlineSubsystem = IOnlineSubsystem::Get())
+		{
+			const IOnlineIdentityPtr Identity = OnlineSubsystem->GetIdentityInterface();
+			const FUniqueNetIdPtr IdentityUserId = Identity.IsValid()
+				? Identity->GetUniquePlayerId(0)
+				: nullptr;
+			const FUniqueNetIdRepl IdentityNetId(IdentityUserId);
+			if (IsNetIdUsable(IdentityNetId))
+			{
+				const FString SafeNetId = UCharacterStatsLibrary::SanitizeSaveSlotName(IdentityUserId->ToString());
+				if (!SafeNetId.IsEmpty())
+				{
+					return SafeNetId;
+				}
+			}
+		}
+	}
+
+	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PreferredPlayerState))
+	{
+		// Once lobby preflight verifies a profile, keep every subsequent server cache/commit
+		// operation on that same owner. This is especially important for NULL identities,
+		// whose generated PlayerState names are not stable local profile identifiers.
+		const FString& FrontendOwner = AeyerjiPS->GetFrontendProfileOwnerKey();
+		if (!FrontendOwner.IsEmpty())
+		{
+			return FrontendOwner;
+		}
+
+		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
+		if (IsExplicitSaveSlotOverrideAllowed(PreferredPlayerState) && !OverrideSlot.IsEmpty())
+		{
+			return OverrideSlot;
+		}
+	}
+
+	if (PreferredPlayerState)
+	{
 		const FString FallbackName = UCharacterStatsLibrary::SanitizeSaveSlotName(PreferredPlayerState->GetPlayerName());
 		if (!FallbackName.IsEmpty())
 		{
@@ -719,33 +830,42 @@ FString UAeyerjiSaveManagerSubsystem::ResolveOwnerKey(const APlayerState* Prefer
 		return FString::Printf(TEXT("Player%d"), FMath::Max(0, PreferredPlayerState->GetPlayerId()));
 	}
 
-	if (const UGameInstance* GameInstance = GetGameInstance())
+	return GetLocalDevOwnerKey();
+}
+
+bool UAeyerjiSaveManagerSubsystem::IsExplicitSaveSlotOverrideAllowed(const APlayerState* PreferredPlayerState)
+{
+	const IOnlineSubsystem* OnlineSubsystem = IOnlineSubsystem::Get();
+	if (OnlineSubsystem && OnlineSubsystem->GetSubsystemName() != NULL_SUBSYSTEM)
 	{
-		if (const ULocalPlayer* LocalPlayer = GameInstance->GetFirstGamePlayer())
+		return false;
+	}
+
+	if (PreferredPlayerState)
+	{
+		const FUniqueNetIdRepl& NetId = PreferredPlayerState->GetUniqueId();
+		if (NetId.IsValid() && NetId.GetUniqueNetId().IsValid())
 		{
-			const FUniqueNetIdRepl NetId = LocalPlayer->GetPreferredUniqueNetId();
-			if (IsNetIdUsable(NetId))
-			{
-				const FString SafeNetId = UCharacterStatsLibrary::SanitizeSaveSlotName(NetId.GetUniqueNetId()->ToString());
-				if (!SafeNetId.IsEmpty())
-				{
-					return SafeNetId;
-				}
-			}
+			return NetId.GetUniqueNetId()->GetType().IsEqual(FName(TEXT("NULL")), ENameCase::IgnoreCase);
 		}
 	}
 
-	return GetLocalDevOwnerKey();
+	// Do not treat a temporarily unreplicated PlayerState ID as permission to use a shared raw
+	// slot while an authenticated provider is active. NULL/no-provider is the development path.
+	return !OnlineSubsystem || OnlineSubsystem->GetSubsystemName() == NULL_SUBSYSTEM;
 }
 
 FString UAeyerjiSaveManagerSubsystem::MakeProfileSlotNameForOwner(const FString& OwnerKey, const APlayerState* PreferredPlayerState) const
 {
-	if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PreferredPlayerState))
+	if (IsExplicitSaveSlotOverrideAllowed(PreferredPlayerState))
 	{
-		const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
-		if (!OverrideSlot.IsEmpty())
+		if (const AAeyerjiPlayerState* AeyerjiPS = Cast<AAeyerjiPlayerState>(PreferredPlayerState))
 		{
-			return OverrideSlot;
+			const FString& OverrideSlot = AeyerjiPS->GetSaveSlotOverride();
+			if (!OverrideSlot.IsEmpty())
+			{
+				return OverrideSlot;
+			}
 		}
 	}
 
@@ -890,24 +1010,6 @@ bool UAeyerjiSaveManagerSubsystem::ResolveSteamCloudContext(FUniqueNetIdRepl& Ou
 	OutUserId = FUniqueNetIdRepl();
 	OutUserCloud.Reset();
 
-	const UGameInstance* GameInstance = GetGameInstance();
-	if (!GameInstance)
-	{
-		return false;
-	}
-
-	const ULocalPlayer* LocalPlayer = GameInstance->GetFirstGamePlayer();
-	if (!LocalPlayer)
-	{
-		return false;
-	}
-
-	const FUniqueNetIdRepl PreferredNetId = LocalPlayer->GetPreferredUniqueNetId();
-	if (!IsNetIdUsable(PreferredNetId))
-	{
-		return false;
-	}
-
 	IOnlineSubsystem* OnlineSubsystem = IOnlineSubsystem::Get(TEXT("STEAM"));
 	if (!OnlineSubsystem)
 	{
@@ -915,6 +1017,24 @@ bool UAeyerjiSaveManagerSubsystem::ResolveSteamCloudContext(FUniqueNetIdRepl& Ou
 	}
 
 	if (!OnlineSubsystem)
+	{
+		return false;
+	}
+
+	FUniqueNetIdRepl PreferredNetId;
+	if (const UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (const ULocalPlayer* LocalPlayer = GameInstance->GetFirstGamePlayer())
+		{
+			PreferredNetId = LocalPlayer->GetPreferredUniqueNetId();
+		}
+	}
+	if (!IsNetIdUsable(PreferredNetId))
+	{
+		const IOnlineIdentityPtr Identity = OnlineSubsystem->GetIdentityInterface();
+		PreferredNetId = FUniqueNetIdRepl(Identity.IsValid() ? Identity->GetUniquePlayerId(0) : nullptr);
+	}
+	if (!IsNetIdUsable(PreferredNetId))
 	{
 		return false;
 	}
@@ -1191,6 +1311,24 @@ void UAeyerjiSaveManagerSubsystem::HandleReadUserFileComplete(const bool bWasSuc
 	FinalizePendingProfileResolve(true);
 }
 
+void UAeyerjiSaveManagerSubsystem::HandleProfileResolveTimeout()
+{
+	if (!PendingProfileResolve)
+	{
+		return;
+	}
+
+	const TCHAR* Stage = PendingProfileResolve->ReadHandle.IsValid() ? TEXT("Read") : TEXT("Enumerate");
+	UE_LOG(LogTemp, Warning,
+		TEXT("[ProfileResolve] Owner=%s Result=LocalFallback Reason=CloudTimeout Stage=%s TimeoutSeconds=%.1f"),
+		*PendingProfileResolve->OwnerKey,
+		Stage,
+		ProfileCloudResolveTimeoutSeconds);
+	// Cloud persistence is best effort. A missing provider callback must not keep the player in
+	// Resolving forever or prevent the server from validating the local/default profile.
+	FinalizePendingProfileResolve(false);
+}
+
 void UAeyerjiSaveManagerSubsystem::HandleWriteUserFileComplete(const bool bWasSuccessful, const FUniqueNetId& UserId, const FString& FileName)
 {
 	UE_LOG(LogTemp, Display,
@@ -1261,7 +1399,21 @@ void UAeyerjiSaveManagerSubsystem::MirrorStreamingToCloud(UAeyerjiStreamingSaveG
 
 void UAeyerjiSaveManagerSubsystem::ClearPendingResolveDelegates()
 {
-	if (!PendingProfileResolve || !PendingProfileResolve->UserCloud.IsValid())
+	if (!PendingProfileResolve)
+	{
+		return;
+	}
+
+	if (PendingProfileResolve->TimeoutHandle.IsValid())
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(PendingProfileResolve->TimeoutHandle);
+		}
+		PendingProfileResolve->TimeoutHandle.Invalidate();
+	}
+
+	if (!PendingProfileResolve->UserCloud.IsValid())
 	{
 		return;
 	}

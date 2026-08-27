@@ -130,7 +130,7 @@ public:
 	DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAbilitySystemReady);
 
 	/** Broadcast after InitialiseAbilitySystem() succeeds (server & client) */
-	UPROPERTY(EditAnywhere, Category="Aeyerji|GAS")
+	UPROPERTY(BlueprintAssignable, Category="Aeyerji|GAS")
 	FOnAbilitySystemReady OnAbilitySystemReady;
 	
 	bool IsAbilitySystemReady() const { return bASCInitialised; }
@@ -177,6 +177,12 @@ public:
 	/** Cosmetic/UI hook fired when the stun tag count moves between active and inactive. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Aeyerji|Crowd Control")
 	void BP_OnStunStateChanged(bool bIsStunned);
+
+	/** Applies a transient archetype-owned root-capsule size without overwriting legacy Blueprint defaults. */
+	void SetArchetypeCollisionCapsuleSize(float CapsuleRadius, float CapsuleHalfHeight);
+
+	/** Removes the transient archetype capsule override and restores the authored Blueprint/component capsule size. */
+	void ClearArchetypeCollisionCapsuleSize();
 protected:
     /* ------------------ Components ------------------ */
 
@@ -215,13 +221,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Aeyerji|Crowd Control|Stun")
 	FVector StunOverheadOffset = FVector(0.f, 0.f, 100.f);
 
-	/** Created as a sub-object so the ASC owns & replicates it cleanly */
-
 	/* ------------------ Gameplay setup ------------------ */
-
-	/** GE that initialises HP / Mana / etc. (set in child BPs or defaults) */
-	//UPROPERTY(EditDefaultsOnly, Category = "Aeyerji|GAS")
-	//TSubclassOf<UGameplayEffect> DefaultAttributesGE;
 
 	/** List of abilities every instance of this class should start with like DEATH*/
 	UPROPERTY(EditDefaultsOnly, Category = "Aeyerji|GAS")
@@ -245,7 +245,6 @@ protected:
 
 	/* ------------------ AActor / ACharacter ------------------ */
 
-	//virtual void PossessedBy(AController* NewController) override; // part of children as it should be
 	virtual void OnConstruction(const FTransform& Transform) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -258,11 +257,28 @@ protected:
 	void BindRuntimeAttributeHooks();
 	void UnbindRuntimeAttributeHooks();
 	void EnsurePrimaryAttributeSetRegistered();
+	void CaptureBaseCollisionCapsuleSize();
 	void RefreshCollisionCapsuleSize();
 	void WarnOnScaledRootCapsule() const;
 
-	/** Native hook fired immediately on the server when HP reaches zero. */
-	virtual void OnDeath_Implementation();
+	/** Original Blueprint/component capsule size captured before any construction-time archetype override. */
+	float BaseCollisionCapsuleRadius = 0.f;
+	float BaseCollisionCapsuleHalfHeight = 0.f;
+	bool bHasCapturedBaseCollisionCapsuleSize = false;
+
+	/** Transient archetype values take priority over legacy per-Blueprint collision fields when positive. */
+	float ArchetypeCollisionCapsuleRadius = 0.f;
+	float ArchetypeCollisionCapsuleHalfHeight = 0.f;
+
+	/** Native hook fired immediately when HP reaches zero, with the authoritative damage attribution. */
+	virtual void OnDeath_Implementation(AActor* Killer, float DamageTaken);
+
+	/**
+	 * Gives derived characters one authoritative pre-presentation step before BP_OnDeath runs.
+	 * Return true and fill OutFacingRotation when clients must apply an exact facing before
+	 * spawning death presentation from the pawn transform.
+	 */
+	virtual bool PrepareDeathPresentation(AActor* Killer, FRotator& OutFacingRotation);
 
 	/** Lets derived classes adjust native death shutdown, e.g. pooled enemies avoiding corpse cleanup. */
 	virtual FAeyerjiDeathStateOptions BuildDeathStateOptionsForOutOfHealth() const;
@@ -274,14 +290,13 @@ protected:
 	void MulticastResetDeathStateForReuse();
 
 	UFUNCTION(NetMulticast, Reliable)
-	void MulticastOnDeath(AActor* Killer, float DamageTaken);
+	void MulticastOnDeath(
+		AActor* Killer,
+		float DamageTaken,
+		bool bApplyFacingRotation,
+		FRotator FacingRotation);
 
 private:
-	/* ----- One-time initialisation entry point (server & owning client) ----- */
-	//void InitialiseAbilitySystem();
-
-	/* ----- Helpers ----- */
-	//void InitAttributes() const; - example is left in code comment but not needed since GAS has built-in functionality
 	/* ----- Delegate fired from AttributeSet when HP hits 0 ----- */
 	UFUNCTION()
 	void HandleOutOfHealth(AActor* Victim, AActor* Killer, float DamageTaken);
@@ -304,6 +319,8 @@ private:
 	void SendAICrowdControlStateTreeEvent(const FGameplayTag& EventTag);
 	void SpawnStunOverheadEffect();
 	void DestroyStunOverheadEffect();
+	/** Hides retained floating widgets on death and restores them after pooled reuse. */
+	void SetFloatingWidgetsPresentationVisible(bool bVisible);
 	void RemoveFloatingWidgets();
 	void StopRegeneration();
 	void StopMovementAndInput();
@@ -337,14 +354,9 @@ private:
 
 	static TArray<TWeakObjectPtr<AAeyerjiCharacter>> CorpsesPendingCleanup;
 
-	void OnRep_Controller() override;
 	
 public:
 	// --- Corpse management -------------------------------------------------
 	static void RemoveInvalidCorpses();
 
 };
-//GOOD refactoring from player to aeyerjicharacter removing the double asc was nice.
-// now do the same for enemyparentnative and we are 90% there to fixing ai glob slob bs kak
-//
-

@@ -111,5 +111,9 @@ private:
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UMaterialInstanceDynamic>> SegmentMaterials;
 
+	/** Builder currently holding this component's rebuild delegate binding. */
+	UPROPERTY(Transient)
+	TWeakObjectPtr<UNeonRailBuilderComponent> BoundBuilder;
+
 	bool bHasBoundDelegate = false;
 };

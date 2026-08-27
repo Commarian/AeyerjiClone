@@ -10,9 +10,11 @@
 
 namespace
 {
+	constexpr float MaxCombatTextMagnitude = 1000000000000.f;
+
 	bool IsActorRelevantToLocalPlayer(const AActor* Actor, const APlayerController* LocalPC)
 	{
-		if (!Actor || !LocalPC)
+		if (!IsValid(Actor) || !IsValid(LocalPC) || Actor->GetWorld() != LocalPC->GetWorld())
 		{
 			return false;
 		}
@@ -79,7 +81,11 @@ namespace
 		FNumberFormattingOptions Options;
 		Options.MinimumFractionalDigits = 0;
 		Options.MaximumFractionalDigits = 0;
-		return FText::AsNumber(FMath::Max(0, FMath::RoundToInt(Value)), &Options);
+		const double SafeValue = FMath::Clamp(
+			FMath::IsFinite(Value) ? static_cast<double>(Value) : 0.0,
+			0.0,
+			static_cast<double>(MaxCombatTextMagnitude));
+		return FText::AsNumber(FMath::RoundToInt64(SafeValue), &Options);
 	}
 }
 
@@ -137,7 +143,10 @@ bool UAeyerjiCombatTextLibrary::BuildCombatTextPayload(
 	OutText = FText::GetEmpty();
 	OutColor = FLinearColor::White;
 	OutScale = 1.f;
-	OutMagnitude = FMath::Max(0.f, DamageResult.FinalDamage);
+	OutMagnitude = FMath::Clamp(
+		FMath::IsFinite(DamageResult.FinalDamage) ? DamageResult.FinalDamage : 0.f,
+		0.f,
+		MaxCombatTextMagnitude);
 
 	if (!ShouldShowResultTypeForMode(ResultType, Mode))
 	{
@@ -201,7 +210,8 @@ bool UAeyerjiCombatTextLibrary::ShouldDisplayForLocalPlayer(
 	AActor* TargetActor,
 	const FGameplayCueParameters& Parameters)
 {
-	if (!LocalPlayerController || !LocalPlayerController->IsLocalController())
+	if (!IsValid(LocalPlayerController) || !LocalPlayerController->IsLocalController()
+		|| !LocalPlayerController->GetWorld())
 	{
 		return false;
 	}

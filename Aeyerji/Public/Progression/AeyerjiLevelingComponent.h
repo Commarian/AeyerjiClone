@@ -16,9 +16,17 @@ struct FLevelScaledAbility
 {
     GENERATED_BODY()
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) TSubclassOf<UGameplayAbility> Ability = nullptr;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) int32  InputID = -1;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) bool   bScaleWithLevel = true;
+	/** Ability class the server grants and refreshes when the owner levels up. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	TSubclassOf<UGameplayAbility> Ability = nullptr;
+
+	/** Legacy GAS input ID, where -1 leaves the ability unbound. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "-1", ClampMax = "255"))
+	int32 InputID = -1;
+
+	/** Grants the ability spec at the owner's level rather than level one. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bScaleWithLevel = true;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FAeyerjiOnLevelUp, int32, OldLevel, int32, NewLevel);
@@ -47,7 +55,8 @@ public:
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Leveling")
     void ForceRefreshForCurrentLevel();
 
-    UPROPERTY(BlueprintAssignable, Category="Aeyerji|Leveling")
+	/** Server-side notification emitted after the authoritative level changes. */
+	UPROPERTY(BlueprintAssignable, Category="Aeyerji|Leveling")
     FAeyerjiOnLevelUp OnLevelUp;
 
 protected:
@@ -74,7 +83,8 @@ private:
     UPROPERTY(EditAnywhere, Category="Aeyerji|Leveling")
     TArray<FLevelScaledAbility> AbilitiesToOwn;
 
-    UPROPERTY(EditAnywhere, Category="Aeyerji|Leveling")
+	/** Grants the authored ability list during authoritative BeginPlay initialization. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Leveling")
     bool bGrantAbilitiesOnBeginPlay = true;
 
     /* ---------- Ops ---------- */

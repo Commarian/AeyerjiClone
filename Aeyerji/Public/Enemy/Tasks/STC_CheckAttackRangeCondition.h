@@ -6,7 +6,6 @@
 #include "UObject/Object.h"
 #include "Blueprint/StateTreeConditionBlueprintBase.h"
 #include "STC_CheckAttackRangeCondition.generated.h"
-#pragma once
 
 /**
  * StateTree Condition that checks if the AI's target is within attack range.

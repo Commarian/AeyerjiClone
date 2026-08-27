@@ -68,7 +68,7 @@ public:
 	void PulseHighlight(float Duration, float FadeTime, int32 OverrideStencil = -1);
 
 protected:
-	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	void GatherTargets(TArray<UPrimitiveComponent*>& OutTargets) const;
 	void ApplyToTargets(TFunctionRef<void(UPrimitiveComponent*)> Fn) const;

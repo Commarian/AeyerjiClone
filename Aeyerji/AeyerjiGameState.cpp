@@ -50,6 +50,26 @@ DEFINE_LOG_CATEGORY_STATIC(LogAeyerjiWorldFlow, Log, All);
 
 namespace
 {
+	constexpr float MaxWorldFlowTimerDelaySeconds = 86400.f;
+
+	float ResolveWorldFlowTimerDelay(const float AuthoredDelay, const float FallbackDelay = 0.f)
+	{
+		const float FiniteDelay = FMath::IsFinite(AuthoredDelay) ? AuthoredDelay : FallbackDelay;
+		return FMath::Clamp(FiniteDelay, 0.f, MaxWorldFlowTimerDelaySeconds);
+	}
+
+	int32 IncrementPositiveSequence(const int32 CurrentValue)
+	{
+		return CurrentValue >= MAX_int32 ? MAX_int32 : FMath::Max(CurrentValue + 1, 1);
+	}
+
+	int32 ConsumePositiveSequence(int32& NextValue)
+	{
+		const int32 Result = FMath::Clamp(NextValue, 1, MAX_int32);
+		NextValue = IncrementPositiveSequence(Result);
+		return Result;
+	}
+
 	FAeyerjiRiftRewardLayerDefinition BuildRiftRewardLayer(
 		const int32 Drops,
 		const int32 Variance,
@@ -444,6 +464,14 @@ void AAeyerjiGameState::OnRep_RiftRunState()
 
 void AAeyerjiGameState::OnRep_LobbySnapshot()
 {
+	if (!HasAuthority())
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("[LobbyClient] Revision=%d Phase=%d Members=%d Activity=%d Tier=%d CommonCap=%d"),
+			LobbySnapshot.Revision, static_cast<int32>(LobbySnapshot.Phase), LobbySnapshot.Members.Num(),
+			static_cast<int32>(LobbySnapshot.ActivityType), LobbySnapshot.SelectedExcursionTier,
+			LobbySnapshot.CommonExcursionTierCap);
+	}
 	OnLobbySnapshotChangedNative.Broadcast(LobbySnapshot);
 }
 
@@ -565,7 +593,7 @@ void AAeyerjiGameState::RebuildFrontendLobbySnapshot(const bool bDetectRosterCha
 			Member.bReady = false;
 		}
 	}
-	LobbySnapshot.Revision = FMath::Max(LobbySnapshot.Revision + 1, 1);
+	LobbySnapshot.Revision = IncrementPositiveSequence(LobbySnapshot.Revision);
 	OnRep_LobbySnapshot();
 	ForceNetUpdate();
 	UE_LOG(LogTemp, Display, TEXT("[Lobby] Revision=%d Phase=%d Members=%d Leader=%d Activity=%d Tier=%d CommonCap=%d"),
@@ -655,11 +683,14 @@ bool AAeyerjiGameState::Server_SetFrontendTier(AAeyerjiPlayerState* Requester, c
 	return true;
 }
 
-bool AAeyerjiGameState::Server_RequestFrontendLaunch(AAeyerjiPlayerState* Requester)
+bool AAeyerjiGameState::Server_RequestFrontendLaunch(
+	AAeyerjiPlayerState* Requester, EAeyerjiFrontendFailure& OutFailure)
 {
+	OutFailure = EAeyerjiFrontendFailure::LaunchFailed;
 	if (!HasAuthority() || !Requester || LobbySnapshot.Phase != EAeyerjiLobbyPhase::Waiting
 		|| Requester->GetPlayerId() != LobbySnapshot.LeaderPlayerId)
 	{
+		OutFailure = EAeyerjiFrontendFailure::NotLeader;
 		UE_LOG(LogTemp, Warning, TEXT("[LobbyLaunch] Rejected Player=%s Reason=NotLeaderOrWrongPhase"), *GetNameSafe(Requester));
 		return false;
 	}
@@ -671,6 +702,7 @@ bool AAeyerjiGameState::Server_RequestFrontendLaunch(AAeyerjiPlayerState* Reques
 		LobbySnapshot, Requester->GetPlayerId(), TierRow);
 	if (ValidationFailure != EAeyerjiFrontendFailure::None)
 	{
+		OutFailure = ValidationFailure;
 		UE_LOG(LogTemp, Warning, TEXT("[LobbyLaunch] Rejected Player=%s Failure=%d Activity=%d Tier=%d CommonCap=%d"),
 			*GetNameSafe(Requester), static_cast<int32>(ValidationFailure),
 			static_cast<int32>(LobbySnapshot.ActivityType), Tier, LobbySnapshot.CommonExcursionTierCap);
@@ -686,8 +718,9 @@ bool AAeyerjiGameState::Server_RequestFrontendLaunch(AAeyerjiPlayerState* Reques
 		return false;
 	}
 
+	const float LaunchCountdownSeconds = ResolveWorldFlowTimerDelay(FrontendLaunchCountdownSeconds);
 	LobbySnapshot.Phase = EAeyerjiLobbyPhase::Launching;
-	LobbySnapshot.LaunchAtServerTimeSeconds = GetServerWorldTimeSeconds() + FMath::Max(0.f, FrontendLaunchCountdownSeconds);
+	LobbySnapshot.LaunchAtServerTimeSeconds = GetServerWorldTimeSeconds() + LaunchCountdownSeconds;
 	RebuildFrontendLobbySnapshot(false);
 	if (UGameInstance* GI = GetGameInstance())
 	{
@@ -698,16 +731,17 @@ bool AAeyerjiGameState::Server_RequestFrontendLaunch(AAeyerjiPlayerState* Reques
 	}
 	UE_LOG(LogTemp, Display, TEXT("[LobbyLaunch] Accepted RequestId=%d Activity=%d Tier=%d Map=%s Countdown=%.2f"),
 		Request.RequestId, static_cast<int32>(Request.ActivityType), Request.ExcursionTier,
-		*Request.MapPackageName.ToString(), FrontendLaunchCountdownSeconds);
-	if (FrontendLaunchCountdownSeconds <= 0.f)
+		*Request.MapPackageName.ToString(), LaunchCountdownSeconds);
+	if (LaunchCountdownSeconds <= 0.f)
 	{
 		HandleFrontendLaunchCountdownElapsed();
 	}
 	else if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().SetTimer(FrontendLaunchCountdownHandle, this,
-			&ThisClass::HandleFrontendLaunchCountdownElapsed, FrontendLaunchCountdownSeconds, false);
+			&ThisClass::HandleFrontendLaunchCountdownElapsed, LaunchCountdownSeconds, false);
 	}
+	OutFailure = EAeyerjiFrontendFailure::None;
 	return true;
 }
 
@@ -821,7 +855,7 @@ void AAeyerjiGameState::SetObjectiveStateFromServer(const FAeyerjiObjectiveState
 	}
 
 	FAeyerjiObjectiveState MutatedState = NewState;
-	MutatedState.ObjectiveRevision = FMath::Max(CurrentObjectiveState.ObjectiveRevision + 1, 1);
+	MutatedState.ObjectiveRevision = IncrementPositiveSequence(CurrentObjectiveState.ObjectiveRevision);
 	CurrentObjectiveState = MutatedState;
 	BroadcastCurrentObjectiveState();
 	ForceNetUpdate();
@@ -835,7 +869,7 @@ void AAeyerjiGameState::ClearObjectiveStateFromServer()
 	}
 
 	FAeyerjiObjectiveState ClearedState;
-	ClearedState.ObjectiveRevision = FMath::Max(CurrentObjectiveState.ObjectiveRevision + 1, 1);
+	ClearedState.ObjectiveRevision = IncrementPositiveSequence(CurrentObjectiveState.ObjectiveRevision);
 	CurrentObjectiveState = ClearedState;
 	BroadcastCurrentObjectiveState();
 	ForceNetUpdate();
@@ -849,7 +883,7 @@ void AAeyerjiGameState::SetSurvivalRoundStateFromServer(const FAeyerjiSurvivalRo
 	}
 
 	FAeyerjiSurvivalRoundState MutatedState = NewState;
-	MutatedState.Revision = FMath::Max(CurrentSurvivalRoundState.Revision + 1, 1);
+	MutatedState.Revision = IncrementPositiveSequence(CurrentSurvivalRoundState.Revision);
 	CurrentSurvivalRoundState = MutatedState;
 	BroadcastCurrentSurvivalRoundState();
 	ForceNetUpdate();
@@ -863,7 +897,7 @@ void AAeyerjiGameState::ClearSurvivalRoundStateFromServer()
 	}
 
 	FAeyerjiSurvivalRoundState ClearedState;
-	ClearedState.Revision = FMath::Max(CurrentSurvivalRoundState.Revision + 1, 1);
+	ClearedState.Revision = IncrementPositiveSequence(CurrentSurvivalRoundState.Revision);
 	CurrentSurvivalRoundState = ClearedState;
 	BroadcastCurrentSurvivalRoundState();
 	ForceNetUpdate();
@@ -889,7 +923,7 @@ void AAeyerjiGameState::ClearSurvivalUpgradeOfferStateFromServer()
 	}
 
 	FAeyerjiSurvivalUpgradeOfferState ClearedState;
-	ClearedState.Revision = FMath::Max(CurrentSurvivalUpgradeOfferState.Revision + 1, 1);
+	ClearedState.Revision = IncrementPositiveSequence(CurrentSurvivalUpgradeOfferState.Revision);
 	CurrentSurvivalUpgradeOfferState = ClearedState;
 	BroadcastCurrentSurvivalUpgradeOfferState();
 	ForceNetUpdate();
@@ -986,6 +1020,7 @@ void AAeyerjiGameState::ClearWorldFlowLoadingRequirements()
 	if (AAeyerjiEncounterDirector* EncounterDirector = CachedLoadingEncounterDirector.Get())
 	{
 		EncounterDirector->OnFixedPopulationInitialSpawnComplete.RemoveDynamic(this, &AAeyerjiGameState::HandleEncounterDirectorInitialSpawnComplete);
+		EncounterDirector->OnRiftPopulationPrewarmComplete.RemoveDynamic(this, &AAeyerjiGameState::HandleRiftPopulationPrewarmComplete);
 	}
 
 	CachedLoadingEncounterDirector.Reset();
@@ -1092,6 +1127,46 @@ void AAeyerjiGameState::ElectRunLeaderFromCurrentPlayers()
 	RunLeaderPlayerState = BestPlayerState;
 }
 
+bool AAeyerjiGameState::IsRunControlRequesterAuthorized(const AAeyerjiPlayerState* Requester) const
+{
+	if (!HasAuthority() || !IsValid(Requester) || !PlayerArray.Contains(Requester))
+	{
+		return false;
+	}
+
+	if (LobbySnapshot.LeaderPlayerId != INDEX_NONE)
+	{
+		return Requester->GetPlayerId() == LobbySnapshot.LeaderPlayerId;
+	}
+
+	if (RunLeaderPlayerState.IsValid())
+	{
+		return RunLeaderPlayerState.Get() == Requester;
+	}
+
+	const AAeyerjiPlayerState* LowestLoadedPlayer = nullptr;
+	int32 LowestPlayerId = MAX_int32;
+	for (const APlayerState* PlayerState : PlayerArray)
+	{
+		const AAeyerjiPlayerState* Candidate = Cast<AAeyerjiPlayerState>(PlayerState);
+		if (!IsValid(Candidate) || !Candidate->IsProfileLoadApplied())
+		{
+			continue;
+		}
+
+		const int32 CandidateId = Candidate->GetPlayerId() >= 0 ? Candidate->GetPlayerId() : MAX_int32 - 1;
+		if (!LowestLoadedPlayer || CandidateId < LowestPlayerId
+			|| (CandidateId == LowestPlayerId && Candidate->GetName().Compare(LowestLoadedPlayer->GetName()) < 0))
+		{
+			LowestLoadedPlayer = Candidate;
+			LowestPlayerId = CandidateId;
+		}
+	}
+
+	return LowestLoadedPlayer == Requester
+		|| (GetNetMode() == NM_Standalone && PlayerArray.Num() == 1);
+}
+
 bool AAeyerjiGameState::SnapshotRunParticipantsAndElectLeader(FString& OutReason)
 {
 	OutReason.Reset();
@@ -1191,7 +1266,8 @@ bool AAeyerjiGameState::ValidateRunStartReadiness(FString& OutReason) const
 		OutReason = TEXT("GameState is not authoritative");
 		return false;
 	}
-	if (WorldFlowPhase != EAeyerjiWorldFlowPhase::Gameplay)
+	if (WorldFlowPhase != EAeyerjiWorldFlowPhase::Gameplay
+		&& !(WorldFlowPhase == EAeyerjiWorldFlowPhase::TransitionLoading && bZoneSpawnPolicyAppliedForTransition))
 	{
 		OutReason = TEXT("World flow has not reached Gameplay");
 		return false;
@@ -1287,7 +1363,7 @@ bool AAeyerjiGameState::FreezeRiftConfigurationForNewRun(const FAeyerjiRiftTierR
 		const UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Pawn, true);
 		const UAeyerjiAttributeSet* Attributes = ASC ? ASC->GetSet<UAeyerjiAttributeSet>() : nullptr;
 		const int32 CharacterLevel = Attributes
-			? UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attributes->GetLevel()))
+			? UAeyerjiDifficultySettings::FloatToGameplayLevel(Attributes->GetLevel())
 			: 1;
 		if (ActivityType == EAeyerjiRiftActivityType::Excursion
 			&& CharacterLevel < FMath::Max(TierRow->MinimumCharacterLevel, 1))
@@ -1313,7 +1389,7 @@ bool AAeyerjiGameState::FreezeRiftConfigurationForNewRun(const FAeyerjiRiftTierR
 	RiftBonusRewardCache.Reset();
 
 	FAeyerjiRiftRunState NewState;
-	NewState.RunSerial = NextRunSerial++;
+	NewState.RunSerial = ConsumePositiveSequence(NextRunSerial);
 	NewState.RunSeed = FixedRiftRunSeed > 0 ? FixedRiftRunSeed : FMath::RandRange(1, MAX_int32 - 1);
 	NewState.Activity.ActivityType = ActivityType;
 	NewState.Activity.ExcursionTier = ActivityType == EAeyerjiRiftActivityType::Excursion
@@ -1376,7 +1452,7 @@ bool AAeyerjiGameState::FreezeRiftConfigurationForNewRun(const FAeyerjiRiftTierR
 	}
 
 	NewState.StartServerTimeSeconds = GetServerWorldTimeSeconds();
-	NewState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+	NewState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	RiftRunState = NewState;
 	OnRep_RiftRunState();
 	ForceNetUpdate();
@@ -1424,6 +1500,12 @@ bool AAeyerjiGameState::Server_StartRun()
 	}
 
 	AAeyerjiLevelDirector* LevelDirector = CachedLevelDirector.Get();
+	AAeyerjiEncounterDirector* EncounterDirector = LevelDirector ? LevelDirector->GetEncounterDirector() : nullptr;
+	const bool bHasPreparedRiftPlan = LevelDirector
+		&& LevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions
+		&& IsValid(EncounterDirector)
+		&& RiftRunState.RunSerial > 0
+		&& EncounterDirector->GetPreparedRiftRunSerial() == RiftRunState.RunSerial;
 	const FAeyerjiRiftTierRow* TierRow = LevelDirector
 		? LevelDirector->FindRiftTierRow(PendingSelectedRiftTier)
 		: nullptr;
@@ -1434,14 +1516,16 @@ bool AAeyerjiGameState::Server_StartRun()
 			PendingSelectedRiftTier, *ActiveZoneId.ToString());
 		return false;
 	}
-	if (!FreezeRiftConfigurationForNewRun(TierRow, ReadinessReason))
+	if (!bHasPreparedRiftPlan && !FreezeRiftConfigurationForNewRun(TierRow, ReadinessReason))
 	{
 		UE_LOG(LogAeyerjiWorldFlow, Warning,
 			TEXT("[RiftRun][Start] Rejected Zone=%s Tier=%d Reason=%s"),
 			*ActiveZoneId.ToString(), PendingSelectedRiftTier, *ReadinessReason);
 		return false;
 	}
-	if (LevelDirector && LevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
+	if (!bHasPreparedRiftPlan
+		&& LevelDirector
+		&& LevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
 	{
 		const int32 ProgressTarget = (RiftRunState.Activity.ActivityType == EAeyerjiRiftActivityType::Excursion && TierRow)
 			? FMath::Max(TierRow->ProgressTargetPoints, 1)
@@ -1454,11 +1538,29 @@ bool AAeyerjiGameState::Server_StartRun()
 				RiftRunState.RunSerial, *ReadinessReason);
 			RiftRunState.RunSerial = 0;
 			RiftRunState.StartServerTimeSeconds = 0.f;
-			RiftRunState.Revision++;
+			RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 			OnRep_RiftRunState();
 			ForceNetUpdate();
 			return false;
 		}
+	}
+	if (LevelDirector && LevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
+	{
+		EncounterDirector = LevelDirector->GetEncounterDirector();
+	}
+
+	if (LevelDirector
+		&& LevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions
+		&& IsValid(EncounterDirector)
+		&& !EncounterDirector->IsRiftPopulationPrewarmComplete())
+	{
+		bRiftRunPreparationPending = true;
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("[RiftRun][Prewarm] Run start prepared and waiting RunSerial=%d Remaining=%d TransitionId=%d"),
+			RiftRunState.RunSerial,
+			EncounterDirector->GetRiftPopulationPrewarmRemaining(),
+			TransitionId);
+		return true;
 	}
 
 	if (UAeyerjiWorldStateSubsystem* WorldStateSubsystem = UAeyerjiWorldStateSubsystem::Get(this))
@@ -1469,14 +1571,22 @@ bool AAeyerjiGameState::Server_StartRun()
 		WorldStateSubsystem->BeginRun(RunId);
 	}
 
+	// Loading-time prewarm may take several seconds; the authoritative run clock starts
+	// only when gameplay is actually released.
+	RiftRunState.StartServerTimeSeconds = GetServerWorldTimeSeconds();
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
+	OnRep_RiftRunState();
+	ForceNetUpdate();
+
 	if (!SetRunState(EAeyerjiRunState::InRun))
 	{
 		return false;
 	}
 	StartedRunSerial = RiftRunState.RunSerial;
+	bRiftRunPreparationPending = false;
 
 	LastCompletedObjectiveEvent = EAeyerjiObjectiveEvent::None;
-	ObjectiveEventVersion = FMath::Max(1, ObjectiveEventVersion + 1);
+	ObjectiveEventVersion = IncrementPositiveSequence(ObjectiveEventVersion);
 	ClearSurvivalRoundStateFromServer();
 	ClearSurvivalUpgradeOfferStateFromServer();
 	ForceNetUpdate();
@@ -1488,6 +1598,18 @@ bool AAeyerjiGameState::Server_StartRun()
 			RiftRunState.RunSerial, RiftRunState.RunSeed, RiftRunState.SelectedRiftTier,
 			*GetNameSafe(RunLeaderPlayerState.Get()), RunParticipants.Num(), *GetNameSafe(LevelDirector));
 		LevelDirector->StartRun();
+		FString TreasureReason;
+		if (!LevelDirector->SpawnRiftTreasuresForRun(
+			RiftRunState.RunSerial,
+			RiftRunState.RunSeed,
+			TreasureReason))
+		{
+			UE_LOG(LogAeyerjiWorldFlow, Warning,
+				TEXT("[Treasure] Rift run started without treasure layout RunSerial=%d Seed=%d Reason=%s"),
+				RiftRunState.RunSerial,
+				RiftRunState.RunSeed,
+				*TreasureReason);
+		}
 	}
 	else
 	{
@@ -1570,7 +1692,7 @@ bool AAeyerjiGameState::Server_TrySelectRiftTier(
 	}
 
 	RiftRunState.SelectedRiftTier = RequestedTier;
-	RiftRunState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	OnRep_RiftRunState();
 	ForceNetUpdate();
 	UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -1592,7 +1714,7 @@ bool AAeyerjiGameState::Server_BeginBossPhase()
 
 	BossPhaseStartedRunSerial = RiftRunState.RunSerial;
 	RiftRunState.bBossPhaseStarted = true;
-	RiftRunState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	if (CachedEncounterDirector.IsValid())
 	{
 		CachedEncounterDirector->FreezeWeightedProgress();
@@ -1654,7 +1776,7 @@ bool AAeyerjiGameState::RollRiftRewardLayer(
 	{
 		if (const UAeyerjiAttributeSet* Attributes = ASC->GetSet<UAeyerjiAttributeSet>())
 		{
-			PlayerLevel = FMath::Max(FMath::RoundToInt(Attributes->GetLevel()), 1);
+			PlayerLevel = UAeyerjiDifficultySettings::FloatToGameplayLevel(Attributes->GetLevel());
 		}
 	}
 
@@ -1735,7 +1857,7 @@ bool AAeyerjiGameState::FinalizeRiftRewards()
 		// Legacy/non-Rift boss runs have no layered reward definition, but still complete
 		// the orchestration barrier so their existing boss loot path remains compatible.
 		RiftRunState.bRewardsFinalized = true;
-		RiftRunState.Revision++;
+		RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 		OnRep_RiftRunState();
 		ForceNetUpdate();
 		return true;
@@ -1806,10 +1928,15 @@ bool AAeyerjiGameState::FinalizeRiftRewards()
 		{
 			if (!RiftBonusRewardCache.IsValid())
 			{
+				UWorld* World = GetWorld();
+				if (!World)
+				{
+					return false;
+				}
 				UClass* CacheClass = FrozenRiftBonusRewardPresentationClass
 					? FrozenRiftBonusRewardPresentationClass.Get()
 					: AAeyerjiRewardPresentationActor::StaticClass();
-				RiftBonusRewardCache = GetWorld()->SpawnActor<AAeyerjiRewardPresentationActor>(
+				RiftBonusRewardCache = World->SpawnActor<AAeyerjiRewardPresentationActor>(
 					CacheClass, CacheLocation, FRotator::ZeroRotator);
 			}
 			if (!RiftBonusRewardCache.IsValid())
@@ -1834,7 +1961,7 @@ bool AAeyerjiGameState::FinalizeRiftRewards()
 	}
 
 	RiftRunState.bRewardsFinalized = true;
-	RiftRunState.Revision++;
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	OnRep_RiftRunState();
 	ForceNetUpdate();
 	UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -1854,7 +1981,7 @@ void AAeyerjiGameState::Server_NotifyPlayerDeath(AAeyerjiPlayerState* DeadPlayer
 	}
 
 	RiftRunState.bBossPhaseDeathOccurred = true;
-	RiftRunState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	OnRep_RiftRunState();
 	ForceNetUpdate();
 	UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -1916,7 +2043,7 @@ bool AAeyerjiGameState::Server_NotifyBossDefeated()
 	RiftRunState.EarnedNextRiftTier = RiftRunState.bCompletedInTime
 		? RiftRunState.SelectedRiftTier + 1
 		: 0;
-	RiftRunState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	OnRep_RiftRunState();
 	ForceNetUpdate();
 	UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -1942,18 +2069,19 @@ bool AAeyerjiGameState::Server_NotifyBossDefeated()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BossDefeatedDelayHandle);
+		const float CompletionDelay = ResolveWorldFlowTimerDelay(BossDefeatedToCompleteDelay);
 
-		if (BossDefeatedToCompleteDelay <= 0.f)
+		if (CompletionDelay <= 0.f)
 		{
 			UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: BossDefeated delay <= 0 (%.2fs), advancing immediately to ObjectiveComplete."),
-				BossDefeatedToCompleteDelay);
+				CompletionDelay);
 			HandleBossDefeatedDelayElapsed();
 		}
 		else
 		{
 			UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Scheduling BossDefeated -> ObjectiveComplete delay %.2fs."),
-				BossDefeatedToCompleteDelay);
-			World->GetTimerManager().SetTimer(BossDefeatedDelayHandle, this, &AAeyerjiGameState::HandleBossDefeatedDelayElapsed, BossDefeatedToCompleteDelay, false);
+				CompletionDelay);
+			World->GetTimerManager().SetTimer(BossDefeatedDelayHandle, this, &AAeyerjiGameState::HandleBossDefeatedDelayElapsed, CompletionDelay, false);
 		}
 	}
 	else
@@ -2078,9 +2206,10 @@ bool AAeyerjiGameState::Server_CompleteExtraction()
 		World->GetTimerManager().ClearTimer(BossDefeatedDelayHandle);
 		World->GetTimerManager().ClearTimer(AutoReturnDelayHandle);
 
-		if (AutoReturnToMenuDelay > 0.f)
+		const float ReturnDelay = ResolveWorldFlowTimerDelay(AutoReturnToMenuDelay);
+		if (ReturnDelay > 0.f)
 		{
-			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, AutoReturnToMenuDelay, false);
+			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, ReturnDelay, false);
 		}
 	}
 
@@ -2127,9 +2256,10 @@ bool AAeyerjiGameState::Server_FailRunTimeExpired()
 		World->GetTimerManager().ClearTimer(BossDefeatedDelayHandle);
 		World->GetTimerManager().ClearTimer(AutoReturnDelayHandle);
 
-		if (AutoReturnToMenuDelay > 0.f)
+		const float ReturnDelay = ResolveWorldFlowTimerDelay(AutoReturnToMenuDelay);
+		if (ReturnDelay > 0.f)
 		{
-			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, AutoReturnToMenuDelay, false);
+			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, ReturnDelay, false);
 		}
 	}
 
@@ -2176,9 +2306,10 @@ bool AAeyerjiGameState::Server_FailRunDefenseObjectiveDestroyed()
 		World->GetTimerManager().ClearTimer(BossDefeatedDelayHandle);
 		World->GetTimerManager().ClearTimer(AutoReturnDelayHandle);
 
-		if (AutoReturnToMenuDelay > 0.f)
+		const float ReturnDelay = ResolveWorldFlowTimerDelay(AutoReturnToMenuDelay);
+		if (ReturnDelay > 0.f)
 		{
-			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, AutoReturnToMenuDelay, false);
+			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, ReturnDelay, false);
 		}
 	}
 
@@ -2229,9 +2360,10 @@ bool AAeyerjiGameState::Server_MarkRunComplete()
 		World->GetTimerManager().ClearTimer(BossDefeatedDelayHandle);
 		World->GetTimerManager().ClearTimer(AutoReturnDelayHandle);
 
-		if (AutoReturnToMenuDelay > 0.f)
+		const float ReturnDelay = ResolveWorldFlowTimerDelay(AutoReturnToMenuDelay);
+		if (ReturnDelay > 0.f)
 		{
-			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, AutoReturnToMenuDelay, false);
+			World->GetTimerManager().SetTimer(AutoReturnDelayHandle, this, &AAeyerjiGameState::HandleAutoReturnDelayElapsed, ReturnDelay, false);
 		}
 	}
 
@@ -2366,7 +2498,7 @@ bool AAeyerjiGameState::Server_RetryRiftRunForRequester(
 	// During results, RunResults remains the immutable completed-run snapshot while
 	// this replicated field tells Blueprint which tier the authority staged next.
 	RiftRunState.SelectedRiftTier = RequestedTier;
-	RiftRunState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+	RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 	OnRep_RiftRunState();
 	ForceNetUpdate();
 	UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -2585,9 +2717,13 @@ bool AAeyerjiGameState::Server_BeginWorldTransition(const FName TargetZoneId)
 	const int32 PreviousTransitionId = TransitionId;
 
 	ActiveZoneId = ValidatedZone.ZoneId;
-	TransitionId = FMath::Max(TransitionId + 1, 1);
+	TransitionId = IncrementPositiveSequence(TransitionId);
 	ZoneReadyPlayers.Reset();
 	bServerZoneReady = false;
+	bNavigationBoundsRegisteredForTransition = false;
+	bNavigationBuildRequestedForTransition = false;
+	bZoneSpawnPolicyAppliedForTransition = false;
+	bRiftRunPreparationPending = false;
 	ClearWorldFlowLoadingRequirements();
 
 	SetWorldFlowPhase(EAeyerjiWorldFlowPhase::TransitionLoading);
@@ -2595,11 +2731,14 @@ bool AAeyerjiGameState::Server_BeginWorldTransition(const FName TargetZoneId)
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(WorldTransitionTimeoutHandle);
+		World->GetTimerManager().ClearTimer(WorldTransitionCompletionRetryHandle);
+		const float TransitionTimeout = FMath::Max(
+			1.f, ResolveWorldFlowTimerDelay(WorldTransitionTimeoutSeconds, 60.f));
 		World->GetTimerManager().SetTimer(
 			WorldTransitionTimeoutHandle,
 			this,
 			&AAeyerjiGameState::HandleWorldTransitionTimeout,
-			FMath::Max(1.f, WorldTransitionTimeoutSeconds),
+			TransitionTimeout,
 			false);
 	}
 
@@ -2617,6 +2756,7 @@ bool AAeyerjiGameState::Server_BeginWorldTransition(const FName TargetZoneId)
 		if (UWorld* World = GetWorld())
 		{
 			World->GetTimerManager().ClearTimer(WorldTransitionTimeoutHandle);
+			World->GetTimerManager().ClearTimer(WorldTransitionCompletionRetryHandle);
 		}
 		ForceNetUpdate();
 		return false;
@@ -2703,10 +2843,16 @@ void AAeyerjiGameState::TryCompleteWorldTransition()
 	{
 		return;
 	}
+	if (WorldFlowPhase == EAeyerjiWorldFlowPhase::TransitionLoading
+		&& (PendingWorldFlowLoaderCount > 0 || bZoneSpawnPolicyAppliedForTransition))
+	{
+		return;
+	}
 
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(WorldTransitionTimeoutHandle);
+		World->GetTimerManager().ClearTimer(WorldTransitionCompletionRetryHandle);
 	}
 
 	ForceNetUpdate();
@@ -2778,6 +2924,7 @@ void AAeyerjiGameState::MarkLocalPlayersReadyForTransition()
 
 APlayerStart* AAeyerjiGameState::SelectPlayerStartForZone(const FName DesiredTag, const int32 PlayerIndex) const
 {
+	static_cast<void>(PlayerIndex);
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -2798,11 +2945,16 @@ APlayerStart* AAeyerjiGameState::SelectPlayerStartForZone(const FName DesiredTag
 			}
 		}
 	}
+	const auto SortByPath = [](const APlayerStart& A, const APlayerStart& B)
+	{
+		return A.GetPathName() < B.GetPathName();
+	};
+	TaggedStarts.Sort(SortByPath);
+	AllStarts.Sort(SortByPath);
 
 	if (TaggedStarts.Num() > 0)
 	{
-		const int32 SafeIndex = FMath::Abs(PlayerIndex) % TaggedStarts.Num();
-		return TaggedStarts[SafeIndex];
+		return TaggedStarts[0];
 	}
 
 	if (AllStarts.Num() <= 0)
@@ -2817,6 +2969,102 @@ APlayerStart* AAeyerjiGameState::SelectPlayerStartForZone(const FName DesiredTag
 	}
 
 	return AllStarts[0];
+}
+
+void AAeyerjiGameState::ScheduleWorldTransitionCompletionRetry()
+{
+	UWorld* World = GetWorld();
+	if (!World || World->GetTimerManager().IsTimerActive(WorldTransitionCompletionRetryHandle))
+	{
+		return;
+	}
+
+	World->GetTimerManager().SetTimer(
+		WorldTransitionCompletionRetryHandle,
+		this,
+		&AAeyerjiGameState::TryCompleteWorldTransition,
+		0.1f,
+		false);
+}
+
+bool AAeyerjiGameState::PrepareNavigationForZoneSpawn()
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!NavSys)
+	{
+		UE_LOG(LogAeyerjiWorldFlow, Warning,
+			TEXT("AAeyerjiGameState: Deferring Zone=%s spawn because NavigationSystem is not available."),
+			*ActiveZoneId.ToString());
+		ScheduleWorldTransitionCompletionRetry();
+		return false;
+	}
+
+	if (!bNavigationBoundsRegisteredForTransition)
+	{
+		int32 RegisteredBoundsCount = 0;
+		for (TActorIterator<ANavMeshBoundsVolume> It(World); It; ++It)
+		{
+			if (ANavMeshBoundsVolume* BoundsVolume = *It)
+			{
+				NavSys->OnNavigationBoundsUpdated(BoundsVolume);
+				++RegisteredBoundsCount;
+			}
+		}
+
+		if (RegisteredBoundsCount <= 0)
+		{
+			UE_LOG(LogAeyerjiWorldFlow, Warning,
+				TEXT("AAeyerjiGameState: Deferring Zone=%s spawn because no streamed NavMeshBoundsVolume is available."),
+				*ActiveZoneId.ToString());
+			ScheduleWorldTransitionCompletionRetry();
+			return false;
+		}
+
+		bNavigationBoundsRegisteredForTransition = true;
+		ANavigationData* NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate);
+		if (!NavData)
+		{
+			NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::Create);
+		}
+
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("AAeyerjiGameState: Registered %d navigation bounds for Zone=%s; requesting runtime navigation build (NavDataMissing=%d)."),
+			RegisteredBoundsCount,
+			*ActiveZoneId.ToString(),
+			NavData ? 0 : 1);
+
+		bNavigationBuildRequestedForTransition = true;
+		NavSys->Build();
+		ScheduleWorldTransitionCompletionRetry();
+		return false;
+	}
+
+	ANavigationData* NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate);
+	const bool bNavBuildPending = UNavigationSystemV1::IsNavigationBeingBuiltOrLocked(this)
+		|| NavSys->IsNavigationBuildInProgress()
+		|| NavSys->IsNavigationDirty();
+
+	if (!NavData || bNavBuildPending)
+	{
+		if (!bNavigationBuildRequestedForTransition)
+		{
+			bNavigationBuildRequestedForTransition = true;
+			NavSys->Build();
+		}
+		ScheduleWorldTransitionCompletionRetry();
+		return false;
+	}
+
+	UE_LOG(LogAeyerjiWorldFlow, Display,
+		TEXT("AAeyerjiGameState: Runtime navigation is ready for Zone=%s; continuing player spawn."),
+		*ActiveZoneId.ToString());
+	return true;
 }
 
 bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
@@ -2844,6 +3092,30 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		return false;
 	}
 
+	if (bZoneSpawnPolicyAppliedForTransition)
+	{
+		SetPendingWorldFlowLoaderCount(0);
+		SetWorldFlowPhase(EAeyerjiWorldFlowPhase::Gameplay);
+		MaybeBroadcastZoneGameplayReady();
+
+		const bool bStartedPreparedRun = Server_StartRun();
+		if (!bStartedPreparedRun)
+		{
+			UE_LOG(LogAeyerjiWorldFlow, Error,
+				TEXT("[RiftRun][Prewarm] Prepared run failed to commit after loading Zone=%s TransitionId=%d"),
+				*ActiveZoneId.ToString(),
+				TransitionId);
+			return false;
+		}
+
+		bZoneSpawnPolicyAppliedForTransition = false;
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("[RiftRun][Prewarm] Gameplay released after exact pool prewarm Zone=%s TransitionId=%d"),
+			*ActiveZoneId.ToString(),
+			TransitionId);
+		return true;
+	}
+
 	if (!ZoneDef.bSpawnPlayerAfterReady)
 	{
 		for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
@@ -2863,6 +3135,12 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 			SetRunState(EAeyerjiRunState::PreRun);
 		}
 
+		// Returning from a completed run keeps the party together, but it must no longer
+		// advertise InGameplay. The frontend shell deliberately stays hidden while that
+		// phase is active, so publish the menu lobby state before the world-flow phase.
+		LobbySnapshot.Phase = EAeyerjiLobbyPhase::Waiting;
+		ClearFrontendReadiness();
+		RebuildFrontendLobbySnapshot(false);
 		SetWorldFlowPhase(EAeyerjiWorldFlowPhase::Menu);
 		UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Transition completed for menu zone %s"), *ActiveZoneId.ToString());
 
@@ -2877,6 +3155,14 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		return true;
 	}
 
+	// Streamed nav bounds must be registered before validating a gameplay PlayerStart. Previously
+	// this work happened after spawning, so a fresh runtime navmesh could have zero tiles and the
+	// failed projection prevented the navigation build code from ever being reached.
+	if (!PrepareNavigationForZoneSpawn())
+	{
+		return false;
+	}
+
 	AGameModeBase* GameMode = UGameplayStatics::GetGameMode(this);
 	if (!GameMode)
 	{
@@ -2884,16 +3170,36 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		return false;
 	}
 
-	int32 SpawnPlayerIndex = 0;
+	TArray<APlayerController*> SpawnControllers;
 	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
 	{
-		APlayerController* PC = It->Get();
-		if (!PC)
+		if (APlayerController* PC = It->Get())
 		{
-			continue;
+			SpawnControllers.Add(PC);
 		}
+	}
+	SpawnControllers.Sort([this](const APlayerController& A, const APlayerController& B)
+	{
+		const int32 AId = A.PlayerState ? A.PlayerState->GetPlayerId() : MAX_int32;
+		const int32 BId = B.PlayerState ? B.PlayerState->GetPlayerId() : MAX_int32;
+		const bool bALeader = AId == LobbySnapshot.LeaderPlayerId;
+		const bool bBLeader = BId == LobbySnapshot.LeaderPlayerId;
+		if (bALeader != bBLeader)
+		{
+			return bALeader;
+		}
+		if (AId != BId)
+		{
+			return AId < BId;
+		}
+		return A.GetPathName() < B.GetPathName();
+	});
 
-		APlayerStart* DesiredStart = SelectPlayerStartForZone(ZoneDef.EntryPlayerStartTag, SpawnPlayerIndex);
+	for (int32 SpawnPlayerIndex = 0; SpawnPlayerIndex < SpawnControllers.Num(); ++SpawnPlayerIndex)
+	{
+		APlayerController* PC = SpawnControllers[SpawnPlayerIndex];
+
+		APlayerStart* DesiredStart = SelectPlayerStartForZone(ZoneDef.EntryPlayerStartTag, 0);
 		if (!DesiredStart)
 		{
 			UE_LOG(LogAeyerjiWorldFlow, Error, TEXT("AAeyerjiGameState: No PlayerStart found for Zone=%s Tag=%s"),
@@ -2968,13 +3274,20 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		SpawnNavParams.GroundTraceDepth = 800.f;
 
 		FAeyerjiNavSafetyResult SpawnNavResult;
-		if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(this, DesiredStart->GetActorLocation(), SpawnedPawn, SpawnNavParams, SpawnNavResult))
+		FVector DesiredSpawnLocation = DesiredStart->GetActorLocation();
+		if (SpawnPlayerIndex > 0 && PartySpawnRadius > 0.f)
 		{
-			UE_LOG(LogAeyerjiWorldFlow, Error, TEXT("AAeyerjiGameState: PlayerStart %s for Zone=%s is not on safe nav. Reason=%s Location=%s"),
+			const int32 RingMemberCount = FMath::Max(1, SpawnControllers.Num() - 1);
+			const float AngleRadians = (2.f * PI * static_cast<float>(SpawnPlayerIndex - 1)) / static_cast<float>(RingMemberCount);
+			DesiredSpawnLocation += FVector(FMath::Cos(AngleRadians), FMath::Sin(AngleRadians), 0.f) * PartySpawnRadius;
+		}
+		if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(this, DesiredSpawnLocation, SpawnedPawn, SpawnNavParams, SpawnNavResult))
+		{
+			UE_LOG(LogAeyerjiWorldFlow, Error, TEXT("AAeyerjiGameState: Party spawn near PlayerStart %s for Zone=%s is not on safe nav. Reason=%s Location=%s"),
 				*GetNameSafe(DesiredStart),
 				*ActiveZoneId.ToString(),
 				*SpawnNavResult.FailureReason.ToString(),
-				*DesiredStart->GetActorLocation().ToCompactString());
+				*DesiredSpawnLocation.ToCompactString());
 			SpawnedPawn->Destroy();
 			return false;
 		}
@@ -2993,8 +3306,6 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Possessed pawn class=%s controller=%s"),
 			*GetNameSafe(SpawnedPawn->GetClass()),
 			*GetNameSafe(PC));
-
-		++SpawnPlayerIndex;
 	}
 
 	const bool bResolvedGameplayActors = ResolveGameplayActorsForActiveZone();
@@ -3024,40 +3335,42 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		SetRunState(EAeyerjiRunState::PreRun);
 	}
 
-	if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+	const bool bShouldAutoStartRun = ZoneDef.bSpawnPlayerAfterReady && ZoneDef.bAutoStartRun;
+	if (bShouldAutoStartRun
+		&& CachedLevelDirector.IsValid()
+		&& CachedLevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
 	{
-		for (TActorIterator<ANavMeshBoundsVolume> It(World); It; ++It)
+		bZoneSpawnPolicyAppliedForTransition = true;
+		if (!Server_StartRun())
 		{
-			if (ANavMeshBoundsVolume* BoundsVolume = *It)
+			bZoneSpawnPolicyAppliedForTransition = false;
+			return false;
+		}
+
+		AAeyerjiEncounterDirector* EncounterDirector = CachedLevelDirector->GetEncounterDirector();
+		if (IsValid(EncounterDirector) && !EncounterDirector->IsRiftPopulationPrewarmComplete())
+		{
+			if (AAeyerjiEncounterDirector* PreviousDirector = CachedLoadingEncounterDirector.Get())
 			{
-				NavSys->OnNavigationBoundsUpdated(BoundsVolume);
+				PreviousDirector->OnRiftPopulationPrewarmComplete.RemoveDynamic(
+					this,
+					&AAeyerjiGameState::HandleRiftPopulationPrewarmComplete);
 			}
-		}
-
-		ANavigationData* NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate);
-		if (!NavData)
-		{
-			NavData = NavSys->GetDefaultNavDataInstance(FNavigationSystem::Create);
-		}
-
-		const bool bNavBuildPending = UNavigationSystemV1::IsNavigationBeingBuiltOrLocked(this)
-			|| NavSys->IsNavigationBuildInProgress()
-			|| NavSys->IsNavigationDirty();
-		const bool bNavDataMissing = (NavData == nullptr);
-		if (bNavBuildPending || bNavDataMissing)
-		{
+			CachedLoadingEncounterDirector = EncounterDirector;
+			EncounterDirector->OnRiftPopulationPrewarmComplete.RemoveDynamic(
+				this,
+				&AAeyerjiGameState::HandleRiftPopulationPrewarmComplete);
+			EncounterDirector->OnRiftPopulationPrewarmComplete.AddDynamic(
+				this,
+				&AAeyerjiGameState::HandleRiftPopulationPrewarmComplete);
+			SetPendingWorldFlowLoaderCount(1);
 			UE_LOG(LogAeyerjiWorldFlow, Display,
-				TEXT("AAeyerjiGameState: Requesting navigation build for Zone=%s (NavBuildPending=%d NavDataMissing=%d)"),
+				TEXT("[RiftRun][Prewarm] Holding TransitionLoading Zone=%s TransitionId=%d Remaining=%d"),
 				*ActiveZoneId.ToString(),
-				bNavBuildPending ? 1 : 0,
-				bNavDataMissing ? 1 : 0);
-			NavSys->Build();
+				TransitionId,
+				EncounterDirector->GetRiftPopulationPrewarmRemaining());
+			return true;
 		}
-	}
-	else
-	{
-		UE_LOG(LogAeyerjiWorldFlow, Warning, TEXT("AAeyerjiGameState: NavigationSystem missing while activating Zone=%s"),
-			*ActiveZoneId.ToString());
 	}
 
 	// Gameplay is replicated before auto-start. Starting during spawn setup allowed the
@@ -3065,7 +3378,6 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 	SetWorldFlowPhase(EAeyerjiWorldFlowPhase::Gameplay);
 	MaybeBroadcastZoneGameplayReady();
 
-	const bool bShouldAutoStartRun = ZoneDef.bSpawnPlayerAfterReady && ZoneDef.bAutoStartRun;
 	if (bShouldAutoStartRun)
 	{
 		if (!bResolvedGameplayActors || !CachedLevelDirector.IsValid())
@@ -3274,7 +3586,7 @@ void AAeyerjiGameState::SnapshotRunResults(const EAeyerjiRunResolution Resolutio
 	}
 
 	FAeyerjiRunResults NewResults;
-	NewResults.ResultsVersion = NextResultsVersion++;
+	NewResults.ResultsVersion = ConsumePositiveSequence(NextResultsVersion);
 	NewResults.RunSerial = RiftRunState.RunSerial;
 	NewResults.bBossDefeated = bBossDefeated;
 	NewResults.Resolution = Resolution;
@@ -3332,7 +3644,7 @@ void AAeyerjiGameState::BroadcastObjectiveEventCompleted(const EAeyerjiObjective
 	}
 
 	LastCompletedObjectiveEvent = CompletedEvent;
-	ObjectiveEventVersion = FMath::Max(1, ObjectiveEventVersion + 1);
+	ObjectiveEventVersion = IncrementPositiveSequence(ObjectiveEventVersion);
 	OnObjectiveEventCompleted.Broadcast(LastCompletedObjectiveEvent);
 	ForceNetUpdate();
 }
@@ -3857,7 +4169,7 @@ void AAeyerjiGameState::PersistRunResultsForPlayers()
 
 	if (RunState == EAeyerjiRunState::RunComplete)
 	{
-		RunResults.ResultsVersion = NextResultsVersion++;
+		RunResults.ResultsVersion = ConsumePositiveSequence(NextResultsVersion);
 	}
 
 	ForceNetUpdate();
@@ -4165,7 +4477,7 @@ void AAeyerjiGameState::HandleLevelDirectorRunTimerExpired()
 		{
 			RiftRunState.bOvertime = true;
 			RiftRunState.bCompletedInTime = false;
-			RiftRunState.Revision = FMath::Max(RiftRunState.Revision + 1, 1);
+			RiftRunState.Revision = IncrementPositiveSequence(RiftRunState.Revision);
 			OnRep_RiftRunState();
 			ForceNetUpdate();
 			UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -4306,15 +4618,75 @@ void AAeyerjiGameState::HandleStreamingZoneReady(const FName ZoneId)
 		return;
 	}
 
-	if (UWorld* World = GetWorld())
+	TryReportLocalZoneReady();
+}
+
+void AAeyerjiGameState::TryReportLocalZoneReady()
+{
+	UWorld* World = GetWorld();
+	if (!World)
 	{
-		if (AAeyerjiPlayerController* LocalPC = Cast<AAeyerjiPlayerController>(World->GetFirstPlayerController()))
-		{
-			LocalPC->Server_ReportZoneReady(TransitionId);
-			LastReportedReadyTransitionId = TransitionId;
-			UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Reported zone ready to server for TransitionId=%d"), TransitionId);
-		}
+		return;
 	}
+
+	if (HasAuthority()
+		|| WorldFlowPhase != EAeyerjiWorldFlowPhase::TransitionLoading
+		|| TransitionId <= 0
+		|| TransitionId == LastReportedReadyTransitionId)
+	{
+		World->GetTimerManager().ClearTimer(LocalZoneReadyReportRetryHandle);
+		return;
+	}
+
+	AAeyerjiPlayerController* ReportingController = nullptr;
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		AAeyerjiPlayerController* Candidate = Cast<AAeyerjiPlayerController>(It->Get());
+		if (!IsValid(Candidate)
+			|| Candidate->IsActorBeingDestroyed()
+			|| !Candidate->IsLocalController()
+			|| !IsValid(Candidate->GetPlayerState<APlayerState>()))
+		{
+			continue;
+		}
+
+		// Seamless travel can leave the retiring local controller in the world briefly. An RPC sent
+		// through that actor is dropped because it no longer owns a net connection, so wait for the
+		// replacement controller instead of consuming the one-shot transition guard.
+		if (World->GetNetMode() == NM_Client && Candidate->GetNetConnection() == nullptr)
+		{
+			continue;
+		}
+
+		ReportingController = Candidate;
+		break;
+	}
+
+	if (!ReportingController)
+	{
+		if (!World->GetTimerManager().IsTimerActive(LocalZoneReadyReportRetryHandle))
+		{
+			UE_LOG(LogAeyerjiWorldFlow, Display,
+				TEXT("AAeyerjiGameState: Deferring zone-ready report until the seamless-travel PlayerController owns a connection (TransitionId=%d)."),
+				TransitionId);
+			World->GetTimerManager().SetTimer(
+				LocalZoneReadyReportRetryHandle,
+				this,
+				&AAeyerjiGameState::TryReportLocalZoneReady,
+				0.1f,
+				true);
+		}
+		return;
+	}
+
+	const int32 ReportedTransitionId = TransitionId;
+	ReportingController->Server_ReportZoneReady(ReportedTransitionId);
+	LastReportedReadyTransitionId = ReportedTransitionId;
+	World->GetTimerManager().ClearTimer(LocalZoneReadyReportRetryHandle);
+	UE_LOG(LogAeyerjiWorldFlow, Display,
+		TEXT("AAeyerjiGameState: Dispatched zone-ready report through %s for TransitionId=%d."),
+		*GetNameSafe(ReportingController),
+		ReportedTransitionId);
 }
 
 void AAeyerjiGameState::HandleEncounterDirectorInitialSpawnComplete(AAeyerjiEncounterDirector* Director)
@@ -4334,6 +4706,28 @@ void AAeyerjiGameState::HandleEncounterDirectorInitialSpawnComplete(AAeyerjiEnco
 		*ActiveZoneId.ToString(),
 		TransitionId);
 
+	SetPendingWorldFlowLoaderCount(0);
+	TryCompleteWorldTransition();
+}
+
+void AAeyerjiGameState::HandleRiftPopulationPrewarmComplete(AAeyerjiEncounterDirector* Director)
+{
+	if (!HasAuthority() || WorldFlowPhase != EAeyerjiWorldFlowPhase::TransitionLoading)
+	{
+		return;
+	}
+	if (!CachedLoadingEncounterDirector.IsValid() || Director != CachedLoadingEncounterDirector.Get())
+	{
+		return;
+	}
+
+	Director->OnRiftPopulationPrewarmComplete.RemoveDynamic(
+		this,
+		&AAeyerjiGameState::HandleRiftPopulationPrewarmComplete);
+	UE_LOG(LogAeyerjiWorldFlow, Display,
+		TEXT("[RiftRun][Prewarm] Loading blocker complete Zone=%s TransitionId=%d"),
+		*ActiveZoneId.ToString(),
+		TransitionId);
 	SetPendingWorldFlowLoaderCount(0);
 	TryCompleteWorldTransition();
 }
@@ -4368,6 +4762,11 @@ void AAeyerjiGameState::HandleWorldTransitionTimeout()
 	if (!HasAuthority() || WorldFlowPhase != EAeyerjiWorldFlowPhase::TransitionLoading)
 	{
 		return;
+	}
+
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(WorldTransitionCompletionRetryHandle);
 	}
 
 	UE_LOG(LogAeyerjiWorldFlow, Warning, TEXT("AAeyerjiGameState: World transition timed out (Zone=%s TransitionId=%d)."),

@@ -40,9 +40,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Archetype")
 	void SetArchetypeFromLibrary(UAeyerjiEnemyArchetypeLibrary* NewLibrary, const FGameplayTag& NewTag, bool bApplyImmediately = true);
 
-	// Applies mesh/animation overrides from the archetype (runs on all roles).
+	// Applies construction-safe capsule sizing plus mesh/animation overrides from the archetype on every relevant role.
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Archetype")
 	void ApplyArchetypeVisuals(bool bAllowInEditor = false, bool bForce = false);
+
+	/** Applies or clears the resolved archetype's root-capsule override on every network role and in construction previews when allowed. */
+	void ApplyArchetypeCollisionOverrides(bool bAllowInEditor = false);
 
 	// Returns the resolved archetype asset without forcing a load.
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
@@ -106,6 +109,8 @@ private:
 	void AddTraitComponents(const FAeyerjiEnemyArchetypeEntry& Data);
 	void ApplyMeshOverrides(const UAeyerjiEnemyArchetypeData& Data);
 	void ApplyMeshOverrides(const FAeyerjiEnemyArchetypeEntry& Data);
+	void ApplyCapsuleOverrides(const UAeyerjiEnemyArchetypeData& Data);
+	void ApplyCapsuleOverrides(const FAeyerjiEnemyArchetypeEntry& Data);
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_ArchetypeSource, Category="Archetype", meta=(AllowPrivateAccess="true"))
 	TSoftObjectPtr<UAeyerjiEnemyArchetypeData> ArchetypeData;

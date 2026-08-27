@@ -3,28 +3,16 @@
 
 #include "AeyerjiGameInstance.h"
 
-#include "AbilitySystemInterface.h"
-#include "AeyerjiGameMode.h"
 #include "AeyerjiPlayerState.h"
 #include "AeyerjiPlayerController.h"
 #include "AeyerjiGameState.h"
-#include "AeyerjiCharacter.h"
-#include "CharacterStatsLibrary.h"
-#include "AeyerjiSaveGame.h"
 #include "Systems/AeyerjiSaveManagerSubsystem.h"
 #include "Systems/AeyerjiStreamingSubsystem.h"
-#include "Attributes/AeyerjiAttributeSet.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Math/UnrealMathUtility.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
-
-void UAeyerjiGameInstance::Shutdown()
-{
-
-	Super::Shutdown();        // always last
-}
 
 void UAeyerjiGameInstance::SetDifficultySlider(float NewValue)
 {

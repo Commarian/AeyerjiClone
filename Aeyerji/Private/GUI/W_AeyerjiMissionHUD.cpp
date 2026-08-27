@@ -9,6 +9,23 @@
 
 namespace
 {
+	constexpr float MaxHudDisplayValue = 1000000000.f;
+
+	float SafeHudValue(const float Value, const float DefaultValue = 0.f)
+	{
+		return FMath::IsFinite(Value) ? Value : DefaultValue;
+	}
+
+	float SafeHudUnitValue(const float Value)
+	{
+		return FMath::Clamp(SafeHudValue(Value), 0.f, 1.f);
+	}
+
+	int32 SafeHudCeilInteger(const float Value)
+	{
+		return FMath::CeilToInt(FMath::Clamp(SafeHudValue(Value), 0.f, MaxHudDisplayValue));
+	}
+
 	FText GetRoundTypeDisplayText(const EAeyerjiSurvivalRoundType RoundType)
 	{
 		using namespace AeyerjiStringLibrary;
@@ -108,7 +125,7 @@ void UW_AeyerjiMissionHUD::ApplyObjectiveNativePresentation(const FAeyerjiObject
 		}
 		if (MapProgressBar)
 		{
-			MapProgressBar->SetPercent(FMath::Clamp(Progress01, 0.f, 1.f));
+			MapProgressBar->SetPercent(SafeHudUnitValue(Progress01));
 			MapProgressBar->SetVisibility(ESlateVisibility::HitTestInvisible);
 		}
 	};
@@ -231,7 +248,7 @@ void UW_AeyerjiMissionHUD::ApplyGoldState(const int64 Gold, const int64 Delta)
 
 	if (Delta < 0)
 	{
-		const int64 SpentGold = FMath::Max<int64>(0, -Delta);
+		const int64 SpentGold = Delta == MIN_int64 ? MAX_int64 : -Delta;
 		ApplyImmediateGoldTotal(ClampedGold);
 		BP_PlayGoldSpent(SpentGold, BuildGoldSpentText(SpentGold));
 		return;
@@ -247,7 +264,8 @@ void UW_AeyerjiMissionHUD::ResetGoldPresentation(const int64 Gold)
 
 void UW_AeyerjiMissionHUD::RestartGoldMergeTimer()
 {
-	if (GoldMergeWindow <= UE_SMALL_NUMBER)
+	const float SafeMergeWindow = FMath::Clamp(SafeHudValue(GoldMergeWindow, 0.1f), 0.f, 60.f);
+	if (SafeMergeWindow <= UE_SMALL_NUMBER)
 	{
 		CommitPendingGold();
 		return;
@@ -265,7 +283,7 @@ void UW_AeyerjiMissionHUD::RestartGoldMergeTimer()
 		GoldMergeTimerHandle,
 		this,
 		&UW_AeyerjiMissionHUD::CommitPendingGold,
-		GoldMergeWindow,
+		SafeMergeWindow,
 		false);
 }
 
@@ -283,7 +301,11 @@ void UW_AeyerjiMissionHUD::CommitPendingGold()
 	NativeCountTargetGold = NativeTargetGold;
 	NativeGoldCountElapsed = 0.f;
 
-	BP_PlayGoldMerge(NativePendingGoldDelta, NativeCountStartGold, NativeCountTargetGold, GoldCountDuration);
+	BP_PlayGoldMerge(
+		NativePendingGoldDelta,
+		NativeCountStartGold,
+		NativeCountTargetGold,
+		FMath::Clamp(SafeHudValue(GoldCountDuration, 0.35f), 0.01f, 60.f));
 
 	UWorld* World = GetWorld();
 	if (!World)
@@ -297,17 +319,17 @@ void UW_AeyerjiMissionHUD::CommitPendingGold()
 		GoldCountTimerHandle,
 		this,
 		&UW_AeyerjiMissionHUD::TickGoldCountUp,
-		FMath::Max(0.001f, GoldCountTickInterval),
+		FMath::Clamp(SafeHudValue(GoldCountTickInterval, 0.033f), 0.001f, 1.f),
 		true);
 }
 
 void UW_AeyerjiMissionHUD::TickGoldCountUp()
 {
-	const float TickInterval = FMath::Max(0.001f, GoldCountTickInterval);
-	const float Duration = FMath::Max(0.01f, GoldCountDuration);
+	const float TickInterval = FMath::Clamp(SafeHudValue(GoldCountTickInterval, 0.033f), 0.001f, 1.f);
+	const float Duration = FMath::Clamp(SafeHudValue(GoldCountDuration, 0.35f), 0.01f, 60.f);
 	NativeGoldCountElapsed += TickInterval;
 
-	const float Alpha = FMath::Clamp(NativeGoldCountElapsed / Duration, 0.f, 1.f);
+	const float Alpha = SafeHudUnitValue(NativeGoldCountElapsed / Duration);
 	const float SmoothAlpha = EaseOutCubic(Alpha);
 	const double InterpolatedGold = FMath::Lerp(
 		static_cast<double>(NativeCountStartGold),
@@ -560,7 +582,7 @@ bool UW_AeyerjiMissionHUD::IsDefenseObjectiveWarningMessage(const FName MessageK
 
 float UW_AeyerjiMissionHUD::EaseOutCubic(const float Alpha)
 {
-	const float ClampedAlpha = FMath::Clamp(Alpha, 0.f, 1.f);
+	const float ClampedAlpha = SafeHudUnitValue(Alpha);
 	const float InverseAlpha = 1.f - ClampedAlpha;
 	return 1.f - (InverseAlpha * InverseAlpha * InverseAlpha);
 }
@@ -572,11 +594,19 @@ void UW_AeyerjiMissionHUD::ShowDefenseObjectiveRepairMenu(
 	const float CurrentHealth,
 	const float MaxHealth)
 {
+	if (ObjectiveActor && (!IsValid(ObjectiveActor) || ObjectiveActor->GetWorld() != GetWorld()))
+	{
+		ObjectiveActor = nullptr;
+	}
 	BP_ShowDefenseObjectiveRepairMenu(ObjectiveActor, RepairOptions, CurrentGold, CurrentHealth, MaxHealth);
 }
 
 void UW_AeyerjiMissionHUD::RequestDefenseObjectiveRepair(AActor* ObjectiveActor, const FName OptionId)
 {
+	if (!IsValid(ObjectiveActor) || ObjectiveActor->GetWorld() != GetWorld() || OptionId.IsNone())
+	{
+		return;
+	}
 	if (AAeyerjiPlayerController* AeyerjiPC = GetOwningPlayer<AAeyerjiPlayerController>())
 	{
 		AeyerjiPC->Server_RequestDefenseObjectiveRepair(ObjectiveActor, OptionId);
@@ -623,7 +653,10 @@ void UW_AeyerjiMissionHUD::ShowMissionMessageKey(const FName MessageKey, const f
 	}
 
 	const FText MessageText = AeyerjiStringLibrary::GetGlobalStringTableText(MessageKey);
-	BP_HandleRoundMessage(MessageKey, MessageText.IsEmpty() ? FText::FromString(MessageKey.ToString()) : MessageText, FMath::Max(0.f, DisplaySeconds));
+	BP_HandleRoundMessage(
+		MessageKey,
+		MessageText.IsEmpty() ? FText::FromString(MessageKey.ToString()) : MessageText,
+		FMath::Clamp(SafeHudValue(DisplaySeconds), 0.f, 300.f));
 }
 
 void UW_AeyerjiMissionHUD::UpdateRoundHeader(const FAeyerjiSurvivalRoundState& SurvivalState)
@@ -747,7 +780,7 @@ void UW_AeyerjiMissionHUD::UpdateDefenseObjectiveStatus(const FAeyerjiSurvivalRo
 	const bool bShowDefenseObjectiveHUD = SurvivalState.bDefenseObjectiveActive;
 	const bool bObjectiveDestroyed = SurvivalState.bDefenseObjectiveDestroyed;
 	const float Progress01 = bShowDefenseObjectiveHUD && !bObjectiveDestroyed
-		? FMath::Clamp(SurvivalState.DefenseObjectiveProgress01, 0.f, 1.f)
+		? SafeHudUnitValue(SurvivalState.DefenseObjectiveProgress01)
 		: 0.f;
 
 	FText HealthText = FText::GetEmpty();
@@ -759,8 +792,8 @@ void UW_AeyerjiMissionHUD::UpdateDefenseObjectiveStatus(const FAeyerjiSurvivalRo
 		}
 		else
 		{
-			const int32 CurrentHealth = FMath::Max(0, FMath::CeilToInt(SurvivalState.DefenseObjectiveHealth));
-			const int32 MaxHealth = FMath::Max(0, FMath::CeilToInt(SurvivalState.DefenseObjectiveHealthMax));
+			const int32 CurrentHealth = SafeHudCeilInteger(SurvivalState.DefenseObjectiveHealth);
+			const int32 MaxHealth = SafeHudCeilInteger(SurvivalState.DefenseObjectiveHealthMax);
 			HealthText = FText::Format(
 				AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("DefenseObjectiveHealthFormat")),
 				FText::AsNumber(CurrentHealth),

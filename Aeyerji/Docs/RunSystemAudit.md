@@ -61,6 +61,63 @@ Important server calls:
 
 Run result snapshots use `FAeyerjiRunResults` and include run time, shards, kills, target, difficulty, zone id, resolution, speed bonus, and best time for difficulty.
 
+## Player Death, Respawn, And Camera Handoff
+
+`UGA_Death` performs the authoritative respawn through the game mode. The
+replacement pawn is replicated to the owning client after the server has
+possessed it; the camera itself is local presentation state and is not a
+server-replicated gameplay decision.
+
+`AAeyerjiPlayerController` deliberately disables Unreal's automatic active
+camera-target management, so it restores the local view target to a newly
+possessed `APlayerParentNative` from `OnPossess`, `OnRep_Pawn`, and the pawn's
+`PawnClientRestart` path. The authoritative respawn also sends an explicit
+owning-client view-target handoff after possession. The controller repeats the
+local assertion on the next tick, including when the pawn is already the current
+target, to cover camera-component initialization order. It does not redirect
+temporary spectator or menu pawns, and it has no effect on dedicated servers.
+
+## Player Input And Rotation Recovery
+
+Primary-melee movement and yaw locking requires both a live primary-melee
+ability spec and one of its phase tags. A loose phase tag that remains after an
+interrupted ability is therefore unable to freeze a player's locomotion. The
+temporary face-target mode stores its pre-face locomotion settings only once and
+restores those settings before it broadcasts `OnFacingReady`, so a Blueprint
+listener can safely begin a replacement face request.
+
+If a player dies while stunned, death cleanup releases the paired controller
+move/look-input ignores before the pawn is replaced. Action-bar cooldown input
+is reported as handled to Blueprint callers while still showing cooldown
+feedback; false remains a genuine rejection state, such as an invalid or
+not-ready slot. Discrete action-bar hotkeys should use the Enhanced Input
+`Started` event rather than `Triggered`: `Triggered` repeats every frame while
+the key is held and creates unnecessary activation requests.
+
+## Crowded Enemy Targeting And Held Attack Handoff
+
+The local player controller resolves a direct attack trace through child or
+attached enemy collision to the owning live enemy. It may pass through only
+player-controlled cursor blockers and non-attackable enemy-owned blockers such as a
+corpse; world geometry and unrelated interactables remain blocking. Cursor
+forgiveness and target snap compare against projected component bounds rather
+than only an actor root, so large or overlapping enemy meshes remain selectable
+without globally inflating the snap radius.
+
+An initial empty left-click still begins a ground-move command. Once that held
+left-click has selected a basic-attack target, a transient cursor miss does not
+silently change the command to ground movement. On death or invalidation, the
+controller clears the old chase, keeps the held combat intent, and retries the
+current-cursor living target on following ticks. Each target change invalidates
+the previous client request serial, so a delayed server response cannot block
+the replacement target. Normal primary-melee completion rearms the held command
+for its next controller tick.
+
+This remains client-side intent selection only: every primary attack is still
+validated by `Server_ActivatePrimaryAttackOnActor`. `OnPreClickPawnHit` remains
+an intentional Blueprint escape hatch; ordinary enemy clicks must return false
+from that hook so the native held-attack flow can continue.
+
 ## Objective Flow
 
 `AAeyerjiLevelDirector` controls the level-specific objective model. Supported modes:

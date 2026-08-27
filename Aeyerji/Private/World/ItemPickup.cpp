@@ -7,6 +7,8 @@
 #include "Items/InventoryComponent.h"
 #include "Items/ItemDefinition.h"
 #include "Items/ItemInstance.h"
+#include "Engine/ActorChannel.h"
+#include "GameFramework/Pawn.h"
 #include "Net/UnrealNetwork.h"
 
 AItemPickup::AItemPickup()
@@ -35,17 +37,30 @@ void AItemPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 
 void AItemPickup::SetItem(UAeyerjiItemInstance* InItem)
 {
-	if (HasAuthority())
+	if (HasAuthority() && !bConsumed && IsValid(InItem))
 	{
-		Item = InItem;
+		Item = InItem->GetOuter() == this
+			? InItem
+			: DuplicateObject<UAeyerjiItemInstance>(InItem, this);
+		ForceNetUpdate();
 	}
+}
+
+bool AItemPickup::ReplicateSubobjects(UActorChannel* Channel, FOutBunch* Bunch, FReplicationFlags* RepFlags)
+{
+	bool bWroteSomething = Super::ReplicateSubobjects(Channel, Bunch, RepFlags);
+	if (Channel && Bunch && RepFlags && IsValid(Item) && Item->GetOuter() == this)
+	{
+		bWroteSomething |= Channel->ReplicateSubobject(Item, *Bunch, *RepFlags);
+	}
+	return bWroteSomething;
 }
 
 void AItemPickup::HandleSphereOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
                                       UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep,
                                       const FHitResult& SweepResult)
 {
-	if (!HasAuthority() || !Item || !OtherActor)
+	if (!HasAuthority() || bConsumed || !IsValid(Item) || !IsValid(OtherActor))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] Legacy ItemPickup overlap ignored Authority=%d Item=%s Other=%s"),
 			HasAuthority() ? 1 : 0,
@@ -54,7 +69,13 @@ void AItemPickup::HandleSphereOverlap(UPrimitiveComponent* OverlappedComponent, 
 		return;
 	}
 
-	if (UAeyerjiInventoryComponent* Inventory = OtherActor->FindComponentByClass<UAeyerjiInventoryComponent>())
+	APawn* OverlappingPawn = Cast<APawn>(OtherActor);
+	if (!IsValid(OverlappingPawn) || !OverlappingPawn->IsPlayerControlled())
+	{
+		return;
+	}
+
+	if (UAeyerjiInventoryComponent* Inventory = OverlappingPawn->FindComponentByClass<UAeyerjiInventoryComponent>())
 	{
 		UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] Legacy ItemPickup attempting grant Pickup=%s Other=%s Inventory=%s Item=%s Def=%s UniqueId=%s"),
 			*GetNameSafe(this),
@@ -64,6 +85,7 @@ void AItemPickup::HandleSphereOverlap(UPrimitiveComponent* OverlappedComponent, 
 			*GetNameSafe(Item->Definition.Get()),
 			Item->UniqueId.IsValid() ? *Item->UniqueId.ToString() : TEXT("Invalid"));
 
+		bConsumed = true;
 		if (Inventory->AddItemInstance(Item))
 		{
 			UE_LOG(LogTemp, Display, TEXT("[InventoryPickup] Legacy ItemPickup grant succeeded Pickup=%s Item=%s"),
@@ -73,6 +95,7 @@ void AItemPickup::HandleSphereOverlap(UPrimitiveComponent* OverlappedComponent, 
 		}
 		else
 		{
+			bConsumed = false;
 			UE_LOG(LogTemp, Warning, TEXT("[InventoryPickup] Legacy ItemPickup grant rejected; pickup kept alive Pickup=%s Item=%s Inventory=%s"),
 				*GetNameSafe(this),
 				*GetNameSafe(Item),

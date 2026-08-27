@@ -4,25 +4,46 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/PrimitiveComponent.h"
 
+namespace
+{
+	constexpr float MaxKnockbackForce = 1000000.f;
+
+	float FiniteClamped(const float Value, const float DefaultValue, const float MinValue, const float MaxValue)
+	{
+		return FMath::Clamp(FMath::IsFinite(Value) ? Value : DefaultValue, MinValue, MaxValue);
+	}
+
+	bool IsFiniteVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
+	FVector SafeKnockbackDirection(const FVector& Direction, const bool bFlattenToGround)
+	{
+		FVector Result = IsFiniteVector(Direction) ? Direction : FVector::ForwardVector;
+		if (bFlattenToGround)
+		{
+			Result.Z = 0.f;
+		}
+
+		return Result.GetSafeNormal(SMALL_NUMBER, FVector::ForwardVector);
+	}
+}
+
 static FVector ProjectAndNormalizeIfNeeded(const FVector& V, bool bFlattenToGround)
 {
-	FVector Out = V;
-	if (bFlattenToGround)
-	{
-		Out = FVector::VectorPlaneProject(Out, FVector::UpVector);
-	}
-	return Out.GetSafeNormal();
+	return SafeKnockbackDirection(V, bFlattenToGround);
 }
 
 FVector UKnockbackLibrary::RandomizedKnockbackDirection(const FVector& Forward, float YawJitterDeg, float PitchJitterDeg, bool bFlattenToGround)
 {
-	const FVector Dir = Forward.GetSafeNormal();
+	const FVector Dir = SafeKnockbackDirection(Forward, bFlattenToGround);
 
 	// Use FMath::VRandCone with separate horizontal/vertical half angles (in radians).
-	// Horizontal ≈ yaw jitter, Vertical ≈ pitch jitter (relative to Dir).
-	const float HorzRad  = FMath::DegreesToRadians(FMath::Max(0.f, YawJitterDeg));
-	const float VertRad  = FMath::DegreesToRadians(FMath::Max(0.f, PitchJitterDeg));
-	const FVector Jittered = FMath::VRandCone(Dir, VertRad, HorzRad);
+	// Horizontal approximates yaw jitter; vertical approximates pitch jitter relative to Dir.
+	const float HorzRad = FMath::DegreesToRadians(FiniteClamped(YawJitterDeg, 0.f, 0.f, 180.f));
+	const float VertRad = FMath::DegreesToRadians(FiniteClamped(PitchJitterDeg, 0.f, 0.f, 180.f));
+	const FVector Jittered = FMath::VRandCone(Dir, HorzRad, VertRad);
 
 	return ProjectAndNormalizeIfNeeded(Jittered, bFlattenToGround);
 }
@@ -38,11 +59,16 @@ void UKnockbackLibrary::ApplyKnockback(UObject* WorldContextObject,
 	float UpBoost,
 	bool bUseLaunchCharacter)
 {
-	if (!Source || !Target) return;
+	UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr;
+	if (!World || !IsValid(Source) || !IsValid(Target)
+		|| Source == Target || Source->GetWorld() != World || Target->GetWorld() != World)
+	{
+		return;
+	}
 
 	// Authority check: perform knockback on the server so clients replicate correctly.
 	// If you must trigger from clients, route the call to the server RPC first.
-	if (AActor* AuthActor = Source; AuthActor && !AuthActor->HasAuthority())
+	if (!Source->HasAuthority() || !Target->HasAuthority())
 	{
 		// Early out on non-authority to avoid double forces in network play.
 		return;
@@ -51,9 +77,17 @@ void UKnockbackLibrary::ApplyKnockback(UObject* WorldContextObject,
 	const FVector BaseForward = Source->GetActorForwardVector();
 	const FVector Dir = RandomizedKnockbackDirection(BaseForward, YawJitterDeg, PitchJitterDeg, bFlattenToGround);
 
-	const float Force = FMath::FRandRange(MinForce, MaxForce);
+	const float SafeMinForce = FiniteClamped(MinForce, 0.f, 0.f, MaxKnockbackForce);
+	const float SafeMaxForce = FiniteClamped(MaxForce, SafeMinForce, 0.f, MaxKnockbackForce);
+	const float Force = FMath::FRandRange(
+		FMath::Min(SafeMinForce, SafeMaxForce),
+		FMath::Max(SafeMinForce, SafeMaxForce));
 	FVector Velocity = Dir * Force;
-	Velocity.Z += UpBoost;
+	Velocity.Z += FiniteClamped(UpBoost, 0.f, -MaxKnockbackForce, MaxKnockbackForce);
+	if (!IsFiniteVector(Velocity))
+	{
+		return;
+	}
 
 	if (bUseLaunchCharacter)
 	{

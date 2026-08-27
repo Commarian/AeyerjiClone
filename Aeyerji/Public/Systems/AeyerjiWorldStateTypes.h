@@ -135,27 +135,35 @@ struct AEYERJI_API FAeyerjiWorldStateValue
 {
 	GENERATED_BODY()
 
+	/** Selects which payload field below is active and meaningful. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	EAeyerjiWorldStateValueType Type = EAeyerjiWorldStateValueType::None;
 
+	/** Boolean payload used when Type is Bool. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	bool BoolValue = false;
 
+	/** Integer payload used when Type is Int. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	int32 IntValue = 0;
 
+	/** Finite numeric payload used when Type is Float. Invalid values normalize to zero. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	float FloatValue = 0.f;
 
+	/** Name payload used when Type is Name. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FName NameValue = NAME_None;
 
+	/** Text payload used when Type is String; runtime storage applies a bounded length. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FString StringValue;
 
+	/** Gameplay-tag payload used when Type is GameplayTag. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FGameplayTag TagValue;
 
+	/** Asset path used for SoftObjectPath values and persistent copies of Object values. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FSoftObjectPath SoftObjectPathValue;
 
@@ -208,24 +216,31 @@ struct AEYERJI_API FAeyerjiWorldStateEntry
 {
 	GENERATED_BODY()
 
+	/** Stable address for the fact, including its optional instance and character owner. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FAeyerjiWorldStateKey Key;
 
+	/** Typed fact payload; only the field selected by Value.Type is stored canonically. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FAeyerjiWorldStateValue Value;
 
+	/** Controls whether a global fact is eligible for the shared world-state save. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	EAeyerjiWorldStatePersistence Persistence = EAeyerjiWorldStatePersistence::RuntimeOnly;
 
+	/** Controls whether the server mirrors the fact into the public client snapshot. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	EAeyerjiWorldStateReplication Replication = EAeyerjiWorldStateReplication::ServerOnly;
 
+	/** Selects the fact's global, run, character, or process-session lifetime lane. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	EAeyerjiWorldStateScope Scope = EAeyerjiWorldStateScope::Global;
 
+	/** Monotonic mutation version used for replication and change ordering. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	int32 Version = 0;
 
+	/** UTC timestamp assigned by the authority when this canonical entry changes. */
 	UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite, Category="Aeyerji|World State")
 	FDateTime LastUpdatedUtc = FDateTime::MinValue();
 

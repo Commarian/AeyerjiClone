@@ -29,6 +29,17 @@ namespace AeyerjiFrontendRules
 		int32 MaximumBytes,
 		int32 MaximumChunkSize);
 
+	/**
+	 * Validates profile ownership before accepting a client transport.
+	 * Authenticated identities require the server-derived owner, while an unauthenticated
+	 * NULL/LAN identity may bind one bounded owner that cannot change afterward.
+	 */
+	AEYERJI_API bool IsProfileOwnerKeyAccepted(
+		const FString& SubmittedOwner,
+		const FString& ExpectedOwner,
+		const FString& BoundOwner,
+		bool bAllowFirstUnauthenticatedBinding);
+
 	AEYERJI_API EAeyerjiFrontendFailure ValidateLaunch(
 		const FAeyerjiLobbySnapshot& Snapshot,
 		int32 RequesterPlayerId,

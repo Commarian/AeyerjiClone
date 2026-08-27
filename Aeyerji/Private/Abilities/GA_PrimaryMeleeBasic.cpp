@@ -63,25 +63,47 @@ namespace
 #endif
 	}
 
-	AActor* ResolveExplicitEventTarget(const FGameplayAbilityActorInfo* ActorInfo, const FGameplayEventData* TriggerEventData)
+	AActor* ResolveExplicitEventTarget(
+		const FGameplayAbilityActorInfo* ActorInfo,
+		const FGameplayEventData* TriggerEventData,
+		const bool bAllowFriendlyDamage)
 	{
-		const AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
-		if (!TriggerEventData)
+		AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
+		if (!IsValid(AvatarActor) || !TriggerEventData)
 		{
 			return nullptr;
 		}
 
+		auto IsValidEventTarget = [AvatarActor, bAllowFriendlyDamage](AActor* Candidate)
+		{
+			if (!IsValid(Candidate)
+				|| Candidate == AvatarActor
+				|| Candidate->GetWorld() != AvatarActor->GetWorld()
+				|| (!bAllowFriendlyDamage && AbilityTeamUtils::AreOnSameTeam(AvatarActor, Candidate)))
+			{
+				return false;
+			}
+			if (const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Candidate, true))
+			{
+				if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+				{
+					return false;
+				}
+			}
+			return !Candidate->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName());
+		};
+
 		if (AActor* DirectTarget = const_cast<AActor*>(TriggerEventData->Target.Get()))
 		{
-			if (!AbilityTeamUtils::AreOnSameTeam(AvatarActor, DirectTarget))
+			if (IsValidEventTarget(DirectTarget))
 			{
-				UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MouseAttack] ResolveExplicitEventTarget direct target accepted. Avatar=%s Target=%s EventTag=%s"),
+				UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MouseAttack] ResolveExplicitEventTarget direct target accepted. Avatar=%s Target=%s EventTag=%s"),
 					*GetNameSafe(AvatarActor),
 					*GetNameSafe(DirectTarget),
 					*TriggerEventData->EventTag.ToString());
 				return DirectTarget;
 			}
-			UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MouseAttack] ResolveExplicitEventTarget direct target rejected as friendly. Avatar=%s Target=%s EventTag=%s"),
+			UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MouseAttack] ResolveExplicitEventTarget direct target rejected. Avatar=%s Target=%s EventTag=%s"),
 				*GetNameSafe(AvatarActor),
 				*GetNameSafe(DirectTarget),
 				*TriggerEventData->EventTag.ToString());
@@ -99,9 +121,9 @@ namespace
 			{
 				if (AActor* HitActor = HitResult->GetActor())
 				{
-					if (!AbilityTeamUtils::AreOnSameTeam(AvatarActor, HitActor))
+					if (IsValidEventTarget(HitActor))
 					{
-						UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MouseAttack] ResolveExplicitEventTarget target-data hit accepted. Avatar=%s Target=%s EventTag=%s"),
+						UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MouseAttack] ResolveExplicitEventTarget target-data hit accepted. Avatar=%s Target=%s EventTag=%s"),
 							*GetNameSafe(AvatarActor),
 							*GetNameSafe(HitActor),
 							*TriggerEventData->EventTag.ToString());
@@ -113,9 +135,9 @@ namespace
 			const TArray<TWeakObjectPtr<AActor>> Actors = Data->GetActors();
 			for (const TWeakObjectPtr<AActor>& WeakActor : Actors)
 			{
-				if (WeakActor.IsValid() && !AbilityTeamUtils::AreOnSameTeam(AvatarActor, WeakActor.Get()))
+				if (WeakActor.IsValid() && IsValidEventTarget(WeakActor.Get()))
 				{
-					UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MouseAttack] ResolveExplicitEventTarget target-data actor accepted. Avatar=%s Target=%s EventTag=%s"),
+					UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MouseAttack] ResolveExplicitEventTarget target-data actor accepted. Avatar=%s Target=%s EventTag=%s"),
 						*GetNameSafe(AvatarActor),
 						*GetNameSafe(WeakActor.Get()),
 						*TriggerEventData->EventTag.ToString());
@@ -124,7 +146,7 @@ namespace
 			}
 		}
 
-		UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MouseAttack] ResolveExplicitEventTarget found no valid hostile target. Avatar=%s EventTag=%s TargetDataNum=%d"),
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MouseAttack] ResolveExplicitEventTarget found no valid hostile target. Avatar=%s EventTag=%s TargetDataNum=%d"),
 			*GetNameSafe(AvatarActor),
 			*TriggerEventData->EventTag.ToString(),
 			TriggerEventData->TargetData.Num());
@@ -147,7 +169,6 @@ UGA_PrimaryMeleeBasic::UGA_PrimaryMeleeBasic()
 	DefaultDamageRules.bCanLifeSteal = true;
 	DefaultDamageRules.bCanTriggerOnHit = true;
 	DefaultDamageRules.bCanStagger = true;
-	MinCooldownDuration              = 0.05f;
 	bSendCompletionGameplayEvent     = true;
 	bCompletionBroadcasted           = false;
 	bCachedHitShapeValid             = false;
@@ -162,6 +183,7 @@ UGA_PrimaryMeleeBasic::UGA_PrimaryMeleeBasic()
 	NextComboIndex                   = 0;
 	ComboStagesExecuted              = 0;
 	bComboInputBuffered              = false;
+	bExternalRetargetBlocksCombo     = false;
 	ComboResetTimerHandle.Invalidate();
 	DeterministicStrikeTimerHandle.Invalidate();
 	DeterministicStrikeSequence      = 0;
@@ -207,11 +229,54 @@ UGA_PrimaryMeleeBasic::UGA_PrimaryMeleeBasic()
 		AilmentDurationSetByCallerTag = FGameplayTag::RequestGameplayTag(AilmentDurationTagName, /*ErrorIfNotFound=*/false);
 	}
 
-	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("Constructed %s (BaselineAttackSpeed=%.2f DamageScalar=%.2f MinCooldown=%.3f)"),
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("Constructed %s (BaselineAttackSpeed=%.2f DamageScalar=%.2f)"),
 		*GetNameSafe(this),
 		BaselineAttackSpeed,
-		DamageScalar,
-		MinCooldownDuration);
+		DamageScalar);
+}
+
+bool UGA_PrimaryMeleeBasic::ShouldAbilityRespondToEvent(
+	const FGameplayAbilityActorInfo* ActorInfo,
+	const FGameplayEventData* Payload) const
+{
+	if (!Super::ShouldAbilityRespondToEvent(ActorInfo, Payload))
+	{
+		return false;
+	}
+
+	AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
+	AActor* ExplicitTarget = ResolveExplicitEventTarget(ActorInfo, Payload, bAllowFriendlyDamage);
+	if (!AvatarActor || !ExplicitTarget)
+	{
+		// Non-targeted activation paths still perform their normal cone attack.
+		return true;
+	}
+
+	float AttackRange = ConeTraceRangeFallback;
+	if (const UAbilitySystemComponent* ASC = ActorInfo->AbilitySystemComponent.Get())
+	{
+		const FGameplayAttribute RangeAttribute = UAeyerjiAttributeSet::GetAttackRangeAttribute();
+		const float AttributeRange = RangeAttribute.IsValid()
+			? ASC->GetNumericAttribute(RangeAttribute)
+			: 0.f;
+		if (FMath::IsFinite(AttributeRange) && AttributeRange > KINDA_SMALL_NUMBER)
+		{
+			AttackRange = AttributeRange;
+		}
+	}
+	AttackRange = FMath::IsFinite(AttackRange) ? FMath::Max(0.f, AttackRange) : 0.f;
+
+	FHitResult TargetHit;
+	const bool bTargetInRange = TryBuildHitFromActor(AvatarActor, ExplicitTarget, AttackRange, TargetHit);
+	if (!bTargetInRange)
+	{
+		UE_LOG(LogPrimaryMeleeGA, Log,
+			TEXT("[MouseAttack] Primary melee event deferred: explicit target moved outside strike range. Avatar=%s Target=%s Range=%.1f."),
+			*GetNameSafe(AvatarActor),
+			*GetNameSafe(ExplicitTarget),
+			AttackRange);
+	}
+	return bTargetInRange;
 }
 
 void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
@@ -222,6 +287,12 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 	Super::ActivateAbility(Handle, ActorInfo, ActivationInfo, TriggerEventData);
 
 	AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
+	if (!ActorInfo || !IsValid(AvatarActor) || IsOwnerDead(ActorInfo))
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, /*bReplicateEndAbility=*/true, /*bWasCancelled=*/true);
+		return;
+	}
+
 	const UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
 	if (ASC && ASC->HasMatchingGameplayTag(AeyerjiTags::State_Ability_Casting))
 	{
@@ -232,8 +303,8 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 
 	AEnemyAIController* EnemyAI = ResolveEnemyAIController(ActorInfo);
 	AActor* RawTargetActor = EnemyAI ? EnemyAI->GetTargetActor() : nullptr;
-	const bool bFriendlyTargetBlocked = RawTargetActor && AvatarActor && !bAllowFriendlyDamage && AbilityTeamUtils::AreOnSameTeam(AvatarActor, RawTargetActor);
-	AActor* FilteredTargetActor = bFriendlyTargetBlocked ? nullptr : RawTargetActor;
+	const bool bFriendlyTargetBlocked = RawTargetActor && !bAllowFriendlyDamage && AbilityTeamUtils::AreOnSameTeam(AvatarActor, RawTargetActor);
+	AActor* FilteredTargetActor = IsValidDeterministicTarget(AvatarActor, RawTargetActor) ? RawTargetActor : nullptr;
 	const float InitialAttackRange = ResolveAttackRange();
 	const float InitialTargetDistance = (AvatarActor && RawTargetActor) ? FVector::Dist(AvatarActor->GetActorLocation(), RawTargetActor->GetActorLocation()) : -1.f;
 	const FString HandleStr      = Handle.ToString();
@@ -287,19 +358,19 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 		AttackSpeed,
 		BaselineAttackSpeed);
 
-	StartupClickedTarget = ResolveExplicitEventTarget(ActorInfo, TriggerEventData);
-	UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MouseAttack] Melee activation explicit target. Avatar=%s StartupClickedTarget=%s TriggerTag=%s"),
+	StartupClickedTarget = ResolveExplicitEventTarget(ActorInfo, TriggerEventData, bAllowFriendlyDamage);
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MouseAttack] Melee activation explicit target. Avatar=%s StartupClickedTarget=%s TriggerTag=%s"),
 		*GetNameSafe(AvatarActor),
 		*GetNameSafe(StartupClickedTarget.Get()),
 		TriggerEventData ? *TriggerEventData->EventTag.ToString() : TEXT("None"));
-	if (AvatarActor)
+	if (ShouldProcessServerLogic() || IsLocallyPredicting())
 	{
 		AActor* FacingTarget = FilteredTargetActor ? FilteredTargetActor : StartupClickedTarget.Get();
 		if (FacingTarget && FacingTarget != AvatarActor)
 		{
 			FVector ToTarget = FacingTarget->GetActorLocation() - AvatarActor->GetActorLocation();
 			ToTarget.Z = 0.f;
-			if (!ToTarget.IsNearlyZero())
+			if (!ToTarget.ContainsNaN() && !ToTarget.IsNearlyZero())
 			{
 				const FRotator DesiredYaw(0.f, ToTarget.Rotation().Yaw, 0.f);
 				AvatarActor->SetActorRotation(DesiredYaw);
@@ -350,6 +421,37 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA ActivateAbility: StartComboStage succeeded for stage %d."), StageIndexToPlay);
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("ActivateAbility: Montage started successfully."));
 	}
+}
+
+void UGA_PrimaryMeleeBasic::NotifyExternalRetarget(AActor* NewTarget)
+{
+	if (!IsActive() || !IsValid(NewTarget))
+	{
+		return;
+	}
+
+	AActor* CapturedTarget = DeterministicStrikeTarget.Get();
+	if (!CapturedTarget)
+	{
+		CapturedTarget = StartupClickedTarget.Get();
+	}
+
+	if (CapturedTarget == NewTarget)
+	{
+		return;
+	}
+
+	const bool bHadBufferedCombo = bComboInputBuffered;
+	bComboInputBuffered = false;
+	bExternalRetargetBlocksCombo = true;
+
+	UE_LOG(LogPrimaryMeleeGA, Log,
+		TEXT("[MouseAttack] External retarget suppresses stale combo follow-up. CapturedTarget=%s NewTarget=%s HadBufferedCombo=%s Stage=%d Phase=%d."),
+		*GetNameSafe(CapturedTarget),
+		*GetNameSafe(NewTarget),
+		bHadBufferedCombo ? TEXT("true") : TEXT("false"),
+		CurrentComboIndex,
+		static_cast<int32>(CurrentPhase));
 }
 
 void UGA_PrimaryMeleeBasic::InputPressed(const FGameplayAbilitySpecHandle Handle,
@@ -414,7 +516,7 @@ void UGA_PrimaryMeleeBasic::EndAbility(const FGameplayAbilitySpecHandle Handle,
 
 	if (!bWasCancelled && FAeyerjiMeleeDeterministicStrikePolicy::ShouldResolveOnMontageFinish(false, bDeterministicStrikePending, bDeterministicStrikeResolved))
 	{
-		UE_LOG(LogPrimaryMeleeGA, Display, TEXT("[MeleeDeterministic] Normal EndAbility is flushing pending strike Id=%d before cleanup."),
+		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[MeleeDeterministic] Normal EndAbility is flushing pending strike Id=%d before cleanup."),
 			ActiveDeterministicStrikeId);
 		ResolveDeterministicStrike();
 	}
@@ -616,7 +718,7 @@ void UGA_PrimaryMeleeBasic::ArmMontageFailsafe(UAnimMontage* Montage, float Play
 
 	if (UWorld* World = GetWorld())
 	{
-		const float SafePlayRate = FMath::Max(PlayRate, KINDA_SMALL_NUMBER);
+		const float SafePlayRate = FMath::IsFinite(PlayRate) ? FMath::Max(PlayRate, KINDA_SMALL_NUMBER) : 1.f;
 		const float FailsafeDelay = FMath::Max(0.25f, (Montage->GetPlayLength() / SafePlayRate) + 0.25f);
 		World->GetTimerManager().SetTimer(MontageFailsafeTimerHandle, this, &UGA_PrimaryMeleeBasic::OnMontageFailsafeExpired, FailsafeDelay, false);
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartMontage: armed montage failsafe for %.3fs (montage=%s rate=%.3f)."),
@@ -830,6 +932,10 @@ void UGA_PrimaryMeleeBasic::CaptureDeterministicStrikeShape(AActor* InstigatorAc
 
 	CachedHitOrigin = InstigatorActor->GetActorLocation();
 	CachedHitForward = InstigatorActor->GetActorForwardVector();
+	if (CachedHitOrigin.ContainsNaN() || CachedHitForward.ContainsNaN())
+	{
+		return;
+	}
 
 	if (const ACharacter* Character = Cast<ACharacter>(InstigatorActor))
 	{
@@ -857,13 +963,20 @@ void UGA_PrimaryMeleeBasic::CaptureDeterministicStrikeShape(AActor* InstigatorAc
 		CachedHitForward = InstigatorActor->GetActorForwardVector().GetSafeNormal();
 	}
 
-	bCachedHitShapeValid = !CachedHitForward.IsNearlyZero();
+	bCachedHitShapeValid = !CachedHitOrigin.ContainsNaN()
+		&& !CachedHitForward.ContainsNaN()
+		&& !CachedHitForward.IsNearlyZero();
 }
 
 bool UGA_PrimaryMeleeBasic::IsDeadForDeterministicStrike(AActor* TargetActor) const
 {
-	const UAbilitySystemComponent* TargetASC = TargetActor ? UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(TargetActor) : nullptr;
-	return TargetASC && TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead);
+	if (!IsValid(TargetActor))
+	{
+		return true;
+	}
+	const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(TargetActor, true);
+	return (TargetASC && TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+		|| TargetActor->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName());
 }
 
 void UGA_PrimaryMeleeBasic::ResolveDeterministicStrike()
@@ -1202,23 +1315,13 @@ AActor* UGA_PrimaryMeleeBasic::ResolveEnemyTargetActor(const FGameplayAbilityAct
 	}
 
 	AActor* Target = EnemyAI->GetTargetActor();
-	if (!Target)
-	{
-		return nullptr;
-	}
-
 	AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
-	if (!bAllowFriendlyDamage && AbilityTeamUtils::AreOnSameTeam(AvatarActor, Target))
-	{
-		return nullptr;
-	}
-
-	return Target;
+	return IsValidDeterministicTarget(AvatarActor, Target) ? Target : nullptr;
 }
 
 void UGA_PrimaryMeleeBasic::HandleServerDamage(const FGameplayAbilityTargetDataHandle& TargetData)
 {
-	if (TargetData.Num() == 0)
+	if (!ShouldProcessServerLogic() || TargetData.Num() == 0)
 	{
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("HandleServerDamage: Empty target data."));
 		return;
@@ -1277,17 +1380,19 @@ void UGA_PrimaryMeleeBasic::HandleServerDamage(const FGameplayAbilityTargetDataH
 						AttackDamageValue = Attr->GetAttackDamage();
 					}
 				}
-				UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("HandleServerDamage: AttackDamage attribute %.2f scalar %.2f final raw %.2f."),
+				const float RawFinalDamage = FMath::IsFinite(AttackDamageValue) && FMath::IsFinite(DamageScalar)
+					? AttackDamageValue * DamageScalar
+					: 0.f;
+				const float FinalDamage = FMath::IsFinite(RawFinalDamage) ? FMath::Max(0.f, RawFinalDamage) : 0.f;
+				UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("HandleServerDamage: AttackDamage attribute %.2f scalar %.2f final %.2f."),
 					AttackDamageValue,
 					DamageScalar,
-					AttackDamageValue * DamageScalar);
+					FinalDamage);
 
 				if (AttackDamageValue <= 0.f)
 				{
 					UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("HandleServerDamage: AttackDamage is %.2f; outgoing damage will be zero."), AttackDamageValue);
 				}
-
-				const float FinalDamage = AttackDamageValue * DamageScalar;
 
 				DamageSpec.Data->SetSetByCallerMagnitude(DamageSetByCallerTag, FinalDamage);
 				UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("HandleServerDamage: SetByCaller %s = %.2f."),
@@ -1410,7 +1515,11 @@ void UGA_PrimaryMeleeBasic::ApplyAilmentsToTargetData(const FGameplayAbilityTarg
 
 		float AilmentAmount = 0.f;
 		float AilmentDuration = 0.f;
-		if (!ResolveAilmentMagnitudes(AilmentTag, AilmentAmount, AilmentDuration))
+		if (!ResolveAilmentMagnitudes(AilmentTag, AilmentAmount, AilmentDuration)
+			|| !FMath::IsFinite(AilmentAmount)
+			|| !FMath::IsFinite(AilmentDuration)
+			|| AilmentAmount <= KINDA_SMALL_NUMBER
+			|| AilmentDuration <= KINDA_SMALL_NUMBER)
 		{
 			continue;
 		}
@@ -1667,7 +1776,7 @@ float UGA_PrimaryMeleeBasic::GetNumericAttributeOrDefault(const FGameplayAttribu
 	}
 
 	const float Value = ASC->GetNumericAttribute(Attribute);
-	return (Value > KINDA_SMALL_NUMBER) ? Value : DefaultValue;
+	return (FMath::IsFinite(Value) && Value > KINDA_SMALL_NUMBER) ? Value : DefaultValue;
 }
 
 float UGA_PrimaryMeleeBasic::ResolveAttackAngleDegrees() const
@@ -1693,14 +1802,17 @@ float UGA_PrimaryMeleeBasic::ResolveAttackAngleDegrees() const
 float UGA_PrimaryMeleeBasic::ResolveAttackRange() const
 {
 	const float Range = GetNumericAttributeOrDefault(UAeyerjiAttributeSet::GetAttackRangeAttribute(), ConeTraceRangeFallback);
-	return FMath::Max(Range, 0.f);
+	return FMath::IsFinite(Range) ? FMath::Max(Range, 0.f) : 0.f;
 }
 
 void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, float Range, float AngleDegrees, TArray<FHitResult>& OutHits, const FVector* OverrideOrigin, const FVector* OverrideForward) const
 {
 	OutHits.Reset();
 
-	if (!InstigatorActor || Range <= KINDA_SMALL_NUMBER)
+	if (!IsValid(InstigatorActor)
+		|| !FMath::IsFinite(Range)
+		|| Range <= KINDA_SMALL_NUMBER
+		|| !FMath::IsFinite(AngleDegrees))
 	{
 		return;
 	}
@@ -1712,6 +1824,10 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 	}
 
 	FVector Forward = OverrideForward ? *OverrideForward : InstigatorActor->GetActorForwardVector();
+	if (Forward.ContainsNaN())
+	{
+		return;
+	}
 	Forward.Z = 0.f;
 	Forward = Forward.GetSafeNormal();
 	if (Forward.IsNearlyZero())
@@ -1720,6 +1836,10 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 	}
 
 	const FVector Origin = OverrideOrigin ? *OverrideOrigin : InstigatorActor->GetActorLocation();
+	if (Origin.ContainsNaN())
+	{
+		return;
+	}
 	const float HalfAngleDegrees = FMath::Clamp(AngleDegrees * 0.5f, 0.f, 180.f);
 	const float MaxRangeSq = FMath::Square(Range);
 	const float CosThreshold = FMath::Cos(FMath::DegreesToRadians(HalfAngleDegrees));
@@ -1730,7 +1850,10 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 	QueryParams.AddIgnoredActor(InstigatorActor);
 
 	FCollisionObjectQueryParams ObjectParams;
-	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
+	const ECollisionChannel ObjectChannel = ConeTraceChannel.GetValue();
+	ObjectParams.AddObjectTypesToQuery(static_cast<int32>(ObjectChannel) < static_cast<int32>(ECC_MAX)
+		? ObjectChannel
+		: ECC_Pawn);
 
 	TSet<TWeakObjectPtr<AActor>> SeenActors;
 
@@ -1775,7 +1898,10 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 	{
 		AActor* TargetActor = Overlap.GetActor();
 		const TWeakObjectPtr<AActor> WeakTarget(TargetActor);
-		if (!TargetActor || TargetActor == InstigatorActor || SeenActors.Contains(WeakTarget))
+		if (!IsValid(TargetActor)
+			|| TargetActor == InstigatorActor
+			|| TargetActor->GetWorld() != World
+			|| SeenActors.Contains(WeakTarget))
 		{
 			continue;
 		}
@@ -1783,6 +1909,10 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 		FVector TargetPoint = TargetActor->GetActorLocation();
 		UPrimitiveComponent* TargetComponent = Overlap.Component.Get();
 		TryResolveTargetCollisionPoint(TargetActor, Origin, TargetPoint, TargetComponent);
+		if (TargetPoint.ContainsNaN())
+		{
+			continue;
+		}
 
 		FVector ToTarget = TargetPoint - Origin;
 		ToTarget.Z = 0.f;
@@ -1832,13 +1962,19 @@ void UGA_PrimaryMeleeBasic::GatherConeTraceTargets(AActor* InstigatorActor, floa
 
 bool UGA_PrimaryMeleeBasic::TryBuildHitFromActor(AActor* InstigatorActor, AActor* TargetActor, float MaxRange, FHitResult& OutHit) const
 {
-	if (!InstigatorActor || !TargetActor)
+	if (!IsValidDeterministicTarget(InstigatorActor, TargetActor)
+		|| !FMath::IsFinite(MaxRange)
+		|| MaxRange < 0.f)
 	{
 		return false;
 	}
 
 	const FVector Origin = bCachedHitShapeValid ? CachedHitOrigin : InstigatorActor->GetActorLocation();
 	FVector TargetLocation = TargetActor->GetActorLocation();
+	if (Origin.ContainsNaN() || TargetLocation.ContainsNaN())
+	{
+		return false;
+	}
 	UPrimitiveComponent* TargetComponent = nullptr;
 	TryResolveTargetCollisionPoint(TargetActor, Origin, TargetLocation, TargetComponent);
 
@@ -1874,7 +2010,7 @@ bool UGA_PrimaryMeleeBasic::TryResolveTargetCollisionPoint(AActor* TargetActor, 
 	OutTargetPoint = TargetActor ? TargetActor->GetActorLocation() : FVector::ZeroVector;
 	OutTargetComponent = nullptr;
 
-	if (!TargetActor)
+	if (!IsValid(TargetActor) || QueryOrigin.ContainsNaN())
 	{
 		return false;
 	}
@@ -1899,6 +2035,10 @@ bool UGA_PrimaryMeleeBasic::TryResolveTargetCollisionPoint(AActor* TargetActor, 
 		{
 			continue;
 		}
+		if (!FMath::IsFinite(DistanceSq) || ClosestPoint.ContainsNaN())
+		{
+			continue;
+		}
 
 		if (DistanceSq < BestDistanceSq)
 		{
@@ -1918,7 +2058,12 @@ bool UGA_PrimaryMeleeBasic::TryResolveTargetCollisionPoint(AActor* TargetActor, 
 
 bool UGA_PrimaryMeleeBasic::IsValidDeterministicTarget(AActor* InstigatorActor, AActor* TargetActor) const
 {
-	if (!InstigatorActor || !TargetActor || TargetActor == InstigatorActor)
+	if (!IsValid(InstigatorActor)
+		|| !IsValid(TargetActor)
+		|| TargetActor == InstigatorActor
+		|| TargetActor->GetWorld() != InstigatorActor->GetWorld()
+		|| InstigatorActor->GetActorLocation().ContainsNaN()
+		|| TargetActor->GetActorLocation().ContainsNaN())
 	{
 		return false;
 	}
@@ -1940,7 +2085,9 @@ bool UGA_PrimaryMeleeBasic::TryFindNearestForwardTarget(AActor* InstigatorActor,
 {
 	OutHit = FHitResult();
 
-	if (!InstigatorActor || Range <= KINDA_SMALL_NUMBER)
+	if (!IsValid(InstigatorActor)
+		|| !FMath::IsFinite(Range)
+		|| Range <= KINDA_SMALL_NUMBER)
 	{
 		return false;
 	}
@@ -1984,7 +2131,7 @@ bool UGA_PrimaryMeleeBasic::TryFindNearestForwardTarget(AActor* InstigatorActor,
 
 void UGA_PrimaryMeleeBasic::RefaceInstigatorTowardTargetIfNeeded(AActor* InstigatorActor, AActor* TargetActor) const
 {
-	if (!InstigatorActor || !TargetActor)
+	if (!IsValidDeterministicTarget(InstigatorActor, TargetActor))
 	{
 		return;
 	}
@@ -2178,8 +2325,13 @@ void UGA_PrimaryMeleeBasic::BeginCancelWindow()
 		return;
 	}
 
-	const float RateScale = (CurrentMontagePlayRate > KINDA_SMALL_NUMBER) ? (1.f / CurrentMontagePlayRate) : 1.f;
-	const float ScaledCancelWindowDuration = FMath::Max(0.f, CancelWindowDuration * RateScale);
+	const float RateScale = (FMath::IsFinite(CurrentMontagePlayRate) && CurrentMontagePlayRate > KINDA_SMALL_NUMBER)
+		? (1.f / CurrentMontagePlayRate)
+		: 1.f;
+	const float SafeCancelWindowDuration = FMath::IsFinite(CancelWindowDuration)
+		? FMath::Max(0.f, CancelWindowDuration)
+		: 0.f;
+	const float ScaledCancelWindowDuration = SafeCancelWindowDuration * RateScale;
 
 	if (ScaledCancelWindowDuration <= 0.f)
 	{
@@ -2271,6 +2423,7 @@ void UGA_PrimaryMeleeBasic::ResetComboRuntimeState()
 	CurrentComboIndex = INDEX_NONE;
 	ComboStagesExecuted = 0;
 	bComboInputBuffered = false;
+	bExternalRetargetBlocksCombo = false;
 	RuntimeComboMontages.Reset();
 }
 
@@ -2305,7 +2458,8 @@ void UGA_PrimaryMeleeBasic::ScheduleComboReset()
 		return;
 	}
 
-	if (ComboResetDelay <= 0.f)
+	const float SafeResetDelay = FMath::IsFinite(ComboResetDelay) ? FMath::Max(0.f, ComboResetDelay) : 0.f;
+	if (SafeResetDelay <= KINDA_SMALL_NUMBER)
 	{
 		NextComboIndex = 0;
 		UE_LOG(LogPrimaryMeleeGA, VeryVerbose, TEXT("ScheduleComboReset: Immediate reset (delay <= 0)."));
@@ -2314,9 +2468,9 @@ void UGA_PrimaryMeleeBasic::ScheduleComboReset()
 
 	if (UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().SetTimer(ComboResetTimerHandle, this, &UGA_PrimaryMeleeBasic::OnComboResetTimerExpired, ComboResetDelay, false);
+		World->GetTimerManager().SetTimer(ComboResetTimerHandle, this, &UGA_PrimaryMeleeBasic::OnComboResetTimerExpired, SafeResetDelay, false);
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("ScheduleComboReset: Armed combo reset in %.3fs (NextComboIndex=%d)."),
-			ComboResetDelay,
+			SafeResetDelay,
 			NextComboIndex);
 	}
 	else
@@ -2509,8 +2663,13 @@ UAnimMontage* UGA_PrimaryMeleeBasic::ResolveSingleFallbackMontage(const FGamepla
 
 float UGA_PrimaryMeleeBasic::CalculateMontagePlayRate(float AttackSpeed) const
 {
-	const float EffectiveBaseline = FMath::Max(BaselineAttackSpeed, kMinAttackSpeed);
-	return FMath::Max(AttackSpeed / EffectiveBaseline, kMinAttackSpeed);
+	const float EffectiveBaseline = FMath::IsFinite(BaselineAttackSpeed)
+		? FMath::Max(BaselineAttackSpeed, kMinAttackSpeed)
+		: 1.f;
+	const float EffectiveAttackSpeed = FMath::IsFinite(AttackSpeed)
+		? FMath::Max(AttackSpeed, kMinAttackSpeed)
+		: EffectiveBaseline;
+	return FMath::Max(EffectiveAttackSpeed / EffectiveBaseline, kMinAttackSpeed);
 }
 
 float UGA_PrimaryMeleeBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo* ActorInfo) const
@@ -2522,7 +2681,7 @@ float UGA_PrimaryMeleeBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo*
         if (const UAeyerjiAttributeSet* Attr = ActorInfo->AbilitySystemComponent->GetSet<UAeyerjiAttributeSet>())
         {
             const float AttributeAttackSpeed = Attr->GetAttackSpeed();
-            if (AttributeAttackSpeed > KINDA_SMALL_NUMBER)
+            if (FMath::IsFinite(AttributeAttackSpeed) && AttributeAttackSpeed > KINDA_SMALL_NUMBER)
             {
                 // AttackSpeed is stored as a "rating" where 100 == 1 attack/sec. Convert to real APS.
                 AttackRate = AttributeAttackSpeed / 100.f;
@@ -2530,7 +2689,7 @@ float UGA_PrimaryMeleeBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo*
             else
             {
                 const float AttributeCooldownSeconds = Attr->GetAttackCooldown();
-                if (AttributeCooldownSeconds > KINDA_SMALL_NUMBER)
+                if (FMath::IsFinite(AttributeCooldownSeconds) && AttributeCooldownSeconds > KINDA_SMALL_NUMBER)
                 {
                     AttackRate = 1.f / AttributeCooldownSeconds;
                 }
@@ -2538,7 +2697,7 @@ float UGA_PrimaryMeleeBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo*
         }
 	}
 
-	return FMath::Max(AttackRate, kMinAttackSpeed);
+	return FMath::IsFinite(AttackRate) ? FMath::Max(AttackRate, kMinAttackSpeed) : 1.f;
 }
 
 bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbilityActorInfo* ActorInfo, float AttackSpeed)
@@ -2578,8 +2737,8 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 	ClearCancelWindowTimer();
 	ResetDeterministicStrikeState();
 	SetAbilityPhase(EPrimaryMeleePhase::WindUp);
-	SetMovementLock(true);
-	SetCanBeCanceled(false);
+	SetMovementLock(false);
+	SetCanBeCanceled(true);
 
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartComboStage: Stage=%d/%d AttackSpeed=%.3f Montage=%s"),
 		ClampedIndex,
@@ -2608,6 +2767,7 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 		ComboStagesExecuted = PreviousStageCount;
 		return false;
 	}
+	BeginCancelWindow();
 
 	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartComboStage: Success (ComboStagesExecuted=%d NextComboIndex=%d)."),
 		ComboStagesExecuted,
@@ -2623,6 +2783,17 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 
 bool UGA_PrimaryMeleeBasic::TryLaunchBufferedCombo()
 {
+	if (bExternalRetargetBlocksCombo)
+	{
+		if (bComboInputBuffered)
+		{
+			UE_LOG(LogPrimaryMeleeGA, Log,
+				TEXT("[MouseAttack] Ignoring buffered combo because the controller selected a different target."));
+		}
+		bComboInputBuffered = false;
+		return false;
+	}
+
 	if (!bComboInputBuffered)
 	{
 		return false;

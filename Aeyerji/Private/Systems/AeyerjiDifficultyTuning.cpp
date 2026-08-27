@@ -31,7 +31,7 @@ UAeyerjiDifficultyTuning::UAeyerjiDifficultyTuning()
 
 	SeedCurveIfEmpty(StatBudgetMultiplierByWorldTier, {
 		TPair<float, float>(0.f, 0.5f),
-		TPair<float, float>(100.f, 1.f),
+		TPair<float, float>(167.f, 1.f),
 		TPair<float, float>(999.f, 2.f)
 	});
 }
@@ -48,7 +48,10 @@ int32 UAeyerjiDifficultyTuning::EvaluateEnemyLevel(const int32 PlayerLevel) cons
 	const float EvaluatedLevel = Curve && Curve->GetNumKeys() > 0
 		? Curve->Eval(static_cast<float>(ClampedPlayerLevel), static_cast<float>(ClampedPlayerLevel))
 		: static_cast<float>(ClampedPlayerLevel);
-	return ClampGameplayLevel(FMath::RoundToInt(EvaluatedLevel));
+	const float SafeLevel = FMath::IsFinite(EvaluatedLevel)
+		? FMath::Clamp(EvaluatedLevel, 1.f, static_cast<float>(ClampGameplayLevel(MaxGameplayLevel)))
+		: static_cast<float>(ClampedPlayerLevel);
+	return ClampGameplayLevel(FMath::RoundToInt(SafeLevel));
 }
 
 float UAeyerjiDifficultyTuning::EvaluateStatBudget(const int32 WorldTier) const
@@ -58,7 +61,7 @@ float UAeyerjiDifficultyTuning::EvaluateStatBudget(const int32 WorldTier) const
 	const float EvaluatedBudget = Curve && Curve->GetNumKeys() > 0
 		? Curve->Eval(static_cast<float>(ClampedWorldTier), 1.f)
 		: 1.f;
-	return FMath::Max(EvaluatedBudget, 0.f);
+	return FMath::Clamp(FMath::IsFinite(EvaluatedBudget) ? EvaluatedBudget : 1.f, 0.f, 1000000.f);
 }
 
 float UAeyerjiDifficultyTuning::EvaluateDifficultyAlpha(const int32 WorldTier) const
@@ -123,6 +126,15 @@ int32 UAeyerjiDifficultySettings::ClampGameplayLevel(const int32 InLevel)
 	return Get()->ClampGameplayLevel(InLevel);
 }
 
+int32 UAeyerjiDifficultySettings::FloatToGameplayLevel(const float InLevel)
+{
+	const int32 MaxLevel = GetMaxGameplayLevel();
+	const float SafeLevel = FMath::IsFinite(InLevel)
+		? FMath::Clamp(InLevel, 1.f, static_cast<float>(MaxLevel))
+		: 1.f;
+	return FMath::Clamp(FMath::RoundToInt(SafeLevel), 1, MaxLevel);
+}
+
 float UAeyerjiDifficultySettings::WorldTierToDifficultySlider(const int32 WorldTier)
 {
 	const float ClampedTier = FMath::Clamp(static_cast<float>(WorldTier), 0.f, static_cast<float>(WorldTierMax));
@@ -131,6 +143,11 @@ float UAeyerjiDifficultySettings::WorldTierToDifficultySlider(const int32 WorldT
 
 int32 UAeyerjiDifficultySettings::DifficultySliderToWorldTier(const float Slider)
 {
+	if (!FMath::IsFinite(Slider))
+	{
+		return GetNormalWorldTier();
+	}
+
 	const float Normalized = FMath::Clamp(Slider, 0.f, DifficultySliderMax) / DifficultySliderMax;
 	return FMath::Clamp(FMath::RoundToInt(Normalized * static_cast<float>(WorldTierMax)), 0, WorldTierMax);
 }

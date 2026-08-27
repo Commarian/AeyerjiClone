@@ -2,12 +2,11 @@
 
 
 #include "Enemy/Tasks/STT_SetSpeedFromAttributeTask.h"
-#include "Enemy/Tasks/STT_SetSpeedFromAttributeTask.h"
+#include "AbilitySystemGlobals.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "GameFramework/CharacterMovementComponent.h"
-#include "AbilitySystemComponent.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "AIController.h"
@@ -21,7 +20,7 @@ USTT_SetSpeedFromAttributeTask::USTT_SetSpeedFromAttributeTask(const FObjectInit
 	SpeedAttribute = UAeyerjiAttributeSet::GetWalkSpeedAttribute();
 }
 
-EStateTreeRunStatus USTT_SetSpeedFromAttributeTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition)
+EStateTreeRunStatus USTT_SetSpeedFromAttributeTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& /*Transition*/)
 {
 	// Get the controlled character
 	AAIController* AI = Cast<AAIController>(Context.GetOwner());
@@ -32,17 +31,20 @@ EStateTreeRunStatus USTT_SetSpeedFromAttributeTask::EnterState(FStateTreeExecuti
 		return EStateTreeRunStatus::Failed;
 	}
 
-	// Fetch the current value of the specified speed attribute from the character's ASC
-	float NewSpeed = 0.f;
-	if (UAbilitySystemComponent* ASC = Char->FindComponentByClass<UAbilitySystemComponent>())
+	if (!SpeedAttribute.IsValid())
 	{
-		NewSpeed = ASC->GetNumericAttribute(SpeedAttribute);
-	} else
-	{
-		AJ_LOG(this, TEXT("STT_SetSpeedFromAttributeTask: No ASC found."));
+		AJ_LOG(this, TEXT("STT_SetSpeedFromAttributeTask: SpeedAttribute is invalid."));
+		return EStateTreeRunStatus::Failed;
 	}
 
-	// Safety clamp and apply to movement component if available
+	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Char);
+	if (!ASC)
+	{
+		AJ_LOG(this, TEXT("STT_SetSpeedFromAttributeTask: No ASC found."));
+		return EStateTreeRunStatus::Failed;
+	}
+
+	const float NewSpeed = ASC->GetNumericAttribute(SpeedAttribute);
 	if (UCharacterMovementComponent* MoveComp = Char->GetCharacterMovement())
 	{
 		MoveComp->MaxWalkSpeed = FMath::Max(50.f, NewSpeed);

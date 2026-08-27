@@ -2,6 +2,7 @@
 
 #include "Director/AeyerjiSpawnerGroup.h"
 #include "Director/AeyerjiEncounterDirector.h"
+#include "Director/AeyerjiTreasureSpawnPoint.h"
 #include "Director/AeyerjiWorldSpawnProfile.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
@@ -14,6 +15,7 @@
 #include "GAS/GE_DamagePhysical.h"
 #include "Interaction/AeyerjiInteractable.h"
 #include "Inventory/AeyerjiRewardPresentationActor.h"
+#include "Items/ItemDefinition.h"
 #include "Progression/AeyerjiLevelingComponent.h"
 #include "Engine/World.h"
 #include "Engine/AssetManager.h"
@@ -27,7 +29,9 @@
 #include "Enemy/EnemyParentNative.h"
 #include "Logging/AeyerjiLog.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
+#include "Systems/AeyerjiRiftTreasureRules.h"
 #include "Systems/AeyerjiWorldStateSubsystem.h"
+#include "NavigationSystem.h"
 #include "World/AeyerjiLinkedTeleporter.h"
 #include "World/AeyerjiSurvivalDefenseObjectiveActor.h"
 #include "../AeyerjiGameInstance.h"
@@ -35,6 +39,187 @@
 namespace
 {
 	constexpr float RunTimerInterval = 0.1f;
+	constexpr float MaxDirectorDelaySeconds = 86400.f;
+	constexpr float MaxEnemyRuntimeMultiplier = 1000000.f;
+	constexpr float MaxRewardQualityMultiplier = 100.f;
+	constexpr int32 MaxRiftEnemyBudget = 100000;
+	constexpr int32 MaxUpgradeOptions = 64;
+	constexpr int32 MaxDefenseRepairOptions = 64;
+	constexpr float MaxUpgradeMagnitude = 1000000000.f;
+	constexpr int32 MaxSurvivalAuthoredRounds = 256;
+	constexpr int32 MaxSurvivalWavesPerRound = 256;
+	constexpr int32 MaxSurvivalSetsPerWave = 256;
+	constexpr int32 MaxSurvivalRoundPopulation = 100000;
+	constexpr int32 MaxSurvivalRoundNumber = 1000000;
+	constexpr int32 MaxRiftTreasureSimulationRuns = 100000;
+	constexpr float MaxRiftTreasureDistance = 1000000.f;
+	constexpr int32 MaxRiftTreasureDropsPerChest = 64;
+	constexpr int32 MaxRiftTreasureDropCountVariance = 64;
+	constexpr float RiftTreasurePresentationLifeSpanAfterRelease = 10.f;
+
+	bool IsFiniteRiftTreasureVector(const FVector& Value)
+	{
+		return FMath::IsFinite(Value.X) && FMath::IsFinite(Value.Y) && FMath::IsFinite(Value.Z);
+	}
+
+	FVector ResolveRiftTreasureProjectionExtent(const FVector& InExtent)
+	{
+		return FVector(
+			FMath::Clamp(FMath::IsFinite(InExtent.X) ? FMath::Abs(InExtent.X) : 250.f, 1.f, MaxRiftTreasureDistance),
+			FMath::Clamp(FMath::IsFinite(InExtent.Y) ? FMath::Abs(InExtent.Y) : 250.f, 1.f, MaxRiftTreasureDistance),
+			FMath::Clamp(FMath::IsFinite(InExtent.Z) ? FMath::Abs(InExtent.Z) : 500.f, 1.f, MaxRiftTreasureDistance));
+	}
+
+	const FAeyerjiTreasureLootProfileRow* ResolveRiftTreasureLootProfileRow(
+		const FDataTableRowHandle& ProfileRow,
+		FString* OutFailureReason = nullptr)
+	{
+		if (OutFailureReason)
+		{
+			OutFailureReason->Reset();
+		}
+
+		if (ProfileRow.IsNull())
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = TEXT("No DataTable row is configured.");
+			}
+			return nullptr;
+		}
+
+		if (!IsValid(ProfileRow.DataTable))
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = TEXT("The configured DataTable is unavailable.");
+			}
+			return nullptr;
+		}
+
+		if (ProfileRow.RowName.IsNone())
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = TEXT("The configured DataTable row name is empty.");
+			}
+			return nullptr;
+		}
+
+		const UScriptStruct* const RowStruct = ProfileRow.DataTable->GetRowStruct();
+		if (!RowStruct || !RowStruct->IsChildOf(FAeyerjiTreasureLootProfileRow::StaticStruct()))
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = FString::Printf(
+					TEXT("DataTable %s does not use the Rift Treasure Loot Profile row struct."),
+					*GetNameSafe(ProfileRow.DataTable));
+			}
+			return nullptr;
+		}
+
+		static const FString ContextString(TEXT("AeyerjiRiftTreasureLootProfile"));
+		const FAeyerjiTreasureLootProfileRow* const ResolvedRow =
+			ProfileRow.DataTable->FindRow<FAeyerjiTreasureLootProfileRow>(
+				ProfileRow.RowName,
+				ContextString,
+				/*bWarnIfRowMissing=*/false);
+		if (!ResolvedRow && OutFailureReason)
+		{
+			*OutFailureReason = FString::Printf(
+				TEXT("DataTable row %s does not exist in %s."),
+				*ProfileRow.RowName.ToString(),
+				*GetNameSafe(ProfileRow.DataTable));
+		}
+		return ResolvedRow;
+	}
+
+	FString DescribeRiftTreasureLootProfileRow(const FDataTableRowHandle& ProfileRow)
+	{
+		return FString::Printf(
+			TEXT("%s:%s"),
+			*GetNameSafe(ProfileRow.DataTable),
+			*ProfileRow.RowName.ToString());
+	}
+
+	bool IsRiftTreasureLootProfileConfigured(
+		const FAeyerjiTreasureLootProfileRow& Profile,
+		FString* OutFailureReason = nullptr)
+	{
+		if (OutFailureReason)
+		{
+			OutFailureReason->Reset();
+		}
+
+		if (Profile.DropsPerChest <= 0)
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = TEXT("Drops Per Chest must be at least one.");
+			}
+			return false;
+		}
+
+		if (Profile.ForcedItemDefinition && !IsValid(Profile.ForcedItemDefinition))
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = TEXT("Fixed Item Definition is no longer a valid asset.");
+			}
+			return false;
+		}
+
+		if (!Profile.SourceTag.IsValid() && !IsValid(Profile.ForcedItemDefinition))
+		{
+			if (OutFailureReason)
+			{
+				*OutFailureReason = TEXT("Configure a Source Tag or a Fixed Item Definition.");
+			}
+			return false;
+		}
+
+		return true;
+	}
+
+	FLootMultiDropConfig BuildRiftTreasureMultiDropConfig(const FAeyerjiTreasureLootProfileRow& Profile)
+	{
+		FLootMultiDropConfig Config;
+		Config.TotalBaseDrops = FMath::Clamp(Profile.DropsPerChest, 1, MaxRiftTreasureDropsPerChest);
+		// A Rift chest must never turn a legal positive drop count into zero solely because of variance.
+		Config.TotalVariance = FMath::Clamp(
+			Profile.DropCountVariance,
+			0,
+			FMath::Min(MaxRiftTreasureDropCountVariance, Config.TotalBaseDrops - 1));
+		Config.bRequireTotalUnique = false;
+		Config.bShuffleBuckets = false;
+		Config.UniquenessRetryCount = 0;
+		Config.bLogDebugToScreen = false;
+		Config.DebugScreenDuration = 0.f;
+		Config.Buckets.Reset();
+		return Config;
+	}
+
+	float ResolveSurvivalGrowthMultiplier(const float Base, const int32 Exponent)
+	{
+		const double SafeBase = FMath::IsFinite(Base)
+			? FMath::Clamp(static_cast<double>(Base), 0.0, static_cast<double>(MaxEnemyRuntimeMultiplier))
+			: 1.0;
+		const double Resolved = FMath::Pow(SafeBase, FMath::Max(0, Exponent));
+		return FMath::IsFinite(Resolved)
+			? static_cast<float>(FMath::Clamp(Resolved, 0.0, static_cast<double>(MaxEnemyRuntimeMultiplier)))
+			: MaxEnemyRuntimeMultiplier;
+	}
+
+	int32 ResolveSurvivalLevelBonus(
+		const int32 Cycle,
+		const int32 RoundStep,
+		const int32 BonusPerCycle,
+		const int32 BonusPerRound)
+	{
+		const int64 Resolved = static_cast<int64>(FMath::Max(0, Cycle)) * FMath::Max(0, BonusPerCycle)
+			+ static_cast<int64>(FMath::Max(0, RoundStep)) * FMath::Max(0, BonusPerRound);
+		return static_cast<int32>(FMath::Clamp<int64>(Resolved, 0, MAX_int32));
+	}
 }
 
 FLootContext UAeyerjiBossDefinition::MakeBossLootContext(
@@ -52,11 +237,13 @@ FLootContext UAeyerjiBossDefinition::MakeBossLootContext(
 	Context.SourceTag = LootSourceTag;
 	Context.PityGroup = BossPityGroup;
 	Context.ForcedItemDefinition = BossForcedItemDefinition;
-	Context.BaseLegendaryChance = FMath::Clamp(BossBaseLegendaryChance, 0.f, 1.f);
+	Context.BaseLegendaryChance = FMath::IsFinite(BossBaseLegendaryChance)
+		? FMath::Clamp(BossBaseLegendaryChance, 0.f, 1.f)
+		: 0.f;
 	Context.MinimumRarity = BossMinimumRarity;
 	Context.PitySuccessRarity = BossPitySuccessRarity;
 	Context.RarityWeights = BossRarityWeights;
-	Context.DifficultyScale = DifficultyScale;
+	Context.DifficultyScale = FMath::IsFinite(DifficultyScale) ? FMath::Clamp(DifficultyScale, 0.f, 1.f) : 0.f;
 	Context.PitySoftStartOverride = BossPitySoftStartOverride;
 	Context.PitySoftSlopeOverride = BossPitySoftSlopeOverride;
 	Context.PityHardAttemptsOverride = BossPityHardAttemptsOverride;
@@ -247,6 +434,7 @@ void AAeyerjiLevelDirector::ApplyZoneRunDefinition()
 	StandardRiftEnemyBudget = FMath::Max(1, ZoneRunDefinition->StandardRiftEnemyBudget);
 	StandardRiftProgressTargetPoints = FMath::Max(1, ZoneRunDefinition->StandardRiftProgressTargetPoints);
 	StandardRiftActivationDistance = FMath::Max(0.f, ZoneRunDefinition->StandardRiftActivationDistance);
+	RiftTreasureSpawnConfig = ZoneRunDefinition->TreasureSpawnConfig;
 	WorldSpawnProfile = ZoneRunDefinition->WorldSpawnProfile;
 	EndRunPortalClass = ZoneRunDefinition->EndRunPortalClass;
 	bOpenBossGateOnFixedPopulationCleared = ZoneRunDefinition->bOpenBossGateOnFixedPopulationCleared;
@@ -454,25 +642,39 @@ bool AAeyerjiLevelDirector::ApplyRiftActivityForNextRun(
 	{
 		// The encounter director applies density and encounter-size after this base
 		// budget is frozen, preserving one finite population ceiling for the run.
-		ActiveRiftEnemyBudget = FMath::Max(TierRow->EnemyBudget, 1);
-		ActiveRiftRegionActivationDistance = FMath::Max(TierRow->RegionActivationDistance, 0.f);
-		ActiveRiftMonsterPower.HealthMultiplier = FMath::Max(TierRow->HealthMultiplier, 0.f);
-		ActiveRiftMonsterPower.DamageMultiplier = FMath::Max(TierRow->DamageMultiplier, 0.f);
-		ActiveRiftMonsterPower.DefenseMultiplier = FMath::Max(TierRow->DefenseMultiplier, 0.f);
-		ActiveRiftMonsterPower.RewardQualityMultiplier = FMath::Max(TierRow->RewardQualityMultiplier, 0.f);
-		ActiveRiftDensityMultiplier = FMath::Max(TierRow->DensityMultiplier, 0.1f);
-		ActiveRiftEliteRateMultiplier = FMath::Max(TierRow->EliteRateMultiplier, 0.f);
-		ActiveRiftEncounterSizeMultiplier = FMath::Max(TierRow->EncounterSizeMultiplier, 0.1f);
-		ActiveRiftProgressMultiplier = FMath::Max(TierRow->ProgressMultiplier, 0.1f);
-		RunTimeLimitSeconds = FMath::Max(1.f, TierRow->TimeLimitSeconds);
-		ObjectiveKillTargetOverride = FMath::Max(1, TierRow->ProgressTargetPoints);
+		const auto SafeMultiplier = [](const float Value, const float Fallback, const float Minimum = 0.f)
+		{
+			return FMath::IsFinite(Value) ? FMath::Clamp(Value, Minimum, MaxEnemyRuntimeMultiplier) : Fallback;
+		};
+		ActiveRiftEnemyBudget = FMath::Clamp(TierRow->EnemyBudget, 1, MaxRiftEnemyBudget);
+		ActiveRiftRegionActivationDistance = FMath::IsFinite(TierRow->RegionActivationDistance)
+			? FMath::Clamp(TierRow->RegionActivationDistance, 0.f, 1000000.f)
+			: 0.f;
+		ActiveRiftMonsterPower.HealthMultiplier = SafeMultiplier(TierRow->HealthMultiplier, 1.f);
+		ActiveRiftMonsterPower.DamageMultiplier = SafeMultiplier(TierRow->DamageMultiplier, 1.f);
+		ActiveRiftMonsterPower.DefenseMultiplier = SafeMultiplier(TierRow->DefenseMultiplier, 1.f);
+		ActiveRiftMonsterPower.RewardQualityMultiplier = FMath::IsFinite(TierRow->RewardQualityMultiplier)
+			? FMath::Clamp(TierRow->RewardQualityMultiplier, 0.f, MaxRewardQualityMultiplier)
+			: 1.f;
+		ActiveRiftDensityMultiplier = SafeMultiplier(TierRow->DensityMultiplier, 1.f, 0.1f);
+		ActiveRiftEliteRateMultiplier = SafeMultiplier(TierRow->EliteRateMultiplier, 1.f);
+		ActiveRiftEncounterSizeMultiplier = SafeMultiplier(TierRow->EncounterSizeMultiplier, 1.f, 0.1f);
+		ActiveRiftProgressMultiplier = SafeMultiplier(TierRow->ProgressMultiplier, 1.f, 0.1f);
+		RunTimeLimitSeconds = FMath::IsFinite(TierRow->TimeLimitSeconds)
+			? FMath::Clamp(TierRow->TimeLimitSeconds, 1.f, MaxDirectorDelaySeconds)
+			: 900.f;
+		ObjectiveKillTargetOverride = FMath::Clamp(TierRow->ProgressTargetPoints, 1, MaxRiftEnemyBudget);
 	}
 	else
 	{
-		ActiveRiftEnemyBudget = FMath::Max(StandardRiftEnemyBudget, 1);
-		ActiveRiftRegionActivationDistance = FMath::Max(StandardRiftActivationDistance, 0.f);
-		RunTimeLimitSeconds = RunTimeLimitSeconds > 0.f ? RunTimeLimitSeconds : 900.f;
-		ObjectiveKillTargetOverride = FMath::Max(StandardRiftProgressTargetPoints, 1);
+		ActiveRiftEnemyBudget = FMath::Clamp(StandardRiftEnemyBudget, 1, MaxRiftEnemyBudget);
+		ActiveRiftRegionActivationDistance = FMath::IsFinite(StandardRiftActivationDistance)
+			? FMath::Clamp(StandardRiftActivationDistance, 0.f, 1000000.f)
+			: 0.f;
+		RunTimeLimitSeconds = FMath::IsFinite(RunTimeLimitSeconds) && RunTimeLimitSeconds > 0.f
+			? FMath::Min(RunTimeLimitSeconds, MaxDirectorDelaySeconds)
+			: 900.f;
+		ObjectiveKillTargetOverride = FMath::Clamp(StandardRiftProgressTargetPoints, 1, MaxRiftEnemyBudget);
 	}
 	// Greater Rifts are independent of the legacy World Tier budget. Keep legacy
 	// readers at Normal while selective monster-power multipliers own Rift combat.
@@ -656,7 +858,7 @@ AAeyerjiEncounterDirector* AAeyerjiLevelDirector::GetOrFindEncounterDirector()
 
 void AAeyerjiLevelDirector::StartRun()
 {
-	if (bRunActive)
+	if (!HasAuthority() || bRunActive)
 	{
 		return;
 	}
@@ -719,6 +921,10 @@ void AAeyerjiLevelDirector::StartRun()
 	if (AAeyerjiEncounterDirector* Director = GetOrFindEncounterDirector())
 	{
 		Director->SetBossSpawned(false);
+		if (SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
+		{
+			Director->ActivatePreparedRiftRun();
+		}
 	}
 
 	FixedPopulationClustersCleared = 0;
@@ -843,6 +1049,747 @@ bool AAeyerjiLevelDirector::PrepareRiftRegionEncounterPlan(
 		WorldPopulationSpawner,
 		this,
 		OutReason);
+}
+
+bool AAeyerjiLevelDirector::ResolveRiftTreasureStartNavigationAnchor(
+	const FAeyerjiRiftTreasureSpawnConfig& Config,
+	FVector& OutNavigationAnchor,
+	FString& OutReason) const
+{
+	OutNavigationAnchor = FVector::ZeroVector;
+	OutReason.Reset();
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		OutReason = TEXT("Treasure validation has no world");
+		return false;
+	}
+
+	AActor* StartActor = Config.RiftStartActorTag.IsNone()
+		? const_cast<AAeyerjiLevelDirector*>(this)
+		: FindActorByTag(Config.RiftStartActorTag);
+	if (!IsValid(StartActor) || StartActor->GetWorld() != World)
+	{
+		OutReason = Config.RiftStartActorTag.IsNone()
+			? TEXT("Treasure validation has no LevelDirector start anchor")
+			: FString::Printf(TEXT("Treasure RiftStartActorTag %s was not found"), *Config.RiftStartActorTag.ToString());
+		return false;
+	}
+
+	UNavigationSystemV1* NavigationSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	if (!NavigationSystem)
+	{
+		OutReason = TEXT("Treasure validation has no NavigationSystem");
+		return false;
+	}
+
+	FNavLocation ProjectedStart;
+	if (!NavigationSystem->ProjectPointToNavigation(
+		StartActor->GetActorLocation(),
+		ProjectedStart,
+		ResolveRiftTreasureProjectionExtent(Config.NavigationProjectionExtent))
+		|| !IsFiniteRiftTreasureVector(ProjectedStart.Location))
+	{
+		OutReason = FString::Printf(TEXT("Treasure Rift start %s cannot project to NavMesh"), *GetNameSafe(StartActor));
+		return false;
+	}
+
+	OutNavigationAnchor = ProjectedStart.Location;
+	return true;
+}
+
+void AAeyerjiLevelDirector::CollectRiftTreasureCandidates(
+	const FAeyerjiRiftTreasureSpawnConfig& Config,
+	const bool bRecordValidationState,
+	TArray<FRiftTreasureCandidateRuntime>& OutCandidates,
+	FAeyerjiRiftTreasureValidationSummary& OutSummary,
+	FString& OutReason) const
+{
+	OutCandidates.Reset();
+	OutSummary = FAeyerjiRiftTreasureValidationSummary();
+	OutReason.Reset();
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		OutReason = TEXT("Treasure validation has no world");
+		return;
+	}
+
+	const float StartExclusionDistance = FMath::Clamp(
+		FMath::IsFinite(Config.StartExclusionDistance) ? Config.StartExclusionDistance : 0.f,
+		0.f,
+		MaxRiftTreasureDistance);
+	const bool bNeedsStartAnchor = Config.bRequireReachableFromRiftStart
+		|| StartExclusionDistance > KINDA_SMALL_NUMBER;
+	FVector StartNavigationAnchor = FVector::ZeroVector;
+	if (bNeedsStartAnchor && !ResolveRiftTreasureStartNavigationAnchor(Config, StartNavigationAnchor, OutReason))
+	{
+		return;
+	}
+
+	UNavigationSystemV1* NavigationSystem = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	const ANavigationData* NavigationData = Config.bRequireReachableFromRiftStart && NavigationSystem
+		? NavigationSystem->GetDefaultNavDataInstance(FNavigationSystem::DontCreate)
+		: nullptr;
+	if (Config.bRequireReachableFromRiftStart && (!NavigationSystem || !NavigationData))
+	{
+		OutReason = TEXT("Treasure reachability requires a built default NavMesh");
+		return;
+	}
+
+	TArray<AAeyerjiTreasureSpawnPoint*> AuthoredPoints;
+	for (TActorIterator<AAeyerjiTreasureSpawnPoint> It(World); It; ++It)
+	{
+		if (AAeyerjiTreasureSpawnPoint* Point = *It)
+		{
+			AuthoredPoints.Add(Point);
+		}
+	}
+	AuthoredPoints.Sort([](const AAeyerjiTreasureSpawnPoint& Left, const AAeyerjiTreasureSpawnPoint& Right)
+	{
+		return Left.GetPathName() < Right.GetPathName();
+	});
+
+	const FName ActiveRiftZoneId = ZoneRunDefinition ? ZoneRunDefinition->ZoneId : NAME_None;
+	const float MaximumAnchorDistance = FMath::Clamp(
+		FMath::IsFinite(Config.MaximumNavigationAnchorDistance) ? Config.MaximumNavigationAnchorDistance : 0.f,
+		0.f,
+		MaxRiftTreasureDistance);
+	const float MaximumAnchorDistanceSquared = FMath::Square(MaximumAnchorDistance);
+	const float StartExclusionDistanceSquared = FMath::Square(StartExclusionDistance);
+	for (AAeyerjiTreasureSpawnPoint* Point : AuthoredPoints)
+	{
+		if (!IsValid(Point))
+		{
+			continue;
+		}
+
+		++OutSummary.TotalPoints;
+		if (!Point->IsEnabled())
+		{
+			++OutSummary.DisabledPoints;
+			if (bRecordValidationState)
+			{
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::Disabled,
+					FVector::ZeroVector,
+					TEXT("Point is disabled."));
+			}
+			continue;
+		}
+
+		if (!Point->IsEligibleForRiftZone(ActiveRiftZoneId))
+		{
+			++OutSummary.OtherRiftPoints;
+			if (bRecordValidationState)
+			{
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::OtherRift,
+					FVector::ZeroVector,
+					FString::Printf(TEXT("Point belongs to Rift zone %s."), *Point->GetRiftZoneId().ToString()));
+			}
+			continue;
+		}
+
+		const TSubclassOf<AAeyerjiRewardPresentationActor> ChestClass =
+			Point->ResolveChestClass(Config.DefaultChestClass);
+		if (!ChestClass)
+		{
+			++OutSummary.MissingChestClass;
+			if (bRecordValidationState)
+			{
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::MissingChestClass,
+					FVector::ZeroVector,
+					TEXT("No point override or Rift default chest class is configured."));
+			}
+			continue;
+		}
+
+		const FDataTableRowHandle LootProfileRow =
+			Point->ResolveLootProfileRow(Config.DefaultLootProfileRow);
+		FString LootProfileFailureReason;
+		const FAeyerjiTreasureLootProfileRow* LootProfile =
+			ResolveRiftTreasureLootProfileRow(LootProfileRow, &LootProfileFailureReason);
+		bool bLootProfileConfigured = false;
+		if (LootProfile && LootProfile->bEnabled)
+		{
+			bLootProfileConfigured = IsRiftTreasureLootProfileConfigured(*LootProfile, &LootProfileFailureReason);
+		}
+		if (!bLootProfileConfigured)
+		{
+			++OutSummary.MissingLootProfile;
+			if (bRecordValidationState)
+			{
+				FString ValidationMessage;
+				if (!LootProfile)
+				{
+					ValidationMessage = LootProfileFailureReason;
+				}
+				else if (!LootProfile->bEnabled)
+				{
+					ValidationMessage = FString::Printf(
+						TEXT("Loot-profile DataTable row %s is disabled."),
+						*DescribeRiftTreasureLootProfileRow(LootProfileRow));
+				}
+				else
+				{
+					ValidationMessage = FString::Printf(
+						TEXT("Loot-profile DataTable row %s is invalid: %s"),
+						*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+						*LootProfileFailureReason);
+				}
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::MissingLootProfile,
+					FVector::ZeroVector,
+					ValidationMessage);
+			}
+			continue;
+		}
+
+		FVector NavigationAnchor;
+		if (!Point->ResolveNavigationAnchor(Config.NavigationProjectionExtent, NavigationAnchor))
+		{
+			++OutSummary.InvalidNavigation;
+			if (bRecordValidationState)
+			{
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::OutsideNavigation,
+					FVector::ZeroVector,
+					TEXT("No nearby NavMesh anchor was found."));
+			}
+			continue;
+		}
+
+		if (FVector::DistSquared2D(Point->GetActorLocation(), NavigationAnchor) > MaximumAnchorDistanceSquared)
+		{
+			++OutSummary.AnchorTooFar;
+			if (bRecordValidationState)
+			{
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::NavigationAnchorTooFar,
+					NavigationAnchor,
+					TEXT("Projected NavMesh anchor is farther than MaximumNavigationAnchorDistance."));
+			}
+			continue;
+		}
+
+		if (bNeedsStartAnchor
+			&& !Point->AllowsNearRiftStart()
+			&& FVector::DistSquared2D(NavigationAnchor, StartNavigationAnchor) < StartExclusionDistanceSquared)
+		{
+			++OutSummary.StartExcluded;
+			if (bRecordValidationState)
+			{
+				Point->RecordValidationState(
+					EAeyerjiTreasureSpawnPointValidationState::StartExcluded,
+					NavigationAnchor,
+					TEXT("Point is inside the Rift start exclusion distance."));
+			}
+			continue;
+		}
+
+		if (Config.bRequireReachableFromRiftStart)
+		{
+			const FPathFindingQuery Query(this, *NavigationData, StartNavigationAnchor, NavigationAnchor);
+			if (!NavigationSystem->TestPathSync(Query))
+			{
+				++OutSummary.Unreachable;
+				if (bRecordValidationState)
+				{
+					Point->RecordValidationState(
+						EAeyerjiTreasureSpawnPointValidationState::Unreachable,
+						NavigationAnchor,
+						TEXT("No synchronous path exists from the Rift start anchor."));
+				}
+				continue;
+			}
+		}
+
+		FRiftTreasureCandidateRuntime& Candidate = OutCandidates.AddDefaulted_GetRef();
+		Candidate.Point = Point;
+		Candidate.LootProfileRow = LootProfileRow;
+		Candidate.SelectionCandidate.StableId = Point->GetPathName();
+		Candidate.SelectionCandidate.NavigationAnchor = NavigationAnchor;
+		Candidate.SelectionCandidate.SpawnWeight = Point->GetSpawnWeight();
+		Candidate.SelectionCandidate.ZoneId = Point->GetZoneId();
+		if (bRecordValidationState)
+		{
+			Point->RecordValidationState(
+				EAeyerjiTreasureSpawnPointValidationState::Valid,
+				NavigationAnchor,
+				TEXT("Point is NavMesh-valid and reachable for this Rift."));
+		}
+	}
+
+	OutSummary.ValidCandidates = OutCandidates.Num();
+}
+
+FLootContext AAeyerjiLevelDirector::BuildRiftTreasureLootContext(
+	const FAeyerjiTreasureLootProfileRow& Profile,
+	AActor* PlayerActor) const
+{
+	// Rift-owned gameplay state is authoritative. Loot-profile rows only describe the small policy
+	// difference between chest types, never a player, level, world-tier, or pity override.
+	FLootContext RuntimeContext;
+	RuntimeContext.PlayerActor = PlayerActor;
+	RuntimeContext.EnemyLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(GetEffectiveEnemyLevel());
+	RuntimeContext.PlayerLevel = GetCurrentPlayerLevel();
+	RuntimeContext.WorldTier = GetEffectiveWorldTier();
+	RuntimeContext.SourceTag = Profile.SourceTag;
+	RuntimeContext.ForcedItemDefinition = Profile.ForcedItemDefinition;
+	RuntimeContext.MinimumRarity = Profile.MinimumRarity;
+	RuntimeContext.DifficultyScale = GetDifficultyScale();
+	RuntimeContext.RewardQualityMultiplier = FMath::Clamp(
+		GetActiveRiftRewardQualityMultiplier(),
+		0.f,
+		MaxRewardQualityMultiplier);
+	return RuntimeContext;
+}
+
+bool AAeyerjiLevelDirector::SpawnRiftTreasuresForRun(
+	const int32 RunSerial,
+	const int32 RunSeed,
+	FString& OutReason)
+{
+	OutReason.Reset();
+	if (!HasAuthority())
+	{
+		OutReason = TEXT("Rift treasure selection requires authority");
+		return false;
+	}
+	if (RunSerial <= 0)
+	{
+		OutReason = TEXT("Rift treasure selection requires a positive run serial");
+		return false;
+	}
+	if (ActiveRiftTreasureRunSerial == RunSerial)
+	{
+		return true;
+	}
+
+	ClearActiveRiftTreasures();
+	ActiveRiftTreasureRunSerial = RunSerial;
+	if (!RiftTreasureSpawnConfig.bEnabled)
+	{
+		UE_LOG(LogAeyerji, Display,
+			TEXT("[Treasure] Disabled RunSerial=%d Seed=%d"),
+			RunSerial,
+			RunSeed);
+		return true;
+	}
+
+	TArray<FRiftTreasureCandidateRuntime> Candidates;
+	FAeyerjiRiftTreasureValidationSummary Summary;
+	CollectRiftTreasureCandidates(
+		RiftTreasureSpawnConfig,
+		/*bRecordValidationState=*/false,
+		Candidates,
+		Summary,
+		OutReason);
+	if (Candidates.IsEmpty())
+	{
+		UE_LOG(LogAeyerji, Warning,
+			TEXT("[Treasure] No valid candidates RunSerial=%d Seed=%d Total=%d Disabled=%d OtherRift=%d MissingChest=%d MissingProfile=%d InvalidNav=%d AnchorTooFar=%d StartExcluded=%d Unreachable=%d Reason=%s"),
+			RunSerial,
+			RunSeed,
+			Summary.TotalPoints,
+			Summary.DisabledPoints,
+			Summary.OtherRiftPoints,
+			Summary.MissingChestClass,
+			Summary.MissingLootProfile,
+			Summary.InvalidNavigation,
+			Summary.AnchorTooFar,
+			Summary.StartExcluded,
+			Summary.Unreachable,
+			*OutReason);
+		return true;
+	}
+
+	ULootService* LootService = UCharacterStatsLibrary::GetLootService(this);
+	if (!LootService)
+	{
+		OutReason = TEXT("Rift treasure selection cannot resolve LootService");
+		return false;
+	}
+
+	TArray<FAeyerjiRiftTreasureSelectionCandidate> SelectionCandidates;
+	SelectionCandidates.Reserve(Candidates.Num());
+	for (const FRiftTreasureCandidateRuntime& Candidate : Candidates)
+	{
+		SelectionCandidates.Add(Candidate.SelectionCandidate);
+	}
+
+	FRandomStream TreasureRandomStream(RunSeed);
+	const int32 RequestedCount = AeyerjiRiftTreasureRules::RollRequestedChestCount(
+		TreasureRandomStream,
+		RiftTreasureSpawnConfig);
+	const TArray<int32> SelectedIndices = AeyerjiRiftTreasureRules::SelectCandidateIndices(
+		SelectionCandidates,
+		RequestedCount,
+		TreasureRandomStream,
+		RiftTreasureSpawnConfig);
+
+	int32 SpawnedCount = 0;
+	AActor* PlayerActor = UGameplayStatics::GetPlayerPawn(this, 0);
+	UWorld* World = GetWorld();
+	for (const int32 SelectedIndex : SelectedIndices)
+	{
+		if (!Candidates.IsValidIndex(SelectedIndex) || !World)
+		{
+			continue;
+		}
+
+		const FRiftTreasureCandidateRuntime& Candidate = Candidates[SelectedIndex];
+		AAeyerjiTreasureSpawnPoint* Point = Candidate.Point.Get();
+		if (!IsValid(Point))
+		{
+			continue;
+		}
+
+		const TSubclassOf<AAeyerjiRewardPresentationActor> ChestClass =
+			Point->ResolveChestClass(RiftTreasureSpawnConfig.DefaultChestClass);
+		const FDataTableRowHandle& LootProfileRow = Candidate.LootProfileRow;
+		FString LootProfileFailureReason;
+		const FAeyerjiTreasureLootProfileRow* LootProfile =
+			ResolveRiftTreasureLootProfileRow(LootProfileRow, &LootProfileFailureReason);
+		const bool bLootProfileConfigured = LootProfile
+			&& LootProfile->bEnabled
+			&& IsRiftTreasureLootProfileConfigured(*LootProfile, &LootProfileFailureReason);
+		if (!ChestClass || !bLootProfileConfigured)
+		{
+			FString ConfigurationFailureReason;
+			if (!ChestClass)
+			{
+				ConfigurationFailureReason = TEXT("No point override or Rift default chest class is configured.");
+			}
+			else if (!LootProfile)
+			{
+				ConfigurationFailureReason = LootProfileFailureReason;
+			}
+			else if (!LootProfile->bEnabled)
+			{
+				ConfigurationFailureReason = TEXT("The DataTable row is disabled.");
+			}
+			else
+			{
+				ConfigurationFailureReason = LootProfileFailureReason;
+			}
+			UE_LOG(LogAeyerji, Warning,
+				TEXT("[Treasure] Selected point became unconfigured Point=%s ChestClass=%s LootProfileRow=%s Reason=%s"),
+				*GetNameSafe(Point),
+				*GetNameSafe(ChestClass.Get()),
+				*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+				*ConfigurationFailureReason);
+			continue;
+		}
+
+		const FLootContext LootContext = BuildRiftTreasureLootContext(*LootProfile, PlayerActor);
+		if (const UItemDefinition* const FixedItem = LootProfile->ForcedItemDefinition.Get())
+		{
+			const int32 RequiredLevel = FixedItem->GetEffectiveRequiredLevel();
+			if (LootContext.PlayerLevel < RequiredLevel)
+			{
+				UE_LOG(LogAeyerji, Warning,
+					TEXT("[Treasure] Skipped point %s because fixed item %s in loot-profile row %s requires level %d but the Rift player is level %d."),
+					*GetNameSafe(Point),
+					*GetNameSafe(FixedItem),
+					*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+					RequiredLevel,
+					LootContext.PlayerLevel);
+				continue;
+			}
+		}
+
+		const FLootMultiDropConfig MultiDropConfig = BuildRiftTreasureMultiDropConfig(*LootProfile);
+		TArray<FLootDropResult> LootResults;
+		if (!LootService->RollMultiDrop(LootContext, MultiDropConfig, LootResults)
+			|| LootResults.IsEmpty())
+		{
+			UE_LOG(LogAeyerji, Warning,
+				TEXT("[Treasure] Loot roll produced no results Point=%s ProfileRow=%s Source=%s"),
+				*GetNameSafe(Point),
+				*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+				*LootContext.SourceTag.ToString());
+			continue;
+		}
+
+		const int32 RolledResultCount = LootResults.Num();
+		LootResults.RemoveAll([](const FLootDropResult& Result)
+		{
+			return !IsUsableLootDropResult(Result);
+		});
+		if (LootResults.IsEmpty())
+		{
+			UE_LOG(LogAeyerji, Warning,
+				TEXT("[Treasure] Skipped empty reward Point=%s ProfileRow=%s Source=%s Rolled=%d Usable=0 FixedItem=%s. Check the source pool's drop gates and item eligibility."),
+				*GetNameSafe(Point),
+				*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+				*LootContext.SourceTag.ToString(),
+				RolledResultCount,
+				*GetNameSafe(LootProfile->ForcedItemDefinition));
+			continue;
+		}
+		if (LootResults.Num() != RolledResultCount)
+		{
+			UE_LOG(LogAeyerji, Verbose,
+				TEXT("[Treasure] Filtered invalid loot results Point=%s ProfileRow=%s Source=%s Rolled=%d Usable=%d"),
+				*GetNameSafe(Point),
+				*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+				*LootContext.SourceTag.ToString(),
+				RolledResultCount,
+				LootResults.Num());
+		}
+
+		FActorSpawnParameters SpawnParameters;
+		SpawnParameters.Owner = this;
+		SpawnParameters.Instigator = Cast<APawn>(PlayerActor);
+		SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		AAeyerjiRewardPresentationActor* Chest = World->SpawnActor<AAeyerjiRewardPresentationActor>(
+			ChestClass,
+			Point->GetActorTransform(),
+			SpawnParameters);
+		if (!Chest)
+		{
+			UE_LOG(LogAeyerji, Warning,
+				TEXT("[Treasure] Failed to spawn chest Point=%s Class=%s"),
+				*GetNameSafe(Point),
+				*GetNameSafe(ChestClass.Get()));
+			continue;
+		}
+
+		Chest->SetInteractionNavigationAnchor(Candidate.SelectionCandidate.NavigationAnchor);
+		Chest->SetSnapPresentationToGroundOnInitialize(false);
+		Chest->InitializeReward(
+			LootResults,
+			LootProfile->DropMode,
+			LootContext.SourceTag,
+			PlayerActor,
+			FVector::ZeroVector,
+			RiftTreasurePresentationLifeSpanAfterRelease);
+		Chest->ConfigureTreasureAutomation(
+			RiftTreasureSpawnConfig.bEnableAutoOpen,
+			RiftTreasureSpawnConfig.AutoOpenRadius,
+			RiftTreasureSpawnConfig.AutoOpenUnlockLevel,
+			RiftTreasureSpawnConfig.bRequireMaxCharacterLevelForAutoOpen,
+			RiftTreasureSpawnConfig.AutoOpenPollingInterval,
+			RiftTreasureSpawnConfig.bEnableAutoCollect,
+			RiftTreasureSpawnConfig.AutoCollectRadius);
+		ActiveRiftTreasureActors.Add(Chest);
+		++SpawnedCount;
+
+		UE_LOG(LogAeyerji, Display,
+			TEXT("[Treasure] Spawned RunSerial=%d Point=%s ProfileRow=%s Results=%d Anchor=%s"),
+			RunSerial,
+			*GetNameSafe(Point),
+			*DescribeRiftTreasureLootProfileRow(LootProfileRow),
+			LootResults.Num(),
+			*Candidate.SelectionCandidate.NavigationAnchor.ToCompactString());
+	}
+
+	UE_LOG(LogAeyerji, Display,
+		TEXT("[Treasure] Seed=%d Requested=%d Candidates=%d ValidNav=%d StartExcluded=%d Chosen=%d Spawned=%d"),
+		RunSeed,
+		RequestedCount,
+		Summary.TotalPoints,
+		Summary.ValidCandidates,
+		Summary.StartExcluded,
+		SelectedIndices.Num(),
+		SpawnedCount);
+	return true;
+}
+
+void AAeyerjiLevelDirector::ValidateRiftTreasureSpawnPoints()
+{
+	const FAeyerjiRiftTreasureSpawnConfig& Config = ZoneRunDefinition
+		? ZoneRunDefinition->TreasureSpawnConfig
+		: RiftTreasureSpawnConfig;
+	TArray<FRiftTreasureCandidateRuntime> Candidates;
+	FAeyerjiRiftTreasureValidationSummary Summary;
+	FString Reason;
+	CollectRiftTreasureCandidates(
+		Config,
+		/*bRecordValidationState=*/true,
+		Candidates,
+		Summary,
+		Reason);
+
+	UE_LOG(LogAeyerji, Display,
+		TEXT("[Treasure][Validate] Enabled=%d Total=%d Valid=%d Disabled=%d OtherRift=%d MissingChest=%d MissingProfile=%d OutsideNav=%d AnchorTooFar=%d StartExcluded=%d Unreachable=%d Reason=%s"),
+		Config.bEnabled ? 1 : 0,
+		Summary.TotalPoints,
+		Summary.ValidCandidates,
+		Summary.DisabledPoints,
+		Summary.OtherRiftPoints,
+		Summary.MissingChestClass,
+		Summary.MissingLootProfile,
+		Summary.InvalidNavigation,
+		Summary.AnchorTooFar,
+		Summary.StartExcluded,
+		Summary.Unreachable,
+		*Reason);
+}
+
+void AAeyerjiLevelDirector::SimulateRiftTreasureLayouts()
+{
+	const FAeyerjiRiftTreasureSpawnConfig& Config = ZoneRunDefinition
+		? ZoneRunDefinition->TreasureSpawnConfig
+		: RiftTreasureSpawnConfig;
+	TArray<FRiftTreasureCandidateRuntime> Candidates;
+	FAeyerjiRiftTreasureValidationSummary Summary;
+	FString Reason;
+	CollectRiftTreasureCandidates(
+		Config,
+		/*bRecordValidationState=*/false,
+		Candidates,
+		Summary,
+		Reason);
+	if (Candidates.IsEmpty())
+	{
+		UE_LOG(LogAeyerji, Warning,
+			TEXT("[Treasure][Simulation] No valid candidates. Reason=%s"),
+			*Reason);
+		return;
+	}
+
+	TArray<FAeyerjiRiftTreasureSelectionCandidate> SelectionCandidates;
+	SelectionCandidates.Reserve(Candidates.Num());
+	for (const FRiftTreasureCandidateRuntime& Candidate : Candidates)
+	{
+		SelectionCandidates.Add(Candidate.SelectionCandidate);
+	}
+
+	const int32 SimulationRuns = FMath::Clamp(Config.DebugSimulationRunCount, 1, MaxRiftTreasureSimulationRuns);
+	TArray<int32> SelectionCounts;
+	SelectionCounts.Init(0, Candidates.Num());
+	int32 TotalSelections = 0;
+	for (int32 RunIndex = 0; RunIndex < SimulationRuns; ++RunIndex)
+	{
+		FRandomStream SimulationRandomStream(RunIndex + 1);
+		const int32 RequestedCount = AeyerjiRiftTreasureRules::RollRequestedChestCount(
+			SimulationRandomStream,
+			Config);
+		const TArray<int32> SelectedIndices = AeyerjiRiftTreasureRules::SelectCandidateIndices(
+			SelectionCandidates,
+			RequestedCount,
+			SimulationRandomStream,
+			Config);
+		for (const int32 SelectedIndex : SelectedIndices)
+		{
+			if (SelectionCounts.IsValidIndex(SelectedIndex))
+			{
+				++SelectionCounts[SelectedIndex];
+				++TotalSelections;
+			}
+		}
+	}
+
+	const float MeanSelections = Candidates.IsEmpty()
+		? 0.f
+		: static_cast<float>(TotalSelections) / static_cast<float>(Candidates.Num());
+	UE_LOG(LogAeyerji, Display,
+		TEXT("[Treasure][Simulation] Runs=%d Candidates=%d TotalSelections=%d MeanPerPoint=%.2f"),
+		SimulationRuns,
+		Candidates.Num(),
+		TotalSelections,
+		MeanSelections);
+	for (int32 CandidateIndex = 0; CandidateIndex < Candidates.Num(); ++CandidateIndex)
+	{
+		UE_LOG(LogAeyerji, Display,
+			TEXT("[Treasure][Simulation] Point=%s Zone=%s Hits=%d"),
+			*Candidates[CandidateIndex].SelectionCandidate.StableId,
+			*Candidates[CandidateIndex].SelectionCandidate.ZoneId.ToString(),
+			SelectionCounts[CandidateIndex]);
+	}
+}
+
+int32 AAeyerjiLevelDirector::GetActiveRiftTreasureCount() const
+{
+	int32 ActiveCount = 0;
+	for (const TWeakObjectPtr<AAeyerjiRewardPresentationActor>& Chest : ActiveRiftTreasureActors)
+	{
+		ActiveCount += Chest.IsValid() ? 1 : 0;
+	}
+	return ActiveCount;
+}
+
+void AAeyerjiLevelDirector::ClearActiveRiftTreasures()
+{
+	if (!HasAuthority())
+	{
+		ActiveRiftTreasureActors.Reset();
+		ActiveRiftTreasureRunSerial = 0;
+		return;
+	}
+
+	int32 ClearedChestCount = 0;
+	for (const TWeakObjectPtr<AAeyerjiRewardPresentationActor>& ChestReference : ActiveRiftTreasureActors)
+	{
+		if (AAeyerjiRewardPresentationActor* Chest = ChestReference.Get())
+		{
+			Chest->DiscardStoredRewardAndSpawnedLoot();
+			Chest->Destroy();
+			++ClearedChestCount;
+		}
+	}
+	ActiveRiftTreasureActors.Reset();
+	ActiveRiftTreasureRunSerial = 0;
+
+	if (ClearedChestCount > 0)
+	{
+		UE_LOG(LogAeyerji, Display,
+			TEXT("[Treasure] Cleared Rift-owned chests=%d"),
+			ClearedChestCount);
+	}
+}
+
+void AAeyerjiLevelDirector::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	ClearActiveRiftTreasures();
+
+	if (SurvivalPreloadHandle.IsValid())
+	{
+		SurvivalPreloadHandle->CancelHandle();
+		SurvivalPreloadHandle.Reset();
+	}
+
+	GetWorldTimerManager().ClearAllTimersForObject(this);
+	if (UAeyerjiLevelingComponent* Leveling = CachedPlayerLeveling.Get())
+	{
+		Leveling->OnLevelUp.RemoveDynamic(this, &AAeyerjiLevelDirector::HandlePlayerLevelUp);
+	}
+	CachedPlayerLeveling.Reset();
+
+	for (AAeyerjiSpawnerGroup* Spawner : SpawnerSequence)
+	{
+		if (!IsValid(Spawner))
+		{
+			continue;
+		}
+		Spawner->OnEncounterStarted.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerStarted);
+		Spawner->OnEncounterCleared.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerCleared);
+		Spawner->OnTrackedEnemiesRemoved.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerTrackedEnemiesRemoved);
+		Spawner->OnBossDefeated.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerBossDefeated);
+		Spawner->OnWaveStarted.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerWaveStarted);
+	}
+	if (IsValid(BossSpawner) && !SpawnerSequence.Contains(BossSpawner))
+	{
+		BossSpawner->OnEncounterStarted.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerStarted);
+		BossSpawner->OnEncounterCleared.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerCleared);
+		BossSpawner->OnTrackedEnemiesRemoved.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerTrackedEnemiesRemoved);
+		BossSpawner->OnBossDefeated.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerBossDefeated);
+		BossSpawner->OnWaveStarted.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSpawnerWaveStarted);
+	}
+	if (AAeyerjiEncounterDirector* Director = CachedEncounterDirector.Get())
+	{
+		Director->OnFixedClusterCleared.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleFixedClusterCleared);
+		Director->OnFixedPopulationCleared.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleFixedPopulationCleared);
+	}
+
+	ClearSurvivalDefenseObjective();
+	Super::EndPlay(EndPlayReason);
 }
 
 void AAeyerjiLevelDirector::DisableUnopenedRiftEncounterRegions()
@@ -983,13 +1930,14 @@ void AAeyerjiLevelDirector::HandlePlayerLevelUp(int32 OldLevel, int32 NewLevel)
 
 void AAeyerjiLevelDirector::EndRun()
 {
-	if (!bRunActive)
+	if (!HasAuthority() || !bRunActive)
 	{
 		return;
 	}
 
 	bRunActive = false;
 	ClearBossLinkedTeleporter();
+	ClearActiveRiftTreasures();
 
 	if (UWorld* World = GetWorld())
 	{
@@ -1037,15 +1985,29 @@ void AAeyerjiLevelDirector::EndRun()
 			Director->StopFixedWorldPopulation();
 		}
 	}
+	else if (SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
+	{
+		if (AAeyerjiEncounterDirector* Director = CachedEncounterDirector.Get())
+		{
+			// Ending a Rift run freezes objective credit and prevents unopened regions
+			// from activating while the end-of-run presentation is still visible.
+			Director->FreezeWeightedProgress();
+		}
+	}
 }
 
 void AAeyerjiLevelDirector::TickRunTimer()
 {
-	if (bRunActive)
+	if (HasAuthority() && bRunActive)
 	{
-		AccumulatedRunSeconds += RunTimerInterval;
+		AccumulatedRunSeconds = FMath::IsFinite(AccumulatedRunSeconds)
+			? FMath::Min(AccumulatedRunSeconds + RunTimerInterval, MaxDirectorDelaySeconds)
+			: 0.f;
 
-		if (RunTimeLimitSeconds > 0.f && AccumulatedRunSeconds >= RunTimeLimitSeconds)
+		const float SafeTimeLimit = FMath::IsFinite(RunTimeLimitSeconds)
+			? FMath::Clamp(RunTimeLimitSeconds, 0.f, MaxDirectorDelaySeconds)
+			: 0.f;
+		if (SafeTimeLimit > 0.f && AccumulatedRunSeconds >= SafeTimeLimit)
 		{
 			const bool bRiftOvertimeMode = ActiveRiftTierNumber > 0
 				|| SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions;
@@ -1056,7 +2018,7 @@ void AAeyerjiLevelDirector::TickRunTimer()
 			}
 			if (!bRiftOvertimeMode)
 			{
-				AccumulatedRunSeconds = RunTimeLimitSeconds;
+				AccumulatedRunSeconds = SafeTimeLimit;
 				EndRun();
 			}
 		}
@@ -1147,12 +2109,15 @@ bool AAeyerjiLevelDirector::IsSurvivalDefenseObjectiveEnabled() const
 
 void AAeyerjiLevelDirector::OpenSurvivalDefenseObjectiveRepairMenu(AAeyerjiPlayerController* Controller, AActor* ObjectiveActor) const
 {
-	if (!HasAuthority() || !Controller)
+	if (!HasAuthority()
+		|| !IsValid(Controller)
+		|| Controller->GetWorld() != GetWorld())
 	{
 		return;
 	}
 
 	if (!IsSurvivalDefenseObjectiveEnabled()
+		|| !IsValid(ObjectiveActor)
 		|| ObjectiveActor != SurvivalDefenseObjectiveActor.Get()
 		|| !IsSurvivalDefenseObjectiveAlive())
 	{
@@ -1169,19 +2134,41 @@ void AAeyerjiLevelDirector::OpenSurvivalDefenseObjectiveRepairMenu(AAeyerjiPlaye
 			FAeyerjiDefenseRepairOption(FName(TEXT("Full")), FName(TEXT("DefenseRepairFull")), 120, 0.f, 1.00f)
 		};
 	}
+	RepairOptions.SetNum(FMath::Min(RepairOptions.Num(), MaxDefenseRepairOptions), EAllowShrinking::No);
+	TSet<FName> SeenOptionIds;
+	RepairOptions.RemoveAll([&SeenOptionIds](FAeyerjiDefenseRepairOption& Option)
+	{
+		if (Option.OptionId.IsNone() || SeenOptionIds.Contains(Option.OptionId))
+		{
+			return true;
+		}
+		SeenOptionIds.Add(Option.OptionId);
+		Option.GoldCost = FMath::Max(0, Option.GoldCost);
+		Option.FlatHeal = FMath::IsFinite(Option.FlatHeal)
+			? FMath::Clamp(Option.FlatHeal, 0.f, MaxUpgradeMagnitude)
+			: 0.f;
+		Option.PercentHeal = FMath::IsFinite(Option.PercentHeal)
+			? FMath::Clamp(Option.PercentHeal, 0.f, 1.f)
+			: 0.f;
+		return false;
+	});
 
 	const AAeyerjiPlayerState* AeyerjiPS = Controller->GetPlayerState<AAeyerjiPlayerState>();
+	const float CurrentHealth = GetSurvivalDefenseObjectiveHealth();
+	const float MaxHealth = GetSurvivalDefenseObjectiveMaxHealth();
 	Controller->Client_ShowDefenseObjectiveRepairMenu(
 		ObjectiveActor,
 		RepairOptions,
 		AeyerjiPS ? AeyerjiPS->GetGold() : 0,
-		GetSurvivalDefenseObjectiveHealth(),
-		GetSurvivalDefenseObjectiveMaxHealth());
+		FMath::IsFinite(CurrentHealth) ? FMath::Max(0.f, CurrentHealth) : 0.f,
+		FMath::IsFinite(MaxHealth) ? FMath::Max(0.f, MaxHealth) : 0.f);
 }
 
 bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerController* Controller, AActor* ObjectiveActor, const FName OptionId)
 {
-	if (!HasAuthority() || !Controller)
+	if (!HasAuthority()
+		|| !IsValid(Controller)
+		|| Controller->GetWorld() != GetWorld())
 	{
 		return false;
 	}
@@ -1193,6 +2180,7 @@ bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerCont
 	};
 
 	if (!IsSurvivalDefenseObjectiveEnabled()
+		|| !IsValid(ObjectiveActor)
 		|| ObjectiveActor != SurvivalDefenseObjectiveActor.Get()
 		|| !IsSurvivalDefenseObjectiveAlive())
 	{
@@ -1200,7 +2188,7 @@ bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerCont
 	}
 
 	APawn* Pawn = Controller->GetPawn();
-	if (!IsValid(Pawn))
+	if (!IsValid(Pawn) || Pawn->GetWorld() != GetWorld())
 	{
 		return Reject(FName(TEXT("RepairUnavailable")));
 	}
@@ -1210,10 +2198,15 @@ bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerCont
 	if (ObjectiveActor->GetClass()->ImplementsInterface(UAeyerjiInteractable::StaticClass()))
 	{
 		InteractionLocation = IAeyerjiInteractable::Execute_GetInteractionLocation(ObjectiveActor);
-		InteractionRadius = FMath::Max(IAeyerjiInteractable::Execute_GetInteractionRadius(ObjectiveActor), 30.f);
+		const float RawInteractionRadius = IAeyerjiInteractable::Execute_GetInteractionRadius(ObjectiveActor);
+		InteractionRadius = FMath::IsFinite(RawInteractionRadius)
+			? FMath::Clamp(RawInteractionRadius, 30.f, MaxUpgradeMagnitude)
+			: 400.f;
 	}
 
-	if (FVector::Dist2D(Pawn->GetActorLocation(), InteractionLocation) > InteractionRadius)
+	if (Pawn->GetActorLocation().ContainsNaN()
+		|| InteractionLocation.ContainsNaN()
+		|| FVector::Dist2D(Pawn->GetActorLocation(), InteractionLocation) > InteractionRadius)
 	{
 		return Reject(FName(TEXT("RepairUnavailable")));
 	}
@@ -1228,18 +2221,32 @@ bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerCont
 		};
 	}
 
-	const FAeyerjiDefenseRepairOption* SelectedOption = RepairOptions.FindByPredicate([OptionId](const FAeyerjiDefenseRepairOption& Option)
+	const int32 RepairOptionCount = FMath::Min(RepairOptions.Num(), MaxDefenseRepairOptions);
+	const FAeyerjiDefenseRepairOption* SelectedOption = nullptr;
+	for (int32 OptionIndex = 0; OptionIndex < RepairOptionCount; ++OptionIndex)
 	{
-		return Option.OptionId == OptionId;
-	});
-	if (!SelectedOption)
+		const FAeyerjiDefenseRepairOption& Candidate = RepairOptions[OptionIndex];
+		if (Candidate.OptionId == OptionId)
+		{
+			SelectedOption = &Candidate;
+			break;
+		}
+	}
+	if (!SelectedOption
+		|| SelectedOption->OptionId.IsNone()
+		|| SelectedOption->GoldCost < 0
+		|| !FMath::IsFinite(SelectedOption->FlatHeal)
+		|| !FMath::IsFinite(SelectedOption->PercentHeal))
 	{
 		return Reject(FName(TEXT("RepairUnavailable")));
 	}
 
 	const float MaxHealth = GetSurvivalDefenseObjectiveMaxHealth();
 	const float CurrentHealth = GetSurvivalDefenseObjectiveHealth();
-	if (MaxHealth <= UE_SMALL_NUMBER || CurrentHealth >= MaxHealth - KINDA_SMALL_NUMBER)
+	if (!FMath::IsFinite(MaxHealth)
+		|| !FMath::IsFinite(CurrentHealth)
+		|| MaxHealth <= UE_SMALL_NUMBER
+		|| CurrentHealth >= MaxHealth - KINDA_SMALL_NUMBER)
 	{
 		return Reject(FName(TEXT("TreeAlreadyFull")));
 	}
@@ -1261,8 +2268,12 @@ bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerCont
 		return Reject(FName(TEXT("RepairUnavailable")));
 	}
 
-	const float HealAmount = FMath::Max(0.f, SelectedOption->FlatHeal) + (MaxHealth * FMath::Max(0.f, SelectedOption->PercentHeal));
-	if (HealAmount <= KINDA_SMALL_NUMBER)
+	const double HealAmount = FMath::Clamp(
+		static_cast<double>(FMath::Clamp(SelectedOption->FlatHeal, 0.f, MaxUpgradeMagnitude))
+			+ static_cast<double>(MaxHealth) * FMath::Clamp(SelectedOption->PercentHeal, 0.f, 1.f),
+		0.0,
+		static_cast<double>(MaxHealth));
+	if (!FMath::IsFinite(HealAmount) || HealAmount <= KINDA_SMALL_NUMBER)
 	{
 		return Reject(FName(TEXT("RepairUnavailable")));
 	}
@@ -1274,7 +2285,7 @@ bool AAeyerjiLevelDirector::TryRepairSurvivalDefenseObjective(AAeyerjiPlayerCont
 
 	ObjectiveASC->SetNumericAttributeBase(
 		UAeyerjiAttributeSet::GetHPAttribute(),
-		FMath::Clamp(CurrentHealth + HealAmount, 0.f, MaxHealth));
+		static_cast<float>(FMath::Clamp(static_cast<double>(CurrentHealth) + HealAmount, 0.0, static_cast<double>(MaxHealth))));
 
 	PublishSurvivalRoundState(CurrentSurvivalRoundPhase, FName(TEXT("DefenseObjectiveRepaired")));
 	return true;
@@ -1287,7 +2298,7 @@ int32 AAeyerjiLevelDirector::GetCurrentPlayerLevel() const
 		if (UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(PlayerPawn, /*LookForComponent*/ true))
 		{
 			const float Level = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetLevelAttribute());
-			return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Level));
+			return UAeyerjiDifficultySettings::FloatToGameplayLevel(Level);
 		}
 	}
 
@@ -1383,10 +2394,26 @@ void AAeyerjiLevelDirector::OpenBossGate()
 
 	SpawnBossLinkedTeleporter();
 
-	if (bEnableNativeBossSpawn)
+	// A configured boss class must remain playable when streamed/generated map content
+	// omits its tagged spawner. In that case the native registered-spawn path is the only
+	// authoritative path available, even when the data asset left the explicit opt-in off.
+	const bool bUseNativeBossPath = bEnableNativeBossSpawn
+		|| (!IsValid(BossSpawner) && *BossPawnClass);
+	if (bUseNativeBossPath)
 	{
 		if (bBossEncounterTriggered || bNativeBossSpawnIssued)
 		{
+			return;
+		}
+
+		if (!EnsureRuntimeBossSpawner())
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("LevelDirector::OpenBossGate could not create a runtime boss spawner (Director=%s BossPawnClass=%s BossMarker=%s BossTrigger=%s)."),
+				*GetNameSafe(this),
+				*GetNameSafe(BossPawnClass),
+				*GetNameSafe(BossSpawnMarker),
+				*GetNameSafe(BossTriggerActor));
 			return;
 		}
 
@@ -1446,11 +2473,19 @@ void AAeyerjiLevelDirector::OpenBossGate()
 
 void AAeyerjiLevelDirector::UpdateCheckpoint(const FTransform& NewCheckpoint)
 {
-	Checkpoint = NewCheckpoint;
+	if (HasAuthority() && !NewCheckpoint.ContainsNaN())
+	{
+		Checkpoint = NewCheckpoint;
+	}
 }
 
 void AAeyerjiLevelDirector::RespawnAtCheckpoint()
 {
+	if (!HasAuthority() || Checkpoint.ContainsNaN())
+	{
+		return;
+	}
+
 	if (APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0))
 	{
 		PlayerPawn->SetActorTransform(Checkpoint, false, nullptr, ETeleportType::TeleportPhysics);
@@ -1962,7 +2997,7 @@ void AAeyerjiLevelDirector::ResolveSurvivalDefenseObjective()
 	{
 		NativeObjective->OnObjectiveOutOfHealth.RemoveDynamic(this, &AAeyerjiLevelDirector::HandleSurvivalDefenseObjectiveOutOfHealth);
 		NativeObjective->OnObjectiveOutOfHealth.AddDynamic(this, &AAeyerjiLevelDirector::HandleSurvivalDefenseObjectiveOutOfHealth);
-		NativeObjective->ResetSurvivalUpgrades(); // ensure clean per-run
+		NativeObjective->ResetObjectiveForNewRun();
 		bSurvivalDefenseObjectiveDestroyed = NativeObjective->IsObjectiveDestroyed();
 	}
 	else
@@ -2221,7 +3256,7 @@ void AAeyerjiLevelDirector::StartSurvivalRound(const int32 RoundNumber)
 		return;
 	}
 
-	CurrentSurvivalRound = FMath::Max(1, RoundNumber);
+	CurrentSurvivalRound = FMath::Clamp(RoundNumber, 1, MaxSurvivalRoundNumber);
 	if (CurrentSurvivalRound <= 1)
 	{
 		LastSurvivalRoundClearRewardSpawnedRound = INDEX_NONE;
@@ -2229,11 +3264,13 @@ void AAeyerjiLevelDirector::StartSurvivalRound(const int32 RoundNumber)
 
 	CurrentSurvivalCycle = GetSurvivalCycleForRound(CurrentSurvivalRound);
 	const int32 RoundStep = FMath::Max(0, CurrentSurvivalRound - 1);
-	SurvivalEnemyLevelBonus =
-		(CurrentSurvivalCycle * FMath::Max(0, SurvivalMissionDefinition->EnemyLevelBonusPerCycle))
-		+ (RoundStep * FMath::Max(0, SurvivalMissionDefinition->EnemyLevelBonusPerRound));
-	SurvivalEnemyHealthMultiplier = FMath::Pow(FMath::Max(0.f, SurvivalMissionDefinition->EnemyHealthMultiplierPerRound), RoundStep);
-	SurvivalEnemyDamageMultiplier = FMath::Pow(FMath::Max(0.f, SurvivalMissionDefinition->EnemyDamageMultiplierPerRound), RoundStep);
+	SurvivalEnemyLevelBonus = ResolveSurvivalLevelBonus(
+		CurrentSurvivalCycle,
+		RoundStep,
+		SurvivalMissionDefinition->EnemyLevelBonusPerCycle,
+		SurvivalMissionDefinition->EnemyLevelBonusPerRound);
+	SurvivalEnemyHealthMultiplier = ResolveSurvivalGrowthMultiplier(SurvivalMissionDefinition->EnemyHealthMultiplierPerRound, RoundStep);
+	SurvivalEnemyDamageMultiplier = ResolveSurvivalGrowthMultiplier(SurvivalMissionDefinition->EnemyDamageMultiplierPerRound, RoundStep);
 	CurrentSurvivalRoundEnemyTotal = 0;
 	CurrentSurvivalRoundEnemiesKilled = 0;
 	CurrentSurvivalWaveIndex = INDEX_NONE;
@@ -2292,7 +3329,9 @@ void AAeyerjiLevelDirector::StartSurvivalRound(const int32 RoundNumber)
 	PublishSurvivalRoundState(EAeyerjiSurvivalRoundPhase::Preparing, StartMessageKey);
 	SurvivalRoundSpawner->LevelDirector = this;
 	SurvivalRoundSpawner->AggroSettings.bReissueAggroWhileActive = SurvivalMissionDefinition->bReissueAggroWhileActive;
-	SurvivalRoundSpawner->AggroSettings.ReissueAggroIntervalSeconds = FMath::Max(0.1f, SurvivalMissionDefinition->ReissueAggroIntervalSeconds);
+	SurvivalRoundSpawner->AggroSettings.ReissueAggroIntervalSeconds = FMath::IsFinite(SurvivalMissionDefinition->ReissueAggroIntervalSeconds)
+		? FMath::Clamp(SurvivalMissionDefinition->ReissueAggroIntervalSeconds, 0.1f, MaxDirectorDelaySeconds)
+		: 10.f;
 	ApplySurvivalDefenseObjectiveToSpawner(SurvivalRoundSpawner, /*bBossRound=*/false);
 	SurvivalRoundSpawner->ActivateEncounterWithRuntimeWaves(RuntimeWaves, PlayerPawn, PlayerController);
 	PublishSurvivalRoundState(EAeyerjiSurvivalRoundPhase::Spawning, NAME_None);
@@ -2339,6 +3378,10 @@ void AAeyerjiLevelDirector::RebuildAuthoredSurvivalRoundsCache() const
 			ImportedRows.Reserve(RoundTable->GetRowMap().Num());
 			for (const TPair<FName, uint8*>& Pair : RoundTable->GetRowMap())
 			{
+				if (ImportedRows.Num() >= MaxSurvivalAuthoredRounds * MaxSurvivalWavesPerRound * MaxSurvivalSetsPerWave)
+				{
+					break;
+				}
 				if (const FAeyerjiSurvivalRoundTableRow* Row = reinterpret_cast<const FAeyerjiSurvivalRoundTableRow*>(Pair.Value))
 				{
 					ImportedRows.Add({ Pair.Key, Row });
@@ -2363,7 +3406,12 @@ void AAeyerjiLevelDirector::RebuildAuthoredSurvivalRoundsCache() const
 			for (const FImportedSurvivalRoundRow& ImportedRow : ImportedRows)
 			{
 				const FAeyerjiSurvivalRoundTableRow& Row = *ImportedRow.Row;
-				if (Row.RoundNumber <= 0 || Row.WaveNumber <= 0 || Row.Count <= 0 || Row.EnemyClass.IsNull())
+				if (Row.RoundNumber <= 0
+					|| Row.RoundNumber > MaxSurvivalAuthoredRounds
+					|| Row.WaveNumber <= 0
+					|| Row.WaveNumber > MaxSurvivalWavesPerRound
+					|| Row.Count <= 0
+					|| Row.EnemyClass.IsNull())
 				{
 					continue;
 				}
@@ -2381,7 +3429,9 @@ void AAeyerjiLevelDirector::RebuildAuthoredSurvivalRoundsCache() const
 					RoundDefinition.DisplayLabel = Row.RoundDisplayLabel;
 				}
 				RoundDefinition.RoundType = Row.RoundType;
-				RoundDefinition.EnemyCountMultiplier = FMath::Max(0.f, Row.EnemyCountMultiplier);
+				RoundDefinition.EnemyCountMultiplier = FMath::IsFinite(Row.EnemyCountMultiplier)
+					? FMath::Clamp(Row.EnemyCountMultiplier, 0.f, MaxEnemyRuntimeMultiplier)
+					: 1.f;
 				RoundDefinition.RoundStartMessageKey = Row.RoundStartMessageKey.IsNone() ? FName(TEXT("RoundStart")) : Row.RoundStartMessageKey;
 				RoundDefinition.RoundClearMessageKey = Row.RoundClearMessageKey.IsNone() ? FName(TEXT("RoundClear")) : Row.RoundClearMessageKey;
 				RoundDefinition.BossIncomingMessageKey = Row.BossIncomingMessageKey.IsNone() ? FName(TEXT("BossIncoming")) : Row.BossIncomingMessageKey;
@@ -2401,12 +3451,20 @@ void AAeyerjiLevelDirector::RebuildAuthoredSurvivalRoundsCache() const
 				{
 					WaveDefinition.WaveLabel = Row.WaveLabel;
 				}
-				WaveDefinition.PostSpawnDelay = FMath::Max(0.f, Row.PostSpawnDelay);
+				WaveDefinition.PostSpawnDelay = FMath::IsFinite(Row.PostSpawnDelay)
+					? FMath::Clamp(Row.PostSpawnDelay, 0.f, MaxDirectorDelaySeconds)
+					: 0.f;
+				if (WaveDefinition.EnemySets.Num() >= MaxSurvivalSetsPerWave)
+				{
+					continue;
+				}
 
 				FEnemySetDef& EnemySet = WaveDefinition.EnemySets.AddDefaulted_GetRef();
 				EnemySet.EnemyClass = Row.EnemyClass;
-				EnemySet.Count = FMath::Max(0, Row.Count);
-				EnemySet.SpawnInterval = FMath::Max(0.f, Row.SpawnInterval);
+				EnemySet.Count = FMath::Clamp(Row.Count, 0, MaxSurvivalRoundPopulation);
+				EnemySet.SpawnInterval = FMath::IsFinite(Row.SpawnInterval)
+					? FMath::Clamp(Row.SpawnInterval, 0.f, MaxDirectorDelaySeconds)
+					: 0.f;
 				EnemySet.bIsElite = Row.bIsElite || Row.bIsMiniBoss || Row.bIsBoss;
 				EnemySet.bIsMiniBoss = Row.bIsMiniBoss;
 				EnemySet.bIsBoss = Row.bIsBoss;
@@ -2430,6 +3488,30 @@ void AAeyerjiLevelDirector::RebuildAuthoredSurvivalRoundsCache() const
 	}
 
 	CachedAuthoredSurvivalRounds = SurvivalMissionDefinition->BaseRounds;
+	CachedAuthoredSurvivalRounds.SetNum(
+		FMath::Min(CachedAuthoredSurvivalRounds.Num(), MaxSurvivalAuthoredRounds),
+		EAllowShrinking::No);
+	for (FAeyerjiSurvivalRoundDefinition& Round : CachedAuthoredSurvivalRounds)
+	{
+		Round.EnemyCountMultiplier = FMath::IsFinite(Round.EnemyCountMultiplier)
+			? FMath::Clamp(Round.EnemyCountMultiplier, 0.f, MaxEnemyRuntimeMultiplier)
+			: 1.f;
+		Round.Waves.SetNum(FMath::Min(Round.Waves.Num(), MaxSurvivalWavesPerRound), EAllowShrinking::No);
+		for (FWaveDefData& Wave : Round.Waves)
+		{
+			Wave.PostSpawnDelay = FMath::IsFinite(Wave.PostSpawnDelay)
+				? FMath::Clamp(Wave.PostSpawnDelay, 0.f, MaxDirectorDelaySeconds)
+				: 0.f;
+			Wave.EnemySets.SetNum(FMath::Min(Wave.EnemySets.Num(), MaxSurvivalSetsPerWave), EAllowShrinking::No);
+			for (FEnemySetDef& EnemySet : Wave.EnemySets)
+			{
+				EnemySet.Count = FMath::Clamp(EnemySet.Count, 0, MaxSurvivalRoundPopulation);
+				EnemySet.SpawnInterval = FMath::IsFinite(EnemySet.SpawnInterval)
+					? FMath::Clamp(EnemySet.SpawnInterval, 0.f, MaxDirectorDelaySeconds)
+					: 0.f;
+			}
+		}
+	}
 	bAuthoredSurvivalRoundsCacheValid = true;
 }
 
@@ -2539,7 +3621,10 @@ void AAeyerjiLevelDirector::StartNextSurvivalRound()
 	}
 
 	ClearSurvivalUpgradeOfferState();
-	StartSurvivalRound(FMath::Max(1, CurrentSurvivalRound + 1));
+	const int32 NextRound = CurrentSurvivalRound >= MaxSurvivalRoundNumber
+		? MaxSurvivalRoundNumber
+		: FMath::Max(1, CurrentSurvivalRound + 1);
+	StartSurvivalRound(NextRound);
 }
 
 void AAeyerjiLevelDirector::ScheduleNextSurvivalRound()
@@ -2551,7 +3636,10 @@ void AAeyerjiLevelDirector::ScheduleNextSurvivalRound()
 
 	if (UWorld* World = GetWorld())
 	{
-		const float Delay = SurvivalMissionDefinition ? FMath::Max(0.f, SurvivalMissionDefinition->InterRoundDelaySeconds) : 0.f;
+		const float RawDelay = SurvivalMissionDefinition ? SurvivalMissionDefinition->InterRoundDelaySeconds : 0.f;
+		const float Delay = FMath::IsFinite(RawDelay)
+			? FMath::Clamp(RawDelay, KINDA_SMALL_NUMBER, MaxDirectorDelaySeconds)
+			: KINDA_SMALL_NUMBER;
 		World->GetTimerManager().ClearTimer(SurvivalRoundDelayHandle);
 		World->GetTimerManager().SetTimer(SurvivalRoundDelayHandle, this, &AAeyerjiLevelDirector::StartNextSurvivalRound, Delay, false);
 	}
@@ -2607,11 +3695,14 @@ void AAeyerjiLevelDirector::StartSurvivalUpgradeOffer()
 		SurvivalUpgradeEligiblePlayers.Add(PlayerState);
 	}
 
-	const float TimeoutSeconds = FMath::Max(0.f, SurvivalMissionDefinition->UpgradeChoiceTimeoutSeconds);
+	const float TimeoutSeconds = FMath::IsFinite(SurvivalMissionDefinition->UpgradeChoiceTimeoutSeconds)
+		? FMath::Clamp(SurvivalMissionDefinition->UpgradeChoiceTimeoutSeconds, 0.f, MaxDirectorDelaySeconds)
+		: 0.f;
 	ActiveSurvivalUpgradeOffer = FAeyerjiSurvivalUpgradeOfferState();
 	ActiveSurvivalUpgradeOffer.bActive = true;
 	ActiveSurvivalUpgradeOffer.RoundNumber = CurrentSurvivalRound;
-	ActiveSurvivalUpgradeOffer.Revision = ++SurvivalUpgradeOfferRevision;
+	SurvivalUpgradeOfferRevision = SurvivalUpgradeOfferRevision == MAX_int32 ? 1 : SurvivalUpgradeOfferRevision + 1;
+	ActiveSurvivalUpgradeOffer.Revision = SurvivalUpgradeOfferRevision;
 	ActiveSurvivalUpgradeOffer.Options = OfferOptions;
 	ActiveSurvivalUpgradeOffer.TimeoutSeconds = TimeoutSeconds;
 	ActiveSurvivalUpgradeOffer.RequiredSelectionCount = EligiblePlayers.Num();
@@ -2692,10 +3783,19 @@ bool AAeyerjiLevelDirector::BuildSurvivalUpgradeOfferOptions(TArray<FAeyerjiSurv
 	}
 
 	TArray<FAeyerjiSurvivalUpgradeOption> Candidates;
-	for (const FAeyerjiSurvivalUpgradeOption& Option : SurvivalMissionDefinition->RoundUpgradeOptions)
+	const int32 SourceOptionCount = FMath::Min(SurvivalMissionDefinition->RoundUpgradeOptions.Num(), MaxUpgradeOptions);
+	for (int32 Index = 0; Index < SourceOptionCount; ++Index)
 	{
-		if (!Option.OptionId.IsNone() && Option.Weight > 0.f)
+		FAeyerjiSurvivalUpgradeOption Option = SurvivalMissionDefinition->RoundUpgradeOptions[Index];
+		if (!Option.OptionId.IsNone()
+			&& StaticEnum<EAeyerjiSurvivalUpgradeType>()->IsValidEnumValue(static_cast<int64>(Option.UpgradeType))
+			&& FMath::IsFinite(Option.Weight)
+			&& Option.Weight > 0.f
+			&& FMath::IsFinite(Option.BaseMagnitude)
+			&& Option.BaseMagnitude > 0.f)
 		{
+			Option.Weight = FMath::Min(Option.Weight, MaxUpgradeMagnitude);
+			Option.BaseMagnitude = FMath::Min(Option.BaseMagnitude, MaxUpgradeMagnitude);
 			Candidates.Add(Option);
 		}
 	}
@@ -2708,22 +3808,22 @@ bool AAeyerjiLevelDirector::BuildSurvivalUpgradeOfferOptions(TArray<FAeyerjiSurv
 	const int32 TargetCount = FMath::Clamp(SurvivalMissionDefinition->UpgradeChoicesPerOffer, 1, Candidates.Num());
 	while (OutOptions.Num() < TargetCount && !Candidates.IsEmpty())
 	{
-		float TotalWeight = 0.f;
+		double TotalWeight = 0.0;
 		for (const FAeyerjiSurvivalUpgradeOption& Candidate : Candidates)
 		{
-			TotalWeight += FMath::Max(0.f, Candidate.Weight);
+			TotalWeight += Candidate.Weight;
 		}
 
-		if (TotalWeight <= UE_SMALL_NUMBER)
+		if (!FMath::IsFinite(TotalWeight) || TotalWeight <= UE_SMALL_NUMBER)
 		{
 			break;
 		}
 
-		float Roll = FMath::FRandRange(0.f, TotalWeight);
+		double Roll = FMath::FRand() * TotalWeight;
 		int32 PickedIndex = 0;
 		for (int32 Index = 0; Index < Candidates.Num(); ++Index)
 		{
-			Roll -= FMath::Max(0.f, Candidates[Index].Weight);
+			Roll -= Candidates[Index].Weight;
 			if (Roll <= 0.f)
 			{
 				PickedIndex = Index;
@@ -2884,8 +3984,13 @@ bool AAeyerjiLevelDirector::SubmitSurvivalUpgradeChoice(AAeyerjiPlayerState* Pla
 
 void AAeyerjiLevelDirector::ApplySurvivalUpgradeOptionToPlayer(AAeyerjiPlayerState* PlayerState, const FAeyerjiSurvivalUpgradeOption& Option)
 {
+	if (!HasAuthority() || !FMath::IsFinite(Option.BaseMagnitude))
+	{
+		return;
+	}
+
 	const float Divisor = static_cast<float>(FMath::Max(1, ActiveSurvivalUpgradeOffer.RequiredSelectionCount));
-	const float ScaledMagnitude = Option.BaseMagnitude / Divisor;
+	const float ScaledMagnitude = FMath::Clamp(Option.BaseMagnitude / Divisor, 0.f, MaxUpgradeMagnitude);
 	if (ScaledMagnitude <= 0.f)
 	{
 		return;
@@ -2913,7 +4018,10 @@ void AAeyerjiLevelDirector::ApplySurvivalUpgradeOptionToPlayer(AAeyerjiPlayerSta
 		}
 		else
 		{
-			SurvivalDefenseObjectiveReflectFraction += ScaledMagnitude;
+			SurvivalDefenseObjectiveReflectFraction = FMath::Clamp(
+				SurvivalDefenseObjectiveReflectFraction + ScaledMagnitude,
+				0.f,
+				100.f);
 		}
 		break;
 	case EAeyerjiSurvivalUpgradeType::TreeRegen:
@@ -2929,7 +4037,10 @@ void AAeyerjiLevelDirector::ApplySurvivalUpgradeOptionToPlayer(AAeyerjiPlayerSta
 		}
 		else
 		{
-			SurvivalDefenseObjectiveRegenPerSecond += ScaledMagnitude;
+			SurvivalDefenseObjectiveRegenPerSecond = FMath::Clamp(
+				SurvivalDefenseObjectiveRegenPerSecond + ScaledMagnitude,
+				0.f,
+				MaxUpgradeMagnitude);
 			if (UWorld* World = GetWorld())
 			{
 				World->GetTimerManager().ClearTimer(SurvivalDefenseObjectiveRegenHandle);
@@ -2962,7 +4073,7 @@ void AAeyerjiLevelDirector::ApplySurvivalUpgradeOptionToPlayer(AAeyerjiPlayerSta
 void AAeyerjiLevelDirector::ApplySurvivalTreeMaxHealthUpgrade(const float DeltaHP)
 {
 	// Legacy path for non-native defense objectives. Prefer AAeyerjiSurvivalDefenseObjectiveActor::ApplyTreeMaxHealthUpgrade.
-	if (DeltaHP <= 0.f)
+	if (!HasAuthority() || !FMath::IsFinite(DeltaHP) || DeltaHP <= 0.f)
 	{
 		return;
 	}
@@ -2973,9 +4084,12 @@ void AAeyerjiLevelDirector::ApplySurvivalTreeMaxHealthUpgrade(const float DeltaH
 		return;
 	}
 
-	const float CurrentMax = ObjectiveASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
-	const float CurrentHP = ObjectiveASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
-	const float NewMax = FMath::Max(1.f, CurrentMax + DeltaHP);
+	const float RawCurrentMax = ObjectiveASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+	const float RawCurrentHP = ObjectiveASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
+	const float CurrentMax = FMath::IsFinite(RawCurrentMax) ? FMath::Max(0.f, RawCurrentMax) : 0.f;
+	const float CurrentHP = FMath::IsFinite(RawCurrentHP) ? FMath::Max(0.f, RawCurrentHP) : 0.f;
+	const double ResolvedMax = static_cast<double>(CurrentMax) + FMath::Min(DeltaHP, MaxUpgradeMagnitude);
+	const float NewMax = static_cast<float>(FMath::Clamp(ResolvedMax, 1.0, static_cast<double>(MaxUpgradeMagnitude)));
 	ObjectiveASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPMaxAttribute(), NewMax);
 	// Heal the delta on top of current (clamped to new max)
 	ObjectiveASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(), FMath::Clamp(CurrentHP + DeltaHP, 0.f, NewMax));
@@ -2992,7 +4106,7 @@ void AAeyerjiLevelDirector::TickSurvivalDefenseObjectiveRegen()
 	AAeyerjiSurvivalDefenseObjectiveActor* Objective = Cast<AAeyerjiSurvivalDefenseObjectiveActor>(SurvivalDefenseObjectiveActor.Get());
 	float RegenRate = Objective ? Objective->UpgradeRegenPerSecond : SurvivalDefenseObjectiveRegenPerSecond;
 
-	if (RegenRate <= 0.f)
+	if (!FMath::IsFinite(RegenRate) || RegenRate <= 0.f)
 	{
 		return;
 	}
@@ -3015,6 +4129,10 @@ void AAeyerjiLevelDirector::TickSurvivalDefenseObjectiveRegen()
 	{
 		const float CurrentHP = ObjectiveASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
 		const float MaxHP = ObjectiveASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+		if (!FMath::IsFinite(CurrentHP) || !FMath::IsFinite(MaxHP) || MaxHP <= 0.f)
+		{
+			return;
+		}
 		if (CurrentHP >= MaxHP - KINDA_SMALL_NUMBER)
 		{
 			return;
@@ -3038,6 +4156,7 @@ void AAeyerjiLevelDirector::HandleSurvivalDefenseObjectiveDamageTaken(
 
 	if (!HasAuthority()
 		|| VictimActor != SurvivalDefenseObjectiveActor.Get()
+		|| !FMath::IsFinite(DamageTaken)
 		|| DamageTaken <= 0.f)
 	{
 		return;
@@ -3053,7 +4172,7 @@ void AAeyerjiLevelDirector::HandleSurvivalDefenseObjectiveDamageTaken(
 		CurrentReflect = SurvivalDefenseObjectiveReflectFraction;
 	}
 
-	if (CurrentReflect <= 0.f)
+	if (!FMath::IsFinite(CurrentReflect) || CurrentReflect <= 0.f)
 	{
 		return;
 	}
@@ -3063,7 +4182,12 @@ void AAeyerjiLevelDirector::HandleSurvivalDefenseObjectiveDamageTaken(
 
 void AAeyerjiLevelDirector::ApplySurvivalDefenseObjectiveReflect(AActor* Attacker, const float DamageTaken, float ReflectFraction) const
 {
-	if (!IsValid(Attacker) || Attacker == SurvivalDefenseObjectiveActor.Get())
+	if (!HasAuthority()
+		|| !IsValid(Attacker)
+		|| Attacker->GetWorld() != GetWorld()
+		|| Attacker == SurvivalDefenseObjectiveActor.Get()
+		|| !FMath::IsFinite(DamageTaken)
+		|| !FMath::IsFinite(ReflectFraction))
 	{
 		return;
 	}
@@ -3075,7 +4199,11 @@ void AAeyerjiLevelDirector::ApplySurvivalDefenseObjectiveReflect(AActor* Attacke
 		return;
 	}
 
-	const float ReflectedDamage = DamageTaken * FMath::Max(0.f, ReflectFraction);
+	const double ResolvedDamage = static_cast<double>(FMath::Max(0.f, DamageTaken))
+		* FMath::Clamp(static_cast<double>(ReflectFraction), 0.0, 100.0);
+	const float ReflectedDamage = FMath::IsFinite(ResolvedDamage)
+		? static_cast<float>(FMath::Min(ResolvedDamage, static_cast<double>(MAX_flt)))
+		: 0.f;
 	if (ReflectedDamage <= KINDA_SMALL_NUMBER)
 	{
 		return;
@@ -3118,18 +4246,26 @@ void AAeyerjiLevelDirector::ClearSurvivalUpgradeOfferState()
 
 void AAeyerjiLevelDirector::StartSurvivalBossRound(const int32 RoundNumber)
 {
-	CurrentSurvivalRound = FMath::Max(1, RoundNumber);
+	if (!HasAuthority() || !bRunActive)
+	{
+		return;
+	}
+
+	CurrentSurvivalRound = FMath::Clamp(RoundNumber, 1, MaxSurvivalRoundNumber);
 	CurrentSurvivalCycle = GetSurvivalCycleForRound(CurrentSurvivalRound);
 	const int32 RoundStep = FMath::Max(0, CurrentSurvivalRound - 1);
 	SurvivalEnemyLevelBonus = SurvivalMissionDefinition
-		? (CurrentSurvivalCycle * FMath::Max(0, SurvivalMissionDefinition->EnemyLevelBonusPerCycle))
-			+ (RoundStep * FMath::Max(0, SurvivalMissionDefinition->EnemyLevelBonusPerRound))
+		? ResolveSurvivalLevelBonus(
+			CurrentSurvivalCycle,
+			RoundStep,
+			SurvivalMissionDefinition->EnemyLevelBonusPerCycle,
+			SurvivalMissionDefinition->EnemyLevelBonusPerRound)
 		: 0;
 	SurvivalEnemyHealthMultiplier = SurvivalMissionDefinition
-		? FMath::Pow(FMath::Max(0.f, SurvivalMissionDefinition->EnemyHealthMultiplierPerRound), RoundStep)
+		? ResolveSurvivalGrowthMultiplier(SurvivalMissionDefinition->EnemyHealthMultiplierPerRound, RoundStep)
 		: 1.f;
 	SurvivalEnemyDamageMultiplier = SurvivalMissionDefinition
-		? FMath::Pow(FMath::Max(0.f, SurvivalMissionDefinition->EnemyDamageMultiplierPerRound), RoundStep)
+		? ResolveSurvivalGrowthMultiplier(SurvivalMissionDefinition->EnemyDamageMultiplierPerRound, RoundStep)
 		: 1.f;
 	bSurvivalBossRoundActive = true;
 	bSurvivalBossDefeatHandled = false;
@@ -3175,7 +4311,9 @@ void AAeyerjiLevelDirector::PublishSurvivalRoundState(const EAeyerjiSurvivalRoun
 	{
 		TArray<FAeyerjiSurvivalRoundDefinition> AuthoredRounds;
 		BuildAuthoredSurvivalRounds(AuthoredRounds);
-		const int32 BossCadence = SurvivalMissionDefinition ? FMath::Max(0, SurvivalMissionDefinition->BossEveryNRounds) : 0;
+		const int32 BossCadence = SurvivalMissionDefinition
+			? FMath::Clamp(SurvivalMissionDefinition->BossEveryNRounds, 0, MaxSurvivalRoundNumber)
+			: 0;
 		const bool bEndlessMission = SurvivalMissionDefinition ? SurvivalMissionDefinition->bLoopAfterBoss : false;
 		const bool bBossRound = bSurvivalBossRoundActive || bCurrentSurvivalWaveContainsBoss || IsSurvivalBossRound(CurrentSurvivalRound);
 		const int32 PatternCount = BossCadence > 0
@@ -3250,9 +4388,15 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 	OutEnemyCount = 0;
 
 	const float CycleMultiplier = SurvivalMissionDefinition
-		? FMath::Pow(FMath::Max(0.f, SurvivalMissionDefinition->EnemyCountScalePerCycle), FMath::Max(0, CycleNumber))
+		? ResolveSurvivalGrowthMultiplier(SurvivalMissionDefinition->EnemyCountScalePerCycle, CycleNumber)
 		: 1.f;
-	const float CountMultiplier = FMath::Max(0.f, RoundDefinition.EnemyCountMultiplier) * CycleMultiplier;
+	const double SafeRoundMultiplier = FMath::IsFinite(RoundDefinition.EnemyCountMultiplier)
+		? FMath::Clamp(static_cast<double>(RoundDefinition.EnemyCountMultiplier), 0.0, static_cast<double>(MaxEnemyRuntimeMultiplier))
+		: 1.0;
+	const float CountMultiplier = static_cast<float>(FMath::Clamp(
+		SafeRoundMultiplier * static_cast<double>(CycleMultiplier),
+		0.0,
+		static_cast<double>(MaxEnemyRuntimeMultiplier)));
 
 	const int32 BaseRoundCount = AuthoredRounds.Num();
 	const bool bUseBlendedRoster = SurvivalMissionDefinition
@@ -3262,22 +4406,24 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 	const bool bUseBlendedWaveRoster = SurvivalMissionDefinition
 		&& SurvivalMissionDefinition->bBlendPreviousWaveEnemySets
 		&& RoundDefinition.Waves.Num() > 1;
-	const float CarryWeight = SurvivalMissionDefinition
+	const float CarryWeight = SurvivalMissionDefinition && FMath::IsFinite(SurvivalMissionDefinition->PreviousRoundCarryWeight)
 		? FMath::Clamp(SurvivalMissionDefinition->PreviousRoundCarryWeight, 0.f, 1.f)
 		: 0.f;
 	const int32 MaxLookback = bUseBlendedRoster
-		? FMath::Clamp(SurvivalMissionDefinition->RoundBlendLookback, 1, AuthoredRoundIndex)
+		? FMath::Clamp(SurvivalMissionDefinition->RoundBlendLookback, 1, FMath::Min(AuthoredRoundIndex, MaxSurvivalAuthoredRounds - 1))
 		: 0;
 	const int32 SourceCount = bUseBlendedRoster && CarryWeight > 0.f
 		? MaxLookback + 1
 		: 1;
-	int32 MaxWaveCount = RoundDefinition.Waves.Num();
+	int32 MaxWaveCount = FMath::Min(RoundDefinition.Waves.Num(), MaxSurvivalWavesPerRound);
 	for (int32 Offset = 1; Offset < SourceCount; ++Offset)
 	{
 		const int32 SourceRoundIndex = AuthoredRoundIndex - Offset;
 		if (AuthoredRounds.IsValidIndex(SourceRoundIndex))
 		{
-			MaxWaveCount = FMath::Max(MaxWaveCount, AuthoredRounds[SourceRoundIndex].Waves.Num());
+			MaxWaveCount = FMath::Min(
+				FMath::Max(MaxWaveCount, AuthoredRounds[SourceRoundIndex].Waves.Num()),
+				MaxSurvivalWavesPerRound);
 		}
 	}
 
@@ -3314,8 +4460,8 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 	struct FWeightedSurvivalEnemySet
 	{
 		const FEnemySetDef* SetData = nullptr;
-		float RawCount = 0.f;
-		float Remainder = 0.f;
+		double RawCount = 0.0;
+		double Remainder = 0.0;
 		int32 SourceOffset = 0;
 		int32 AllocatedCount = 0;
 	};
@@ -3323,9 +4469,11 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 	auto AppendEnemySet = [&](const FEnemySetDef& SetData, const int32 SpawnCount, FWaveDefinition& RuntimeWave)
 	{
 		TSubclassOf<APawn> EnemyClass = SetData.EnemyClass.Get();
-		if (!EnemyClass || SpawnCount <= 0)
+		const int32 RemainingRoundBudget = FMath::Max(0, MaxSurvivalRoundPopulation - OutEnemyCount);
+		const int32 SafeSpawnCount = FMath::Min(FMath::Max(0, SpawnCount), RemainingRoundBudget);
+		if (!EnemyClass || SafeSpawnCount <= 0 || RuntimeWave.EnemySets.Num() >= MaxSurvivalSetsPerWave)
 		{
-			if (!EnemyClass && SpawnCount > 0)
+			if (!EnemyClass && SafeSpawnCount > 0)
 			{
 				UE_LOG(LogTemp, Warning, TEXT("LevelDirector %s skipped unloaded survival enemy class %s. Preload should complete before round build."),
 					*GetNameSafe(this),
@@ -3336,8 +4484,10 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 
 		FEnemySet RuntimeSet;
 		RuntimeSet.EnemyClass = EnemyClass;
-		RuntimeSet.Count = SpawnCount;
-		RuntimeSet.SpawnInterval = SetData.SpawnInterval;
+		RuntimeSet.Count = SafeSpawnCount;
+		RuntimeSet.SpawnInterval = FMath::IsFinite(SetData.SpawnInterval)
+			? FMath::Clamp(SetData.SpawnInterval, 0.f, MaxDirectorDelaySeconds)
+			: 0.f;
 		RuntimeSet.bIsElite = SetData.bIsElite;
 		RuntimeSet.bIsMiniBoss = SetData.bIsMiniBoss;
 		RuntimeSet.bIsBoss = SetData.bIsBoss;
@@ -3356,7 +4506,7 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 
 		if (RuntimeSet.Count > 0)
 		{
-			OutEnemyCount += RuntimeSet.Count;
+			OutEnemyCount = FMath::Min(MaxSurvivalRoundPopulation, OutEnemyCount + RuntimeSet.Count);
 			RuntimeWave.EnemySets.Add(RuntimeSet);
 		}
 	};
@@ -3367,16 +4517,23 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 		if (RoundDefinition.Waves.IsValidIndex(WaveIndex))
 		{
 			RuntimeWave.WaveLabel = RoundDefinition.Waves[WaveIndex].WaveLabel;
-			RuntimeWave.PostSpawnDelay = RoundDefinition.Waves[WaveIndex].PostSpawnDelay;
+			RuntimeWave.PostSpawnDelay = FMath::IsFinite(RoundDefinition.Waves[WaveIndex].PostSpawnDelay)
+				? FMath::Clamp(RoundDefinition.Waves[WaveIndex].PostSpawnDelay, 0.f, MaxDirectorDelaySeconds)
+				: 0.f;
 		}
 
 		TArray<FWeightedSurvivalEnemySet> WeightedSets;
-		float RawWaveTotal = 0.f;
+		double RawWaveTotal = 0.0;
 
 		auto AddWeightedEnemySets = [&](const FWaveDefData& WaveData, const float WeightedCountMultiplier, const int32 SourceOffset)
 		{
 			for (const FEnemySetDef& SetData : WaveData.EnemySets)
 			{
+				if (WeightedSets.Num() >= MaxSurvivalSetsPerWave)
+				{
+					break;
+				}
+
 				if (SourceOffset > 0
 					&& SurvivalMissionDefinition->bExcludeBossSetsFromRoundBlend
 					&& SetData.bIsBoss)
@@ -3384,8 +4541,11 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 					continue;
 				}
 
-				const float RawCount = static_cast<float>(SetData.Count) * WeightedCountMultiplier;
-				if (RawCount <= 0.f)
+				const double SafeWeightedMultiplier = FMath::IsFinite(WeightedCountMultiplier)
+					? FMath::Clamp(static_cast<double>(WeightedCountMultiplier), 0.0, static_cast<double>(MaxEnemyRuntimeMultiplier))
+					: 0.0;
+				const double RawCount = static_cast<double>(FMath::Clamp(SetData.Count, 0, MaxSurvivalRoundPopulation)) * SafeWeightedMultiplier;
+				if (!FMath::IsFinite(RawCount) || RawCount <= 0.0)
 				{
 					continue;
 				}
@@ -3393,17 +4553,17 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 				FWeightedSurvivalEnemySet& WeightedSet = WeightedSets.AddDefaulted_GetRef();
 				WeightedSet.SetData = &SetData;
 				WeightedSet.RawCount = RawCount;
-				WeightedSet.Remainder = FMath::Frac(RawCount);
 				WeightedSet.SourceOffset = SourceOffset;
-				WeightedSet.AllocatedCount = FMath::FloorToInt(RawCount);
-				RawWaveTotal += RawCount;
+				RawWaveTotal = FMath::Min(
+					RawWaveTotal + RawCount,
+					static_cast<double>(MaxSurvivalRoundPopulation) * MaxSurvivalSetsPerWave);
 			}
 		};
 
 		if (bUseBlendedWaveRoster)
 		{
-			const int32 WaveLookback = CarryWeight > 0.f
-				? FMath::Clamp(SurvivalMissionDefinition->RoundBlendLookback, 1, WaveIndex)
+			const int32 WaveLookback = CarryWeight > 0.f && WaveIndex > 0
+				? FMath::Clamp(SurvivalMissionDefinition->RoundBlendLookback, 1, FMath::Min(WaveIndex, MaxSurvivalWavesPerRound - 1))
 				: 0;
 			const int32 WaveSourceCount = WaveLookback + 1;
 			for (int32 Offset = 0; Offset < WaveSourceCount; ++Offset)
@@ -3457,23 +4617,37 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 			}
 		}
 
-		int32 DesiredWaveTotal = FMath::Max(0, FMath::RoundToInt(RawWaveTotal));
+		const int32 RemainingRoundBudget = FMath::Max(0, MaxSurvivalRoundPopulation - OutEnemyCount);
+		const double ClampedRawWaveTotal = FMath::Clamp(RawWaveTotal, 0.0, static_cast<double>(RemainingRoundBudget));
+		int32 DesiredWaveTotal = static_cast<int32>(FMath::RoundToDouble(ClampedRawWaveTotal));
 		int32 AllocatedWaveTotal = 0;
+		const double AllocationScale = RawWaveTotal > static_cast<double>(DesiredWaveTotal) && RawWaveTotal > 0.0
+			? static_cast<double>(DesiredWaveTotal) / RawWaveTotal
+			: 1.0;
 		for (FWeightedSurvivalEnemySet& WeightedSet : WeightedSets)
 		{
+			const double ScaledCount = FMath::Clamp(
+				WeightedSet.RawCount * AllocationScale,
+				0.0,
+				static_cast<double>(RemainingRoundBudget));
+			WeightedSet.AllocatedCount = static_cast<int32>(FMath::FloorToDouble(ScaledCount));
+			WeightedSet.Remainder = FMath::Frac(ScaledCount);
 			if (WeightedSet.SourceOffset == 0
 				&& SurvivalMissionDefinition
 				&& SurvivalMissionDefinition->bGuaranteeCurrentRoundBlendEntries
-				&& WeightedSet.RawCount > 0.f
-				&& WeightedSet.AllocatedCount <= 0)
+				&& WeightedSet.RawCount > 0.0
+				&& WeightedSet.AllocatedCount <= 0
+				&& AllocatedWaveTotal < RemainingRoundBudget)
 			{
 				WeightedSet.AllocatedCount = 1;
 			}
 
+			const int32 RemainingAllocationBudget = FMath::Max(0, RemainingRoundBudget - AllocatedWaveTotal);
+			WeightedSet.AllocatedCount = FMath::Min(WeightedSet.AllocatedCount, RemainingAllocationBudget);
 			AllocatedWaveTotal += WeightedSet.AllocatedCount;
 		}
 
-		DesiredWaveTotal = FMath::Max(DesiredWaveTotal, AllocatedWaveTotal);
+		DesiredWaveTotal = FMath::Min(RemainingRoundBudget, FMath::Max(DesiredWaveTotal, AllocatedWaveTotal));
 		WeightedSets.Sort([](const FWeightedSurvivalEnemySet& A, const FWeightedSurvivalEnemySet& B)
 		{
 			if (!FMath::IsNearlyEqual(A.Remainder, B.Remainder))
@@ -3498,6 +4672,11 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 
 		for (const FWeightedSurvivalEnemySet& WeightedSet : WeightedSets)
 		{
+			if (OutEnemyCount >= MaxSurvivalRoundPopulation || RuntimeWave.EnemySets.Num() >= MaxSurvivalSetsPerWave)
+			{
+				break;
+			}
+
 			if (WeightedSet.SetData)
 			{
 				AppendEnemySet(*WeightedSet.SetData, WeightedSet.AllocatedCount, RuntimeWave);
@@ -3508,8 +4687,8 @@ bool AAeyerjiLevelDirector::BuildRuntimeSurvivalWaves(const FAeyerjiSurvivalRoun
 		{
 			if (bUseBlendedRoster || bUseBlendedWaveRoster)
 			{
-				const int32 EffectiveBlendLookback = bUseBlendedWaveRoster && CarryWeight > 0.f
-					? FMath::Clamp(SurvivalMissionDefinition->RoundBlendLookback, 1, WaveIndex)
+				const int32 EffectiveBlendLookback = bUseBlendedWaveRoster && CarryWeight > 0.f && WaveIndex > 0
+					? FMath::Clamp(SurvivalMissionDefinition->RoundBlendLookback, 1, FMath::Min(WaveIndex, MaxSurvivalWavesPerRound - 1))
 					: MaxLookback;
 				UE_LOG(LogTemp, Display, TEXT("SurvivalBlend Director=%s Mode=%s Round=%d Pattern=%d Wave=%d RawTotal=%.2f RuntimeSets=%d RuntimeEnemies=%d Carry=%.2f Lookback=%d."),
 					*GetNameSafe(this),
@@ -3535,7 +4714,13 @@ int32 AAeyerjiLevelDirector::CountRuntimeWaveEnemies(const FWaveDefinition& Wave
 	int32 EnemyTotal = 0;
 	for (const FEnemySet& EnemySet : WaveDefinition.EnemySets)
 	{
-		EnemyTotal += FMath::Max(0, EnemySet.Count);
+		EnemyTotal = FMath::Min(
+			MaxSurvivalRoundPopulation,
+			EnemyTotal + FMath::Min(FMath::Max(0, EnemySet.Count), MaxSurvivalRoundPopulation - EnemyTotal));
+		if (EnemyTotal >= MaxSurvivalRoundPopulation)
+		{
+			break;
+		}
 	}
 
 	return EnemyTotal;
@@ -3546,14 +4731,18 @@ int32 AAeyerjiLevelDirector::GetSurvivalCycleForRound(const int32 RoundNumber) c
 	TArray<FAeyerjiSurvivalRoundDefinition> AuthoredRounds;
 	BuildAuthoredSurvivalRounds(AuthoredRounds);
 	const int32 AuthoredRoundCount = AuthoredRounds.Num();
-	const int32 BossCadence = SurvivalMissionDefinition ? SurvivalMissionDefinition->BossEveryNRounds : 0;
+	const int32 BossCadence = SurvivalMissionDefinition
+		? FMath::Clamp(SurvivalMissionDefinition->BossEveryNRounds, 0, MaxSurvivalRoundNumber)
+		: 0;
 	const int32 CycleLength = BossCadence > 0 ? BossCadence : FMath::Max(1, AuthoredRoundCount);
 	return FMath::Max(0, (FMath::Max(1, RoundNumber) - 1) / CycleLength);
 }
 
 bool AAeyerjiLevelDirector::IsSurvivalBossRound(const int32 RoundNumber) const
 {
-	const int32 BossCadence = SurvivalMissionDefinition ? SurvivalMissionDefinition->BossEveryNRounds : 0;
+	const int32 BossCadence = SurvivalMissionDefinition
+		? FMath::Clamp(SurvivalMissionDefinition->BossEveryNRounds, 0, MaxSurvivalRoundNumber)
+		: 0;
 	return BossCadence > 0 && FMath::Max(1, RoundNumber) % BossCadence == 0;
 }
 
@@ -3594,12 +4783,9 @@ bool AAeyerjiLevelDirector::HandleSurvivalBossDefeated()
 
 APawn* AAeyerjiLevelDirector::SpawnBossEncounter_Implementation(AAeyerjiEncounterDirector* EncounterDirector)
 {
-	// Blueprint is expected to drive boss spawning. Set bEnableNativeBossSpawn=true if you want this native fallback to run.
-	if (!bEnableNativeBossSpawn)
-	{
-		return nullptr;
-	}
-
+	// OpenBossGate owns the policy decision between authored and native spawning. Keeping
+	// this implementation executable also lets an explicit Blueprint call use the same
+	// registered, server-authoritative spawn path.
 	if (!HasAuthority() || !IsValid(BossSpawner) || !*BossPawnClass)
 	{
 		return nullptr;
@@ -3647,6 +4833,74 @@ APawn* AAeyerjiLevelDirector::SpawnBossEncounter_Implementation(AAeyerjiEncounte
 	return SpawnedBoss;
 }
 
+bool AAeyerjiLevelDirector::EnsureRuntimeBossSpawner()
+{
+	if (!HasAuthority())
+	{
+		return false;
+	}
+
+	if (IsValid(BossSpawner))
+	{
+		return true;
+	}
+
+	if (!*BossPawnClass)
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	FTransform SpawnTransform = GetActorTransform();
+	if (BossSpawnMarker)
+	{
+		SpawnTransform = BossSpawnMarker->GetActorTransform();
+	}
+	else
+	{
+		FTransform ArenaTransform;
+		if (GetBossTeleporterEndpointBTransform(ArenaTransform))
+		{
+			SpawnTransform = ArenaTransform;
+		}
+		else if (BossTriggerActor)
+		{
+			SpawnTransform = BossTriggerActor->GetActorTransform();
+		}
+	}
+
+	if (SpawnTransform.ContainsNaN())
+	{
+		return false;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	BossSpawner = World->SpawnActor<AAeyerjiSpawnerGroup>(
+		AAeyerjiSpawnerGroup::StaticClass(),
+		SpawnTransform,
+		SpawnParams);
+	if (!IsValid(BossSpawner))
+	{
+		return false;
+	}
+
+	BossSpawner->LevelDirector = this;
+	BindSpawner(BossSpawner);
+	UE_LOG(LogTemp, Display,
+		TEXT("LevelDirector %s created runtime boss spawner %s at %s because the authored boss spawner was missing."),
+		*GetNameSafe(this),
+		*GetNameSafe(BossSpawner),
+		*SpawnTransform.GetLocation().ToCompactString());
+	return true;
+}
+
 void AAeyerjiLevelDirector::SetBossSpawnMarker(AActor* NewMarker)
 {
 	BossSpawnMarker = NewMarker;
@@ -3683,10 +4937,18 @@ AAeyerjiLinkedTeleporter* AAeyerjiLevelDirector::SpawnBossLinkedTeleporter()
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = this;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	const FTransform EndpointATransform = GetBossTeleporterEndpointATransform();
+	if (EndpointATransform.ContainsNaN())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("LevelDirector::SpawnBossLinkedTeleporter rejected a non-finite endpoint A transform (Director=%s)."),
+			*GetNameSafe(this));
+		return nullptr;
+	}
 
 	AAeyerjiLinkedTeleporter* SpawnedTeleporter = World->SpawnActor<AAeyerjiLinkedTeleporter>(
 		BossLinkedTeleporterClass,
-		GetBossTeleporterEndpointATransform(),
+		EndpointATransform,
 		SpawnParams);
 	if (!SpawnedTeleporter)
 	{
@@ -3698,7 +4960,7 @@ AAeyerjiLinkedTeleporter* AAeyerjiLevelDirector::SpawnBossLinkedTeleporter()
 	}
 
 	FTransform EndpointBTransform;
-	if (GetBossTeleporterEndpointBTransform(EndpointBTransform))
+	if (GetBossTeleporterEndpointBTransform(EndpointBTransform) && !EndpointBTransform.ContainsNaN())
 	{
 		SpawnedTeleporter->SetEndpointBWorldTransform(EndpointBTransform);
 	}
@@ -3826,7 +5088,7 @@ FTransform AAeyerjiLevelDirector::GetBossTeleporterEndpointATransform() const
 {
 	if (bUseBossTeleporterEndpointATransform)
 	{
-		return BossTeleporterEndpointATransform;
+		return BossTeleporterEndpointATransform.ContainsNaN() ? GetActorTransform() : BossTeleporterEndpointATransform;
 	}
 
 	if (BossTeleporterEndpointA)
@@ -3856,6 +5118,10 @@ bool AAeyerjiLevelDirector::GetBossTeleporterEndpointBTransform(FTransform& OutT
 {
 	if (bUseBossTeleporterEndpointBTransform)
 	{
+		if (BossTeleporterEndpointBTransform.ContainsNaN())
+		{
+			return false;
+		}
 		OutTransform = BossTeleporterEndpointBTransform;
 		return true;
 	}
@@ -3863,13 +5129,13 @@ bool AAeyerjiLevelDirector::GetBossTeleporterEndpointBTransform(FTransform& OutT
 	if (BossTeleporterEndpointB)
 	{
 		OutTransform = BossTeleporterEndpointB->GetActorTransform();
-		return true;
+		return !OutTransform.ContainsNaN();
 	}
 
 	if (AActor* TaggedEndpointB = FindActorByTag(BossTeleporterEndpointBTag))
 	{
 		OutTransform = TaggedEndpointB->GetActorTransform();
-		return true;
+		return !OutTransform.ContainsNaN();
 	}
 
 	return false;

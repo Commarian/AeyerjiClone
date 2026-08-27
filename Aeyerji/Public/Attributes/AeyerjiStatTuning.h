@@ -40,16 +40,24 @@ struct FAeyerjiArmorMitigationTuning
 USTRUCT(BlueprintType)
 struct FAeyerjiCombatLimitsTuning
 {
-    GENERATED_BODY()
+	GENERATED_BODY()
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxCritChance = 1.f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxCriticalDamageMultiplier = 5.f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxArmorPenetration = 0.75f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxLifeSteal = 0.25f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxCritChance = 1.f;
+	/** Maximum chance to dodge a dodgable hit. This stays below 100% so valid combat hits can never become impossible. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat", meta=(ClampMin="0.0", ClampMax="0.95", UIMin="0.0", UIMax="0.95")) float MaxDodgeChance = 0.75f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxCriticalDamageMultiplier = 5.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxArmorPenetration = 0.75f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxLifeSteal = 0.25f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float MaxStaggerResistance = 0.90f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float StaggerDuration = 0.35f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float PoiseRecoveryDelay = 1.5f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float PoiseRecoveryPerSecond = 35.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float PoiseRecoveryDelay = 1.5f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Combat") float PoiseRecoveryPerSecond = 35.f;
+
+	/** Resolves an editor-configured dodge cap while preserving a non-zero chance for combat hits to connect. */
+	float GetSafeMaxDodgeChance() const
+	{
+		return FMath::Clamp(FMath::IsFinite(MaxDodgeChance) ? MaxDodgeChance : 0.75f, 0.f, 0.95f);
+	}
 };
 
 /** Flat data object with multipliers: keep numbers in one place for easy tuning. */

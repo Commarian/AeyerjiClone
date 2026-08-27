@@ -6,7 +6,9 @@
 #include "AeyerjiCharacter.h"
 #include "AeyerjiGameplayTags.h"
 #include "Attributes/AttributeSet_Ranges.h"
+#include "Engine/World.h"
 #include "GAS/GE_AeyerjiAbilityCooldown.h"
+#include "TimerManager.h"
 
 namespace BlinkTags
 {
@@ -68,7 +70,8 @@ namespace
 					return true;
 				}
 
-				if (Data->GetScriptStruct() == FGameplayAbilityTargetData_LocationInfo::StaticStruct())
+				const UScriptStruct* TargetDataStruct = Data->GetScriptStruct();
+				if (TargetDataStruct && TargetDataStruct->IsChildOf(FGameplayAbilityTargetData_LocationInfo::StaticStruct()))
 				{
 					const FGameplayAbilityTargetData_LocationInfo* LocationData = static_cast<const FGameplayAbilityTargetData_LocationInfo*>(Data);
 					OutTargetLocation = LocationData->GetEndPoint();
@@ -126,7 +129,7 @@ float UGABlink::GetMaxBlinkRange(const UAbilitySystemComponent* ASC) const
 		}
 	}
 
-	return FMath::Max(0.f, Range);
+	return FMath::IsFinite(Range) ? FMath::Max(0.f, Range) : 0.f;
 }
 
 void UGABlink::ApplyCooldown(const FGameplayAbilitySpecHandle Handle,
@@ -178,16 +181,27 @@ void UGABlink::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 	}
 
 	AAeyerjiCharacter* Avatar = Cast<AAeyerjiCharacter>(ActorInfo->AvatarActor.Get());
-	if (!Avatar)
+	if (!Avatar || !Avatar->HasAuthority())
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
 		return;
 	}
 
 	const float MaxRange = GetMaxBlinkRange(ActorInfo->AbilitySystemComponent.Get());
+	if (MaxRange <= KINDA_SMALL_NUMBER)
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+
 	const FVector StartLocation = Avatar->GetActorLocation();
 	FVector TargetLocation = StartLocation + Avatar->GetActorForwardVector() * MaxRange;
 	ResolveBlinkTargetLocation(ActorInfo, TriggerEventData, TargetLocation);
+	if (StartLocation.ContainsNaN() || TargetLocation.ContainsNaN())
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
 
 	FVector TravelVector = TargetLocation - StartLocation;
 	TravelVector.Z = 0.f;
@@ -202,6 +216,85 @@ void UGABlink::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 	const FVector DesiredLocation = StartLocation + BlinkDirection * BlinkDistance;
 	const FRotator DesiredRotation = BlinkDirection.IsNearlyZero() ? Avatar->GetActorRotation() : BlinkDirection.Rotation();
 
+	FAeyerjiAbilityResolvedConfig Config;
+	if (GetAbilityResolvedConfig(
+			ActorInfo->AbilitySystemComponent.Get(),
+			ResolveAbilityRank(Handle, ActorInfo),
+			Config))
+	{
+		const float ImpactDelay = CalculateAbilityImpactDelay(Config);
+		BeginAbilityCastPresentation(*ActorInfo, Config, ImpactDelay);
+		if (ImpactDelay > KINDA_SMALL_NUMBER)
+		{
+			if (UWorld* World = Avatar->GetWorld())
+			{
+				FTimerDelegate ImpactDelegate;
+				ImpactDelegate.BindWeakLambda(
+					this,
+					[this, Handle, ActivationInfo, DesiredLocation, DesiredRotation]()
+					{
+						ExecuteBlinkImpact(
+							Handle,
+							GetCurrentActorInfo(),
+							ActivationInfo,
+							DesiredLocation,
+							DesiredRotation);
+					});
+				World->GetTimerManager().SetTimer(
+					BlinkImpactTimerHandle,
+					ImpactDelegate,
+					ImpactDelay,
+					false);
+				return;
+			}
+		}
+	}
+
+	ExecuteBlinkImpact(Handle, ActorInfo, ActivationInfo, DesiredLocation, DesiredRotation);
+}
+
+void UGABlink::EndAbility(
+	const FGameplayAbilitySpecHandle Handle,
+	const FGameplayAbilityActorInfo* ActorInfo,
+	const FGameplayAbilityActivationInfo ActivationInfo,
+	const bool bReplicateEndAbility,
+	const bool bWasCancelled)
+{
+	if (ActorInfo && ActorInfo->AvatarActor.IsValid())
+	{
+		if (UWorld* World = ActorInfo->AvatarActor->GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(BlinkImpactTimerHandle);
+		}
+	}
+
+	Super::EndAbility(Handle, ActorInfo, ActivationInfo, bReplicateEndAbility, bWasCancelled);
+}
+
+void UGABlink::ExecuteBlinkImpact(
+	const FGameplayAbilitySpecHandle Handle,
+	const FGameplayAbilityActorInfo* ActorInfo,
+	const FGameplayAbilityActivationInfo ActivationInfo,
+	const FVector DesiredLocation,
+	const FRotator DesiredRotation)
+{
+	if (!IsActive())
+	{
+		return;
+	}
+	if (!ActorInfo || !ActorInfo->AvatarActor.IsValid() || IsOwnerDead(ActorInfo))
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+
+	AAeyerjiCharacter* Avatar = Cast<AAeyerjiCharacter>(ActorInfo->AvatarActor.Get());
+	if (!Avatar || !Avatar->HasAuthority())
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+
 	if (!CommitAbility(Handle, ActorInfo, ActivationInfo))
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
@@ -213,7 +306,7 @@ void UGABlink::ActivateAbility(const FGameplayAbilitySpecHandle Handle,
 		ASC->ExecuteGameplayCue(BlinkOutCue);
 	}
 
-	FVector FinalLocation = StartLocation;
+	FVector FinalLocation = Avatar->GetActorLocation();
 	if (!TeleportCharacterSafely(Avatar, DesiredLocation, DesiredRotation, 250.f, 4.f, FinalLocation))
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);

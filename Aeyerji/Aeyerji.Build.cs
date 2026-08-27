@@ -11,5 +11,8 @@ public class Aeyerji : ModuleRules
 
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "Niagara", "EnhancedInput", "GameplayAbilities", "GameplayTags", "GameplayTasks", "StateTreeModule", "GameplayStateTreeModule", "NavigationSystem", "OnlineSubsystem", "OnlineSubsystemUtils", "UMG", "SlateCore", "DeveloperSettings", "NetCore", "PhysicsCore" });
         PrivateDependencyModuleNames.AddRange(new string[] { "ApplicationCore", "AssetRegistry", "Json" });
+
+		// Steam remains selected through DefaultEngine.ini; load its provider when the plugin is present.
+		DynamicallyLoadedModuleNames.Add("OnlineSubsystemSteam");
 	}
 }

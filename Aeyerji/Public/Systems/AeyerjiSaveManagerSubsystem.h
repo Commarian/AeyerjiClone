@@ -25,6 +25,9 @@ class AEYERJI_API UAeyerjiSaveManagerSubsystem : public UGameInstanceSubsystem
 	GENERATED_BODY()
 
 public:
+	/** Hard cap shared by every profile RPC transport to bound memory and reliable-channel pressure. */
+	static constexpr int32 MaximumProfileTransportBytes = 4 * 1024 * 1024;
+
 	/** Resolves the subsystem from any world-context object. */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Save", meta=(WorldContext="WorldContextObject"))
 	static UAeyerjiSaveManagerSubsystem* Get(const UObject* WorldContextObject);
@@ -89,7 +92,13 @@ public:
 	/** Resolves the stable per-owner key from PlayerState, local platform user, or development fallback. */
 	FString ResolveOwnerKey(const APlayerState* PreferredPlayerState = nullptr) const;
 
-	/** Returns the profile slot name for the resolved owner, preserving legacy slot naming. */
+	/**
+	 * True only when a raw editor-selected save slot is safe to use as local identity.
+	 * Authenticated providers such as Steam must always keep account ownership authoritative.
+	 */
+	static bool IsExplicitSaveSlotOverrideAllowed(const APlayerState* PreferredPlayerState);
+
+	/** Returns the profile slot name for the resolved owner; raw overrides are restricted to offline/NULL play. */
 	FString MakeProfileSlotNameForOwner(const FString& OwnerKey, const APlayerState* PreferredPlayerState = nullptr) const;
 
 	/** Returns the per-owner streaming slot name. */
@@ -152,6 +161,9 @@ private:
 	/** Handles completion of the Steam cloud read step for the active resolve. */
 	void HandleReadUserFileComplete(bool bWasSuccessful, const FUniqueNetId& UserId, const FString& FileName);
 
+	/** Falls back to local/default profile data if Steam UserCloud does not complete its resolve. */
+	void HandleProfileResolveTimeout();
+
 	/** Handles completion of best-effort Steam cloud writes. */
 	void HandleWriteUserFileComplete(bool bWasSuccessful, const FUniqueNetId& UserId, const FString& FileName);
 
@@ -161,7 +173,7 @@ private:
 	/** Starts a best-effort streaming mirror write to Steam cloud. */
 	void MirrorStreamingToCloud(UAeyerjiStreamingSaveGame* SaveData, const FString& OwnerKey);
 
-	/** Clears any pending cloud delegates associated with the active resolve. */
+	/** Clears pending cloud delegates and the timeout associated with the active resolve. */
 	void ClearPendingResolveDelegates();
 
 private:

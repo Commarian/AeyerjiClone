@@ -2,6 +2,7 @@
 
 #include "Items/ItemInstance.h"
 
+#include "Attributes/AeyerjiAttributeSet.h"
 #include "Items/ItemAffixDefinition.h"
 #include "Items/ItemDefinition.h"
 #include "Items/InventoryComponent.h"
@@ -11,6 +12,115 @@
 #include "Systems/LootTable.h"
 #include "UObject/CoreNet.h"
 #include "GUI/AeyerjiStringLibrary.h"
+#include "UObject/UnrealType.h"
+
+namespace
+{
+	constexpr int32 MaxItemAffixes = 64;
+	constexpr int32 MaxItemModifiers = 2048;
+	constexpr int32 MaxItemGrantedEffects = 256;
+	constexpr int32 MaxItemGrantedAbilities = 256;
+	constexpr int32 MaxSetByCallerMagnitudesPerEffect = 64;
+	constexpr int32 MaxItemGridDimension = 64;
+	constexpr int32 MaxItemAbilityLevel = 1000000;
+	constexpr float MaxItemMagnitude = 1000000000.f;
+	constexpr float MaxItemScalingFactor = 1000000.f;
+
+	bool IsValidInstanceRarity(const EItemRarity Rarity)
+	{
+		const UEnum* Enum = StaticEnum<EItemRarity>();
+		return Enum && Enum->IsValidEnumValue(static_cast<int64>(Rarity));
+	}
+
+	bool IsValidInstanceEquipmentSlot(const EEquipmentSlot Slot)
+	{
+		const UEnum* Enum = StaticEnum<EEquipmentSlot>();
+		return Enum && Enum->IsValidEnumValue(static_cast<int64>(Slot));
+	}
+
+	bool IsValidInstanceModifierOperation(const EItemModOp Operation)
+	{
+		const UEnum* Enum = StaticEnum<EItemModOp>();
+		return Enum && Enum->IsValidEnumValue(static_cast<int64>(Operation));
+	}
+
+	bool IsUsableInstanceAttribute(const FGameplayAttribute& Attribute)
+	{
+		const FProperty* Property = Attribute.GetUProperty();
+		if (!Property || !FGameplayAttribute::IsGameplayAttributeDataProperty(Property))
+		{
+			return false;
+		}
+
+		const UClass* AttributeSetClass = Cast<UClass>(Property->GetOwner<UObject>());
+		return AttributeSetClass && AttributeSetClass->IsChildOf(UAeyerjiAttributeSet::StaticClass());
+	}
+
+	float ClampItemMagnitude(const double Value, const float Fallback = 0.f)
+	{
+		if (!FMath::IsFinite(Value))
+		{
+			return Fallback;
+		}
+		return static_cast<float>(FMath::Clamp(Value, -static_cast<double>(MaxItemMagnitude), static_cast<double>(MaxItemMagnitude)));
+	}
+
+	float ResolveItemScalingFactor(const float Value, const float Fallback = 1.f)
+	{
+		return FMath::IsFinite(Value) ? FMath::Clamp(Value, 0.f, MaxItemScalingFactor) : Fallback;
+	}
+
+	bool TrySanitizeInstanceModifier(FItemStatModifier& Modifier, const float Multiplier)
+	{
+		if (!IsUsableInstanceAttribute(Modifier.Attribute) || !IsValidInstanceModifierOperation(Modifier.Op))
+		{
+			return false;
+		}
+		Modifier.Magnitude = ClampItemMagnitude(
+			static_cast<double>(Modifier.Magnitude) * static_cast<double>(Multiplier));
+		return true;
+	}
+
+	bool TrySanitizeInstanceEffect(FItemGrantedEffect& Effect, const float LevelMultiplier)
+	{
+		if (!Effect.IsValid())
+		{
+			return false;
+		}
+		Effect.EffectLevel = FMath::Clamp(
+			ClampItemMagnitude(static_cast<double>(Effect.EffectLevel) * static_cast<double>(LevelMultiplier), 1.f),
+			KINDA_SMALL_NUMBER,
+			MaxItemScalingFactor);
+		if (Effect.SetByCallerMagnitudes.Num() > MaxSetByCallerMagnitudesPerEffect)
+		{
+			Effect.SetByCallerMagnitudes.SetNum(MaxSetByCallerMagnitudesPerEffect, EAllowShrinking::No);
+		}
+		Effect.SetByCallerMagnitudes.RemoveAll([](FItemSetByCallerMagnitude& Magnitude)
+		{
+			if (!Magnitude.IsValid() || !FMath::IsFinite(Magnitude.LevelOneMagnitude)
+				|| !FMath::IsFinite(Magnitude.PerLevelMultiplier) || !FMath::IsFinite(Magnitude.PerLevelAdd))
+			{
+				return true;
+			}
+			Magnitude.LevelOneMagnitude = ClampItemMagnitude(Magnitude.LevelOneMagnitude);
+			Magnitude.PerLevelMultiplier = ClampItemMagnitude(Magnitude.PerLevelMultiplier);
+			Magnitude.PerLevelAdd = ClampItemMagnitude(Magnitude.PerLevelAdd);
+			return false;
+		});
+		return true;
+	}
+
+	bool TrySanitizeInstanceAbility(FItemGrantedAbility& Ability)
+	{
+		if (!Ability.IsValid())
+		{
+			return false;
+		}
+		Ability.AbilityLevel = FMath::Clamp(Ability.AbilityLevel, 1, MaxItemAbilityLevel);
+		Ability.InputID = FMath::Clamp(Ability.InputID, INDEX_NONE, MaxItemAbilityLevel);
+		return true;
+	}
+}
 
 UAeyerjiItemInstance::UAeyerjiItemInstance()
 {
@@ -35,9 +145,10 @@ void UAeyerjiItemInstance::ForceItemChangedForUI()
 
 void UAeyerjiItemInstance::SetNetAddressable()
 {
-	if (!HasAnyFlags(RF_Public | RF_Standalone))
+	// Dynamic replicated subobjects need to be public, but RF_Standalone would keep discarded items alive.
+	if (!HasAnyFlags(RF_Public))
 	{
-		SetFlags(RF_Public | RF_Standalone);
+		SetFlags(RF_Public);
 	}
 }
 
@@ -52,7 +163,7 @@ void UAeyerjiItemInstance::PostNetReceive()
 
 FLinearColor UAeyerjiItemInstance::RarityTint(EItemRarity RarityVariable) const
 {
-	switch (Rarity)
+	switch (RarityVariable)
 	{
 	case EItemRarity::Uncommon:         return FLinearColor(0.25f, 1.f, 0.25f, 1.f);
 	case EItemRarity::Rare:             return FLinearColor(0.25f, 0.6f, 1.f, 1.f);
@@ -115,20 +226,28 @@ FText UAeyerjiItemInstance::GetDisplayName() const
 		return BaseName;
 	}
 
-	FString Combined;
+	FFormatNamedArguments FormatArguments;
+	FormatArguments.Add(TEXT("BaseName"), BaseName);
+	if (bHasPrefix && bHasSuffix)
+	{
+		FormatArguments.Add(TEXT("Prefix"), NameFormat->Prefix);
+		FormatArguments.Add(TEXT("Suffix"), NameFormat->Suffix);
+		return FText::Format(
+			AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("ItemDisplayNamePrefixSuffixFormat")),
+			FormatArguments);
+	}
 	if (bHasPrefix)
 	{
-		Combined += NameFormat->Prefix.ToString();
-		Combined += TEXT(" ");
-	}
-	Combined += BaseName.ToString();
-	if (bHasSuffix)
-	{
-		Combined += TEXT(" ");
-		Combined += NameFormat->Suffix.ToString();
+		FormatArguments.Add(TEXT("Prefix"), NameFormat->Prefix);
+		return FText::Format(
+			AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("ItemDisplayNamePrefixFormat")),
+			FormatArguments);
 	}
 
-	return FText::FromString(Combined);
+	FormatArguments.Add(TEXT("Suffix"), NameFormat->Suffix);
+	return FText::Format(
+		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("ItemDisplayNameSuffixFormat")),
+		FormatArguments);
 }
 
 FAeyerjiPickupVisualConfig UAeyerjiItemInstance::GetPickupVisualConfig() const
@@ -146,6 +265,52 @@ void UAeyerjiItemInstance::RebuildAggregation()
 	FinalAggregatedModifiers.Reset();
 	GrantedEffects.Reset();
 	GrantedAbilities.Reset();
+	Rarity = IsValidInstanceRarity(Rarity) ? Rarity : EItemRarity::Common;
+	ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
+	EquippedSlot = IsValidInstanceEquipmentSlot(EquippedSlot) ? EquippedSlot : EEquipmentSlot::Assault;
+
+	auto AppendModifiers = [this](const TArray<FItemStatModifier>& Source, const float Multiplier)
+	{
+		const int32 Available = MaxItemModifiers - FinalAggregatedModifiers.Num();
+		const int32 Count = FMath::Min(Source.Num(), Available);
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FItemStatModifier Modifier = Source[Index];
+			if (TrySanitizeInstanceModifier(Modifier, Multiplier))
+			{
+				FinalAggregatedModifiers.Add(MoveTemp(Modifier));
+			}
+		}
+	};
+
+	auto AppendEffects = [this](const TArray<FItemGrantedEffect>& Source, const float LevelMultiplier)
+	{
+		const int32 Available = MaxItemGrantedEffects - GrantedEffects.Num();
+		const int32 Count = FMath::Min(Source.Num(), Available);
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FItemGrantedEffect Effect = Source[Index];
+			if (TrySanitizeInstanceEffect(Effect, LevelMultiplier))
+			{
+				GrantedEffects.Add(MoveTemp(Effect));
+			}
+		}
+	};
+
+	auto AppendAbilities = [this](const TArray<FItemGrantedAbility>& Source)
+	{
+		const int32 Available = MaxItemGrantedAbilities - GrantedAbilities.Num();
+		const int32 Count = FMath::Min(Source.Num(), Available);
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FItemGrantedAbility Ability = Source[Index];
+			if (TrySanitizeInstanceAbility(Ability))
+			{
+				GrantedAbilities.Add(MoveTemp(Ability));
+			}
+		}
+	};
+
 	const ULootService* LootService = nullptr;
 	const UAeyerjiLootTable* LootTable = nullptr;
 	if (const UObject* OuterObj = GetOuter())
@@ -161,59 +326,36 @@ void UAeyerjiItemInstance::RebuildAggregation()
 	}
 
 	const FRarityScalingRow* RarityScaling = LootTable ? LootTable->FindRarityScaling(Rarity) : nullptr;
+	const float BaseModifierMultiplier = RarityScaling
+		? ResolveItemScalingFactor(RarityScaling->BaseModifierMultiplier)
+		: 1.f;
+	const float AffixModifierMultiplier = RarityScaling
+		? ResolveItemScalingFactor(RarityScaling->AffixModifierMultiplier)
+		: 1.f;
+	const float GrantedEffectLevelMultiplier = RarityScaling
+		? ResolveItemScalingFactor(RarityScaling->GrantedEffectLevelMultiplier)
+		: 1.f;
 
-	if (Definition)
+	if (IsValid(Definition))
 	{
-		TArray<FItemStatModifier> ScaledBaseMods = Definition->BaseModifiers;
-		if (RarityScaling)
-		{
-			for (FItemStatModifier& Mod : ScaledBaseMods)
-			{
-				Mod.Magnitude *= RarityScaling->BaseModifierMultiplier;
-			}
-		}
-		FinalAggregatedModifiers.Append(ScaledBaseMods);
-
-		for (FItemGrantedEffect Effect : Definition->GrantedEffects)
-		{
-			if (RarityScaling)
-			{
-				Effect.EffectLevel *= RarityScaling->GrantedEffectLevelMultiplier;
-			}
-			GrantedEffects.Add(Effect);
-		}
-
-		GrantedAbilities.Append(Definition->GrantedAbilities);
-		InventorySize = Definition->InventorySize;
+		AppendModifiers(Definition->BaseModifiers, BaseModifierMultiplier);
+		AppendEffects(Definition->GrantedEffects, GrantedEffectLevelMultiplier);
+		AppendAbilities(Definition->GrantedAbilities);
+		InventorySize.X = FMath::Clamp(Definition->InventorySize.X, 1, MaxItemGridDimension);
+		InventorySize.Y = FMath::Clamp(Definition->InventorySize.Y, 1, MaxItemGridDimension);
 	}
 	else
 	{
 		InventorySize = FIntPoint(1, 1);
 	}
 
-	for (const FRolledAffix& Rolled : RolledAffixes)
+	const int32 AffixCount = FMath::Min(RolledAffixes.Num(), MaxItemAffixes);
+	for (int32 AffixIndex = 0; AffixIndex < AffixCount; ++AffixIndex)
 	{
-		TArray<FItemStatModifier> ScaledMods = Rolled.FinalModifiers;
-		if (RarityScaling)
-		{
-			for (FItemStatModifier& Mod : ScaledMods)
-			{
-				Mod.Magnitude *= RarityScaling->AffixModifierMultiplier;
-			}
-		}
-
-		TArray<FItemGrantedEffect> ScaledEffects = Rolled.GrantedEffects;
-		if (RarityScaling)
-		{
-			for (FItemGrantedEffect& Effect : ScaledEffects)
-			{
-				Effect.EffectLevel *= RarityScaling->GrantedEffectLevelMultiplier;
-			}
-		}
-
-		FinalAggregatedModifiers.Append(ScaledMods);
-		GrantedEffects.Append(ScaledEffects);
-		GrantedAbilities.Append(Rolled.GrantedAbilities);
+		const FRolledAffix& Rolled = RolledAffixes[AffixIndex];
+		AppendModifiers(Rolled.FinalModifiers, AffixModifierMultiplier);
+		AppendEffects(Rolled.GrantedEffects, GrantedEffectLevelMultiplier);
+		AppendAbilities(Rolled.GrantedAbilities);
 	}
 
 	NotifyItemChanged();
@@ -221,10 +363,18 @@ void UAeyerjiItemInstance::RebuildAggregation()
 
 void UAeyerjiItemInstance::ApplyLootStatScaling(const UAeyerjiLootTable* LootTable)
 {
-	if (!LootTable)
+	if (!IsValid(LootTable))
 	{
 		return;
 	}
+	if (FinalAggregatedModifiers.Num() > MaxItemModifiers)
+	{
+		FinalAggregatedModifiers.SetNum(MaxItemModifiers, EAllowShrinking::No);
+	}
+	FinalAggregatedModifiers.RemoveAll([](FItemStatModifier& Modifier)
+	{
+		return !TrySanitizeInstanceModifier(Modifier, 1.f);
+	});
 
 	const int32 Level = UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel);
 	const int32 LevelDelta = FMath::Max(Level - 1, 0);
@@ -242,8 +392,16 @@ void UAeyerjiItemInstance::ApplyLootStatScaling(const UAeyerjiLootTable* LootTab
 			continue;
 		}
 
-		const float Mult = 1.f + Scaling->PerLevelMultiplier * LevelDelta;
-		Mod.Magnitude = (Mod.Magnitude * Mult) + (Scaling->PerLevelAdd * LevelDelta);
+		const double PerLevelMultiplier = FMath::IsFinite(Scaling->PerLevelMultiplier)
+			? FMath::Clamp(static_cast<double>(Scaling->PerLevelMultiplier), -static_cast<double>(MaxItemScalingFactor), static_cast<double>(MaxItemScalingFactor))
+			: 0.0;
+		const double PerLevelAdd = FMath::IsFinite(Scaling->PerLevelAdd)
+			? FMath::Clamp(static_cast<double>(Scaling->PerLevelAdd), -static_cast<double>(MaxItemMagnitude), static_cast<double>(MaxItemMagnitude))
+			: 0.0;
+		const double Multiplier = 1.0 + (PerLevelMultiplier * static_cast<double>(LevelDelta));
+		Mod.Magnitude = ClampItemMagnitude(
+			(static_cast<double>(Mod.Magnitude) * Multiplier)
+			+ (PerLevelAdd * static_cast<double>(LevelDelta)));
 	}
 }
 
@@ -256,11 +414,19 @@ void UAeyerjiItemInstance::InitializeFromDefinition(
 	const TArray<UItemAffixDefinition*>& ChosenAffixes,
 	const TArray<const FAffixTier*>& ChosenTiers)
 {
-	Definition = InDefinition;
-	Rarity = InRarity;
+	Definition = IsValid(InDefinition) ? InDefinition : nullptr;
+	Rarity = IsValidInstanceRarity(InRarity) ? InRarity : EItemRarity::Common;
 	ItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(InItemLevel);
+	if (Definition)
+	{
+		ItemLevel = FMath::Max(ItemLevel, Definition->GetEffectiveRequiredLevel());
+	}
 	Seed = InSeed;
-	EquippedSlot = InSlot;
+	EquippedSlot = IsValidInstanceEquipmentSlot(InSlot)
+		? InSlot
+		: (Definition && IsValidInstanceEquipmentSlot(Definition->DefaultSlot)
+			? Definition->DefaultSlot
+			: EEquipmentSlot::Assault);
 	EquippedSlotIndex = INDEX_NONE;
 	UniqueId = FGuid::NewGuid();
 
@@ -268,42 +434,64 @@ void UAeyerjiItemInstance::InitializeFromDefinition(
 
 	FRandomStream RNG(Seed);
 
-	GrantedEffects.Reset();
-	GrantedAbilities.Reset();
-	if (Definition)
-	{
-		GrantedEffects.Append(Definition->GrantedEffects);
-		GrantedAbilities.Append(Definition->GrantedAbilities);
-		InventorySize = Definition->InventorySize;
-	}
-	else
-	{
-		InventorySize = FIntPoint(1, 1);
-	}
-
-	for (int32 Index = 0; Index < ChosenAffixes.Num(); ++Index)
+	TSet<const UItemAffixDefinition*> AddedAffixes;
+	const int32 AffixCount = FMath::Min3(ChosenAffixes.Num(), ChosenTiers.Num(), MaxItemAffixes);
+	for (int32 Index = 0; Index < AffixCount; ++Index)
 	{
 		UItemAffixDefinition* Affix = ChosenAffixes[Index];
 		const FAffixTier* Tier = ChosenTiers.IsValidIndex(Index) ? ChosenTiers[Index] : nullptr;
 
-		if (!Affix || Tier == nullptr)
+		if (!IsValid(Affix) || Tier == nullptr || AddedAffixes.Contains(Affix)
+			|| (Definition && !Affix->IsAllowedFor(Definition->ItemCategory, EquippedSlot)))
+		{
+			continue;
+		}
+		FAffixTier SafeTier = *Tier;
+		SafeTier.Weight = FMath::Max(0, SafeTier.Weight);
+		SafeTier.MinItemLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(SafeTier.MinItemLevel);
+		SafeTier.MinRoll = FMath::Clamp(FMath::IsFinite(SafeTier.MinRoll) ? SafeTier.MinRoll : 0.f, -MaxItemMagnitude, MaxItemMagnitude);
+		SafeTier.MaxRoll = FMath::Clamp(FMath::IsFinite(SafeTier.MaxRoll) ? SafeTier.MaxRoll : SafeTier.MinRoll, -MaxItemMagnitude, MaxItemMagnitude);
+		if (SafeTier.Weight <= 0 || ItemLevel < SafeTier.MinItemLevel)
 		{
 			continue;
 		}
 
 		TArray<FItemStatModifier> FinalMods;
-		Affix->BuildFinalModifiers(*Tier, RNG, FinalMods);
+		Affix->BuildFinalModifiers(SafeTier, RNG, FinalMods);
+		if (FinalMods.Num() > MaxItemModifiers)
+		{
+			FinalMods.SetNum(MaxItemModifiers, EAllowShrinking::No);
+		}
+		FinalMods.RemoveAll([](FItemStatModifier& Modifier)
+		{
+			return !TrySanitizeInstanceModifier(Modifier, 1.f);
+		});
 
 		FRolledAffix Rolled;
 		Rolled.AffixId = Affix->AffixId;
 		Rolled.DisplayName = Affix->DisplayName;
 		Rolled.FinalModifiers = MoveTemp(FinalMods);
-		Rolled.GrantedEffects = Affix->GrantedEffects;
-		Rolled.GrantedAbilities = Affix->GrantedAbilities;
+		const int32 EffectCount = FMath::Min(Affix->GrantedEffects.Num(), MaxItemGrantedEffects);
+		for (int32 EffectIndex = 0; EffectIndex < EffectCount; ++EffectIndex)
+		{
+			FItemGrantedEffect Effect = Affix->GrantedEffects[EffectIndex];
+			if (TrySanitizeInstanceEffect(Effect, 1.f))
+			{
+				Rolled.GrantedEffects.Add(MoveTemp(Effect));
+			}
+		}
+		const int32 AbilityCount = FMath::Min(Affix->GrantedAbilities.Num(), MaxItemGrantedAbilities);
+		for (int32 AbilityIndex = 0; AbilityIndex < AbilityCount; ++AbilityIndex)
+		{
+			FItemGrantedAbility Ability = Affix->GrantedAbilities[AbilityIndex];
+			if (TrySanitizeInstanceAbility(Ability))
+			{
+				Rolled.GrantedAbilities.Add(MoveTemp(Ability));
+			}
+		}
 
 		RolledAffixes.Add(MoveTemp(Rolled));
-		GrantedEffects.Append(Affix->GrantedEffects);
-		GrantedAbilities.Append(Affix->GrantedAbilities);
+		AddedAffixes.Add(Affix);
 	}
 
 	RebuildAggregation();

@@ -102,7 +102,8 @@ struct AEYERJI_API FEnemySet
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn")
 	bool bIsElite = false;
 
-	/** Keeps elite tags/VFX but skips automatic elite stat/affix/xp scaling; useful for pre-tuned elite classes. */
+	/** Skips numeric elite/affix stat and scale multipliers while retaining elite tags,
+	 * affix gameplay, VFX, and XP; reserve for fully pre-tuned special classes. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spawn", meta=(EditCondition="bIsElite", EditConditionHides, AdvancedDisplay))
 	bool bSkipEliteAutoScaling = false;
 
@@ -408,6 +409,28 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Spawner|Pooling")
 	void PrewarmPoolForEnemySets(const TArray<FEnemySet>& EnemySets, int32 DesiredCountPerSet = 1);
 
+	/**
+	 * Pre-creates one exact planned enemy without elite re-resolution.
+	 * EncounterDirector calls this incrementally during world-flow loading so the frozen
+	 * Rift plan and the pool contain identical class/archetype/elite keys.
+	 */
+	bool PrewarmExactEnemy(const FEnemySet& ExactEnemySet);
+
+	/** Begins a full-run prewarm and expands the per-key retention ceiling for the frozen plan. */
+	void BeginExactPoolPrewarm(int32 PlannedPopulation);
+
+	/** Ends temporary loading relevancy and marks later pool misses as emergency runtime construction. */
+	void FinalizeExactPoolPrewarm();
+
+	int32 GetFreshEnemyConstructionCount() const { return FreshEnemyConstructionCount; }
+	int32 GetPooledCheckoutCount() const { return PooledCheckoutCount; }
+	int32 GetPrewarmConstructionCount() const { return PrewarmConstructionCount; }
+	int32 GetEmergencyRuntimeSpawnCount() const { return EmergencyRuntimeSpawnCount; }
+	int32 GetExactPoolKeyCapacity(const FAeyerjiEnemyPoolKey& PoolKey) const
+	{
+		return ExactPoolKeyCapacities.FindRef(PoolKey);
+	}
+
 	/** True once all waves are complete and no tracked enemies remain. */
 	UFUNCTION(BlueprintPure, Category="Spawner")
 	bool IsCleared() const { return bCleared; }
@@ -419,9 +442,10 @@ public:
 #if WITH_DEV_AUTOMATION_TESTS
 	/** Number of accepted inactive-to-active transitions; used to prove simultaneous overlaps dedupe. */
 	int32 GetAutomationActivationCount() const { return AutomationActivationCount; }
+
 #endif
 
-	/** Configures this common executor for server-owned region spawns and permanent nearest-player pursuit. */
+	/** Configures this common executor for server-owned Rift pooling without global forced pursuit. */
 	void ConfigureAsRiftPopulationExecutor(AAeyerjiLevelDirector* InLevelDirector);
 
 	/** Assigns the defendable survival target pushed to spawned AI controllers. */
@@ -636,14 +660,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(EditCondition="bAllowRandomElites", AdvancedDisplay))
 	bool bRequireEliteClassPoolForRandomPromotion = true;
 
-	/** Base stat bumps applied to any enemy sets flagged as elite (before affixes). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
-	float EliteHealthMultiplier = 2.0f;
+	/** Canonical health promotion applied once to enemy sets flagged as elite, before documented per-set exceptions and affixes. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
+	float EliteHealthMultiplier = 4.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
-	float EliteDamageMultiplier = 2.0f;
+	/** Canonical damage promotion applied once to enemy sets flagged as elite. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
+	float EliteDamageMultiplier = 1.35f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
+	/** Canonical attack-range promotion applied once to enemy sets flagged as elite. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Spawner|Elites", meta=(ClampMin="0.1"))
 	float EliteRangeMultiplier = 1.5f;
 
 	/** Scale multiplier and FX applied to any enemy sets flagged as elite. */
@@ -964,6 +990,7 @@ protected:
 		TArray<TWeakObjectPtr<UNiagaraComponent>> SpawnedNiagaraComponents;
 		EAeyerjiPooledEnemyState State = EAeyerjiPooledEnemyState::Active;
 		bool bBaselineCaptured = false;
+		bool bAlwaysRelevant = false;
 	};
 
 	/** Inactive reusable enemies bucketed by class/archetype/elite role. */
@@ -972,11 +999,33 @@ protected:
 	/** Runtime cleanup package owned by this spawner for every pool-managed enemy. */
 	TMap<TWeakObjectPtr<APawn>, FPooledEnemyRuntimeState> PooledEnemyStates;
 
+	/** Profiling counters distinguish loading construction, pooled checkout, and runtime fallback. */
+	UPROPERTY(VisibleAnywhere, Category="Spawner|Pooling|Diagnostics")
+	int32 FreshEnemyConstructionCount = 0;
+
+	UPROPERTY(VisibleAnywhere, Category="Spawner|Pooling|Diagnostics")
+	int32 PooledCheckoutCount = 0;
+
+	UPROPERTY(VisibleAnywhere, Category="Spawner|Pooling|Diagnostics")
+	int32 PrewarmConstructionCount = 0;
+
+	UPROPERTY(VisibleAnywhere, Category="Spawner|Pooling|Diagnostics")
+	int32 EmergencyRuntimeSpawnCount = 0;
+
+	bool bExactPoolPrewarmInProgress = false;
+	bool bExactPoolPrewarmFinalized = false;
+
+	/** Exact planned actor count per class/archetype/elite key for the current frozen run. */
+	TMap<FAeyerjiEnemyPoolKey, int32> ExactPoolKeyCapacities;
+
 	/** Remaining spawn counts for each wave/set (runtime state). */
 	TArray<TArray<int32>> PendingSpawnCounts;
 
 	/** Timer handles for in-flight spawn timers per wave/set. */
 	TArray<TArray<FTimerHandle>> SpawnTimerHandles;
+
+	/** Consecutive spawn failures per wave/set, used to prevent invalid authoring from retrying forever. */
+	TArray<TArray<int32>> SpawnFailureCounts;
 
 	/** Delay timer between waves. */
 	FTimerHandle WaveDelayHandle;

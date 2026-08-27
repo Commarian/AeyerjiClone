@@ -39,7 +39,8 @@ void UExecCalc_ItemStats::Execute_Implementation(const FGameplayEffectCustomExec
 	const FGameplayTagContainer* SourceTags = Spec.CapturedSourceTags.GetAggregatedTags();
 	const FGameplayTagContainer* TargetTags = Spec.CapturedTargetTags.GetAggregatedTags();
 
-	const float Multiplier = Spec.GetSetByCallerMagnitude(FName(TEXT("ItemStatsMultiplier")), /*WarnIfNotFound=*/false, 1.f);
+	const float RawMultiplier = Spec.GetSetByCallerMagnitude(FName(TEXT("ItemStatsMultiplier")), /*WarnIfNotFound=*/false, 1.f);
+	const float Multiplier = FMath::IsFinite(RawMultiplier) ? RawMultiplier : 1.f;
 
 	UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] ExecCalc: Begin Spec=%s Mult=%.2f; TargetASC=%s Owner=%s Avatar=%s; SourceASC=%s Owner=%s Avatar=%s; Instigator=%s Causer=%s SourceObject=%s Tags(Source=%s Target=%s)"),
 		*GetNameSafe(Spec.Def),
@@ -72,7 +73,9 @@ void UExecCalc_ItemStats::Execute_Implementation(const FGameplayEffectCustomExec
 	int32 OutputCount = 0;
 	for (const FItemStatModifier& Modifier : ItemInstance->FinalAggregatedModifiers)
 	{
-		if (!Modifier.Attribute.IsValid())
+		if (!Modifier.Attribute.IsValid()
+			|| !StaticEnum<EItemModOp>()->IsValidEnumValue(static_cast<int64>(Modifier.Op))
+			|| !FMath::IsFinite(Modifier.Magnitude))
 		{
 			UE_LOG(LogAeyerji, Verbose, TEXT("[ItemStatsDebug] ExecCalc: Skip invalid attr Mod Attr=%s Op=%d Mag=%.3f"),
 				*Modifier.Attribute.GetName(),
@@ -83,6 +86,10 @@ void UExecCalc_ItemStats::Execute_Implementation(const FGameplayEffectCustomExec
 
 		const EGameplayModOp::Type GameplayOp = ConvertItemOp(Modifier.Op);
 		const float EffectiveMagnitude = Modifier.Magnitude * Multiplier;
+		if (!FMath::IsFinite(EffectiveMagnitude))
+		{
+			continue;
+		}
 		const bool bHasAttrSet = TargetASC ? TargetASC->HasAttributeSetForAttribute(Modifier.Attribute) : false;
 		const float PreValue = (TargetASC && bHasAttrSet) ? TargetASC->GetNumericAttribute(Modifier.Attribute) : 0.f;
 		FGameplayModifierEvaluatedData EvaluatedData(Modifier.Attribute, GameplayOp, EffectiveMagnitude);

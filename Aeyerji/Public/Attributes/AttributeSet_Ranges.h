@@ -23,6 +23,7 @@ class AEYERJI_API UAttributeSet_Ranges : public UAttributeSet
 	GENERATED_BODY()
 
 public:
+	UAttributeSet_Ranges();
 
 	/* ---- Blink range ---------------------------------------------------- */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Blink",
@@ -35,4 +36,5 @@ public:
 
 	// replication
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutProps) const override;
+	virtual void PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue) override;
 };

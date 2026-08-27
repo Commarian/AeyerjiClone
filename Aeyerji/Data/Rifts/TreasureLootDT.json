@@ -1,0 +1,41 @@
+[
+	{
+		"Name": "Treasure_Mobs",
+		"bEnabled": true,
+		"SourceTag":
+		{
+			"TagName": "Loot.Source.Mobs"
+		},
+		"MinimumRarity": "Common",
+		"DropsPerChest": 1,
+		"DropCountVariance": 0,
+		"ForcedItemDefinition": "None",
+		"DropMode": "DropOnlyForInstigator"
+	},
+	{
+		"Name": "Treasure_Elite",
+		"bEnabled": true,
+		"SourceTag":
+		{
+			"TagName": "Loot.Source.Elite"
+		},
+		"MinimumRarity": "Uncommon",
+		"DropsPerChest": 1,
+		"DropCountVariance": 0,
+		"ForcedItemDefinition": "None",
+		"DropMode": "DropOnlyForInstigator"
+	},
+	{
+		"Name": "Treasure_Boss",
+		"bEnabled": true,
+		"SourceTag":
+		{
+			"TagName": "Loot.Source.Boss"
+		},
+		"MinimumRarity": "Epic",
+		"DropsPerChest": 1,
+		"DropCountVariance": 0,
+		"ForcedItemDefinition": "None",
+		"DropMode": "DropOnlyForInstigator"
+	}
+]

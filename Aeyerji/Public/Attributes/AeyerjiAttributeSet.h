@@ -165,6 +165,9 @@ protected:
     /* Clamp before changes (keep set passive) */
     virtual void PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue) override;
 
+    /** Applies the combat dodge cap to direct base-value writes from items and gameplay effects. */
+    virtual void PreAttributeBaseChange(const FGameplayAttribute& Attribute, float& NewValue) const override;
+
     virtual void PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data) override;
 
     /** Applies a resolved hit, life steal, gameplay events, cues, and death handling. */

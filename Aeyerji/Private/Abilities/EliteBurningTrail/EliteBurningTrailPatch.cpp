@@ -73,19 +73,36 @@ void AEliteBurningTrailPatch::BeginPlay()
 
 bool AEliteBurningTrailPatch::ApplyPatchDamage_Implementation(AActor* Target, float InDamagePerSecond, UGameplayAbility* InSourceAbility)
 {
-	if (!Target || InDamagePerSecond <= 0.f)
-	{
-		return false;
-	}
-
-	UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Target);
-	if (!TargetASC)
+	if (!HasAuthority()
+		|| !IsValid(Target)
+		|| Target->GetWorld() != GetWorld()
+		|| !FMath::IsFinite(InDamagePerSecond)
+		|| InDamagePerSecond <= 0.f)
 	{
 		return false;
 	}
 
 	UAbilitySystemComponent* SourceASC = InstigatorASC.Get();
-	UAbilitySystemComponent* SpecASC = SourceASC ? SourceASC : TargetASC;
+	if (!SourceASC)
+	{
+		return false;
+	}
+	AActor* SourceActor = SourceASC->GetAvatarActor();
+	SourceActor = SourceActor ? SourceActor : SourceASC->GetOwnerActor();
+	if (!IsValid(SourceActor) || AbilityTeamUtils::AreOnSameTeam(SourceActor, Target))
+	{
+		return false;
+	}
+
+	UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Target, true);
+	if (!TargetASC)
+	{
+		return false;
+	}
+	if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+	{
+		return false;
+	}
 
 	TSubclassOf<UGameplayEffect> DamageClass = DotEffectClass;
 	if (!DamageClass)
@@ -93,14 +110,14 @@ bool AEliteBurningTrailPatch::ApplyPatchDamage_Implementation(AActor* Target, fl
 		return false;
 	}
 
-	FGameplayEffectContextHandle ContextHandle = SpecASC->MakeEffectContext();
+	FGameplayEffectContextHandle ContextHandle = SourceASC->MakeEffectContext();
 	ContextHandle.AddSourceObject(this);
 	if (InSourceAbility)
 	{
 		ContextHandle.AddSourceObject(InSourceAbility);
 	}
 
-	FGameplayEffectSpecHandle SpecHandle = SpecASC->MakeOutgoingSpec(DamageClass, 1.f, ContextHandle);
+	FGameplayEffectSpecHandle SpecHandle = SourceASC->MakeOutgoingSpec(DamageClass, 1.f, ContextHandle);
 	if (!SpecHandle.IsValid() || !SpecHandle.Data.IsValid())
 	{
 		return false;
@@ -127,9 +144,14 @@ void AEliteBurningTrailPatch::InitializePatch(const FAGEliteBurningTrailTuning& 
                                               TSubclassOf<UGameplayEffect> InDotEffectClass,
                                               UGameplayAbility* InSourceAbility)
 {
-	LifetimeSeconds = InTuning.PatchLifetime;
-	DamagePerSecond = InTuning.DamagePerSecond;
-	PatchRadius = InTuning.PatchRadius;
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	LifetimeSeconds = FMath::IsFinite(InTuning.PatchLifetime) ? FMath::Max(0.05f, InTuning.PatchLifetime) : 5.f;
+	DamagePerSecond = FMath::IsFinite(InTuning.DamagePerSecond) ? FMath::Max(0.f, InTuning.DamagePerSecond) : 0.f;
+	PatchRadius = FMath::IsFinite(InTuning.PatchRadius) ? FMath::Max(1.f, InTuning.PatchRadius) : 1.f;
 	DamageSetByCallerTag = InDamageSetByCallerTag;
 	DamageTypeTag = InDamageTypeTag;
 	DotEffectClass = InDotEffectClass;
@@ -155,7 +177,7 @@ void AEliteBurningTrailPatch::RefreshCollisionRadius()
 {
 	if (DamageArea)
 	{
-		const float Radius = FMath::Max(1.f, PatchRadius);
+		const float Radius = FMath::IsFinite(PatchRadius) ? FMath::Max(1.f, PatchRadius) : 1.f;
 		DamageArea->SetSphereRadius(Radius);
 	}
 }
@@ -182,7 +204,13 @@ void AEliteBurningTrailPatch::SnapPatchToGround()
 	}
 
 	FVector TargetLocation = Hit.ImpactPoint;
-	TargetLocation.Z = Hit.ImpactPoint.Z + GetGroundOffsetZ(Hit);
+	const float RawGroundOffset = GetGroundOffsetZ(Hit);
+	const float GroundOffset = FMath::IsFinite(RawGroundOffset) ? RawGroundOffset : 0.f;
+	TargetLocation.Z = Hit.ImpactPoint.Z + GroundOffset;
+	if (TargetLocation.ContainsNaN())
+	{
+		return;
+	}
 
 	if (HasAuthority())
 	{
@@ -205,7 +233,8 @@ bool AEliteBurningTrailPatch::GetGroundSnapHitResult(FHitResult& OutGroundHit) c
 	}
 
 	const FVector TraceStart = GetActorLocation() + FVector::UpVector * 50.f;
-	const FVector TraceEnd = TraceStart - FVector::UpVector * FMath::Max(0.f, GroundTraceDistance);
+	const float SafeTraceDistance = FMath::IsFinite(GroundTraceDistance) ? FMath::Max(0.f, GroundTraceDistance) : 0.f;
+	const FVector TraceEnd = TraceStart - FVector::UpVector * SafeTraceDistance;
 
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EliteBurningTrailPatchGroundTrace), /*bTraceComplex=*/false, this);
 	QueryParams.AddIgnoredActor(GetOwner());
@@ -236,7 +265,7 @@ void AEliteBurningTrailPatch::TryActivateVFX()
 
 void AEliteBurningTrailPatch::Multicast_ActivateVFX_Implementation(FVector ReplicatedLocation)
 {
-	if (bVFXActivated || !VisualFX)
+	if (bVFXActivated || !VisualFX || ReplicatedLocation.ContainsNaN())
 	{
 		return;
 	}
@@ -259,7 +288,11 @@ void AEliteBurningTrailPatch::HandleDamageAreaBeginOverlap(UPrimitiveComponent* 
                                                            bool bFromSweep,
                                                            const FHitResult& SweepResult)
 {
-	if (!OtherActor || OtherActor == this || OtherActor == GetOwner())
+	if (!IsValid(OtherActor) || OtherActor == this || OtherActor == GetOwner())
+	{
+		return;
+	}
+	if (OtherActor->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName()))
 	{
 		return;
 	}

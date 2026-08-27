@@ -63,9 +63,20 @@ private:
 		FVector WorldOffset = FVector::ZeroVector;
 		FVector2D ScreenPixelOffset = FVector2D::ZeroVector;
 		int32 ZOrder = 0;
+		float LastAppliedWidthScale = -1.f;
 	};
 	TArray<FTracked> Tracked;
 
+	/** Returns whether the local client is in an active gameplay camera context where enemy overlays are allowed to render. */
+	bool IsOverlayPresentationValid(const APlayerController* PC) const;
+	/** Hides registered widgets without unregistering them, so a valid gameplay context can restore them without rebinding GAS state. */
+	void HideAllTrackedWidgets() const;
+	/** Calculates a width multiplier from the target's scaled capsule, falling back to actor bounds when capsule sizing is unavailable. */
+	float ResolveOwnerWidthScale(const UAeyerjiFloatingStatusBarComponent* Source, const AActor* Target) const;
+	/** Updates a widget only when the physical-width multiplier has changed meaningfully. */
+	void ApplyOwnerWidthScale(FTracked& Entry);
+	/** Rejects projected points outside the active player viewport instead of placing stale bars on screen edges. */
+	bool IsScreenPositionInViewport(const FVector2D& ScreenPosition, const APlayerController* PC) const;
 	bool ProjectToScreen(const FVector& WorldLoc, FVector2D& OutPos) const;
 	bool IsOccluded(const FVector& WorldLoc, const AActor* Ignore) const;
 	APlayerController* GetPC() const

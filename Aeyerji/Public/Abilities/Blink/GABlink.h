@@ -6,7 +6,7 @@
 #include "GABlink.generated.h"
 
 /**
- * Short-range teleport (Blink) implemented for UE 5.6 GAS.
+ * Server-authoritative short-range teleport implemented with GAS.
  *  - Plays out / in GameplayCues
  *  - Consumes mana + starts cooldown via CommitAbility
  */
@@ -25,13 +25,20 @@ protected:
 								 const FGameplayAbilityActivationInfo ActivationInfo,
 								 const FGameplayEventData* TriggerEventData) override;
 
+	/** Clears the pending teleport timer before the shared cast lock is released. */
+	virtual void EndAbility(const FGameplayAbilitySpecHandle Handle,
+							  const FGameplayAbilityActorInfo* ActorInfo,
+							  const FGameplayAbilityActivationInfo ActivationInfo,
+							  bool bReplicateEndAbility,
+							  bool bWasCancelled) override;
+
 	virtual void ApplyCooldown(const FGameplayAbilitySpecHandle Handle,
 							   const FGameplayAbilityActorInfo* ActorInfo,
 							   const FGameplayAbilityActivationInfo ActivationInfo) const override;
 
 	virtual const FGameplayTagContainer* GetCooldownTags() const override;
 
-	/* -------- Tunables -------- */
+	/** Maximum fallback travel distance when no greater data-driven or attribute range is configured. */
 	UPROPERTY(EditDefaultsOnly, Category = "Blink|Tuning", meta=(ClampMin="0"))
 	float MaxBlinkDistance = 1000.f;
 
@@ -39,16 +46,26 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Blink|Tuning", meta=(ClampMin="0"))
 	float FallbackCooldownSeconds = 1.f;
 
-	/* Optional local container for our cooldown tag */
+	/** Cooldown tags applied by this ability when no table-driven tag set overrides them. */
 	UPROPERTY(EditDefaultsOnly, Category="Blink|Tags")
 	FGameplayTagContainer CooldownTags;
 
-	/* GameplayCue tags to fire */
+	/** Gameplay cue executed at the authoritative departure location. */
 	UPROPERTY(EditDefaultsOnly, Category="Blink|Tags")
 	FGameplayTag BlinkOutCue;
 
+	/** Gameplay cue executed after the authoritative teleport succeeds. */
 	UPROPERTY(EditDefaultsOnly, Category="Blink|Tags")
 	FGameplayTag BlinkInCue;
+
+	/** Executes the committed teleport at the configured cast impact time. */
+	void ExecuteBlinkImpact(FGameplayAbilitySpecHandle Handle,
+							const FGameplayAbilityActorInfo* ActorInfo,
+							FGameplayAbilityActivationInfo ActivationInfo,
+							FVector DesiredLocation,
+							FRotator DesiredRotation);
+
+	FTimerHandle BlinkImpactTimerHandle;
 
 public:
 	float GetMaxBlinkRange(const UAbilitySystemComponent* ASC) const;

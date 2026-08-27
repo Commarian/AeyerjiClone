@@ -77,11 +77,14 @@ bool UGCN_AeyerjiCombatText::OnExecute_Implementation(AActor* Target, const FGam
 		return bBurstHandled || bProfileHandled;
 	}
 
+	const float SafeScaleMultiplier = FMath::IsFinite(TextScaleMultiplier)
+		? FMath::Clamp(TextScaleMultiplier, 0.01f, 10.f)
+		: 1.f;
 	const bool bTextHandled = CombatTextComponent->ShowCombatText(
 		Target,
 		DisplayText,
 		DisplayColor,
-		DisplayScale * FMath::Max(0.01f, TextScaleMultiplier),
+		DisplayScale * SafeScaleMultiplier,
 		CombatTextType,
 		Magnitude);
 

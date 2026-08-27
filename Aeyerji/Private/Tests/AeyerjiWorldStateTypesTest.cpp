@@ -3,6 +3,8 @@
 #include "Misc/AutomationTest.h"
 #include "Systems/AeyerjiWorldStateTypes.h"
 
+#include <limits>
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 	FAeyerjiWorldStateTypesTest,
 	"Aeyerji.WorldState.Types",
@@ -26,6 +28,13 @@ bool FAeyerjiWorldStateTypesTest::RunTest(const FString& Parameters)
 	double NumericValue = 0.0;
 	TestTrue(TEXT("Integer values expose numeric comparison data."), IntValue.TryGetNumericValue(NumericValue));
 	TestEqual(TEXT("Integer numeric value is preserved."), NumericValue, 7.0);
+
+	const FAeyerjiWorldStateValue InvalidFloat = FAeyerjiWorldStateValue::FromFloat(
+		std::numeric_limits<float>::quiet_NaN());
+	TestEqual(TEXT("Non-finite float facts normalize to zero."), InvalidFloat.FloatValue, 0.f);
+	TestTrue(TEXT("Normalized float facts expose finite numeric data."),
+		InvalidFloat.TryGetNumericValue(NumericValue));
+	TestEqual(TEXT("Normalized float numeric data remains zero."), NumericValue, 0.0);
 
 	FAeyerjiWorldStateEntry Entry;
 	Entry.Key = Key;

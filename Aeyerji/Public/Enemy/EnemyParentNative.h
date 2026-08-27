@@ -35,6 +35,44 @@ struct FPropertyChangedEvent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FEnemyDiedSignature, AActor*, Enemy);
 
+/** Cosmetic entrance selected by the authoritative Rift encounter plan. */
+UENUM(BlueprintType)
+enum class EAeyerjiEnemyRevealStyle : uint8
+{
+	Immediate       UMETA(DisplayName="Immediate"),
+	GroundEmergence UMETA(DisplayName="Ground Emergence"),
+	SkyDrop         UMETA(DisplayName="Sky Drop")
+};
+
+/** Replicated combat-readiness phase for a pooled or Rift-staged enemy. */
+UENUM(BlueprintType)
+enum class EAeyerjiEnemyEncounterPhase : uint8
+{
+	Active         UMETA(DisplayName="Active"),
+	PooledInactive UMETA(DisplayName="Pooled Inactive"),
+	Revealing      UMETA(DisplayName="Revealing")
+};
+
+/** One replicated payload keeps reveal phase, style, and timing coherent on clients. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiEnemyEncounterPresentationState
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Encounter")
+	EAeyerjiEnemyEncounterPhase Phase = EAeyerjiEnemyEncounterPhase::Active;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Encounter")
+	EAeyerjiEnemyRevealStyle RevealStyle = EAeyerjiEnemyRevealStyle::Immediate;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Encounter")
+	float RevealDurationSeconds = 0.f;
+
+	/** Incremented for every authoritative transition so pooled reuse replays presentation on clients. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Encounter")
+	int32 Revision = 0;
+};
+
 /** Normal enemy death gold drop settings, independent from item loot rolls. */
 USTRUCT(BlueprintType)
 struct AEYERJI_API FAeyerjiGoldDropConfig
@@ -129,7 +167,7 @@ protected:
 	void GiveStartupAbilitiesAndEffects();
 
 	/* --------- Death hook (Blueprint-extendable) --------- */
-	virtual void OnDeath_Implementation() override;
+	virtual void OnDeath_Implementation(AActor* Killer, float DamageTaken) override;
 	virtual FAeyerjiDeathStateOptions BuildDeathStateOptionsForOutOfHealth() const override;
 
 	/* ====== DESIGN-TIME LISTS ====== */
@@ -183,6 +221,13 @@ public:
 	/** Returns true if tag is valid and NOT found on the EnemyParentNative object*/
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category="Enemy|AI")
 	bool IsAlive(FGameplayTag DeathTag = FGameplayTag()) const;
+
+	/** Resolves a yaw-only rotation from an enemy toward a killer; false means the direction is unusable. */
+	static bool ResolveDeathFacingRotation(
+		const FVector& EnemyLocation,
+		const FVector& KillerLocation,
+		FRotator& OutFacingRotation,
+		float YawOffsetDegrees = 0.f);
 
 	/** Alerts nearby allies about a freshly acquired hostile target (server only). */
 	void NotifyNearbyAlliesOfTarget(AActor* Target);
@@ -249,6 +294,30 @@ public:
 	/** Clears enemy-only runtime state immediately before a pooled enemy is hidden and parked. */
 	void PrepareForPooledDeactivation();
 
+	/**
+	 * Starts an authoritative, replicated entrance window for a checked-out Rift enemy.
+	 * Native code keeps collision, damage participation, movement, perception, and StateTree logic
+	 * locked until RevealDurationSeconds elapses; Blueprint only supplies cosmetic presentation.
+	 */
+	void BeginEncounterReveal(EAeyerjiEnemyRevealStyle RevealStyle, float RevealDurationSeconds);
+
+	/** Immediately restores normal combat readiness after a reveal or pooled checkout. */
+	void CompleteEncounterReveal();
+
+	/** Marks the actor as a hidden pooled instance without playing a reveal. */
+	void SetPooledEncounterInactive();
+
+	/** True only when this enemy may participate in combat pressure and targeting. */
+	bool IsEncounterCombatActive() const
+	{
+		return EncounterPresentationState.Phase == EAeyerjiEnemyEncounterPhase::Active;
+	}
+
+	EAeyerjiEnemyEncounterPhase GetEncounterPhase() const { return EncounterPresentationState.Phase; }
+
+	/** Lets a staged region reveal reinforcements when an ambient enemy is damaged before it acquires a target. */
+	bool HasTakenDamageSincePooledActivation() const { return bTookDamageSincePooledActivation; }
+
 	/** Blueprint hook for restoring enemy visuals/components after native pooled activation reset. */
 	UFUNCTION(BlueprintImplementableEvent, Category="Enemy|Pooling")
 	void BP_OnPooledEnemyActivated();
@@ -256,12 +325,22 @@ public:
 	/** Blueprint hook for shutting down enemy visuals/components before the actor is hidden in the pool. */
 	UFUNCTION(BlueprintImplementableEvent, Category="Enemy|Pooling")
 	void BP_OnPooledEnemyDeactivated();
+
+	/**
+	 * Implement this in enemy Blueprints to play a climb-from-ground, drop-from-sky, or other entrance.
+	 * Match the animation to RevealDurationSeconds. Gameplay unlock is native and does not require a
+	 * Blueprint completion callback.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category="Enemy|Encounter")
+	void BP_OnEncounterReveal(EAeyerjiEnemyRevealStyle RevealStyle, float RevealDurationSeconds);
 	
 	bool IsHoverTargetComponent(const UPrimitiveComponent* Component) const;
 
 protected:
 	/** Applies optional crowd-focused animation/rendering throttles for performance testing. */
 	void ApplyCrowdPerformanceSettings();
+
+	virtual bool PrepareDeathPresentation(AActor* Killer, FRotator& OutFacingRotation) override;
 
 	void RefreshEnemyHighlightTargets();
 	void UpdateEnemyHighlightState();
@@ -275,16 +354,39 @@ protected:
 	UFUNCTION()
 	void OnRep_ActiveTeamTag();
 
+	UFUNCTION()
+	void OnRep_EncounterPresentationState();
+
+	void ApplyEncounterGameplayLock(bool bLocked);
+	void ApplyEncounterPresentationState();
+	void LogMovementActivationState(const TCHAR* Phase) const;
+	void ClearTransientGameplayEffectsForPooledReuse();
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Highlight")
 	TObjectPtr<UOutlineHighlightComponent> OutlineHighlight;
 
 	/** Nearby allies inside this radius are alerted when this enemy directly acquires a hostile target. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|AI|Alert", meta=(ClampMin="0.0", Units="cm"))
-	float AllyAlertRadius = 800.f;
+	float AllyAlertRadius = 1100.f;
 
 	/** When true, allies only wake if navigation can reach them from this enemy. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|AI|Alert")
 	bool bRequireNavigableAllyAlertPath = true;
+
+	/**
+	 * Face the credited killer on the horizontal plane before Blueprint death presentation runs.
+	 * Disable this only for an enemy whose authored death sequence requires a fixed orientation.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Death")
+	bool bFaceKillerOnDeath = true;
+
+	/**
+	 * Visual yaw correction applied after looking at the killer and before the Blueprint
+	 * creates detached death geometry. The shared enemy models are authored 90 degrees
+	 * away from Unreal's actor-forward axis; override this per enemy if its mesh differs.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Enemy|Death", meta=(EditCondition="bFaceKillerOnDeath", ClampMin="-180.0", ClampMax="180.0", Units="deg"))
+	float DeathPresentationYawOffsetDegrees = 90.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Enemy|Archetype")
 	TObjectPtr<UAeyerjiEnemyArchetypeComponent> ArchetypeComponent;
@@ -334,6 +436,21 @@ protected:
 	/** True when normal non-player death cleanup should return this pawn to a spawner pool. */
 	UPROPERTY(Transient)
 	bool bPoolManagedBySpawner = false;
+
+	/** Server-authored entrance state replicated as one coherent payload for pooled reuse and late packets. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing=OnRep_EncounterPresentationState, Category="Enemy|Encounter")
+	FAeyerjiEnemyEncounterPresentationState EncounterPresentationState;
+
+	FTimerHandle EncounterRevealTimerHandle;
+
+	/** Prevents the reveal unlock from resuming a brain paused by encounter LOD or another system. */
+	bool bBrainPausedByEncounterReveal = false;
+
+	bool bEncounterGameplayLocked = false;
+	bool bCanBeDamagedBeforeEncounterLock = true;
+
+	/** Reset on pooled checkout and set by the native damage notification path. */
+	bool bTookDamageSincePooledActivation = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Enemy|Highlight")
 	TArray<TObjectPtr<UPrimitiveComponent>> AdditionalHighlightPrimitives;

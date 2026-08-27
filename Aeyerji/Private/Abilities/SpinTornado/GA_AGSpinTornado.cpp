@@ -1,7 +1,5 @@
 #include "Abilities/SpinTornado/GA_AGSpinTornado.h"
 
-#include "NativeGameplayTags.h"
-
 namespace AGSpinTags
 {
 	const FGameplayTag& AbilityTag()

@@ -2,6 +2,8 @@
 
 #include "Misc/AutomationTest.h"
 
+#include <limits>
+
 #include "Systems/AeyerjiRiftRules.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -19,6 +21,10 @@ bool FAeyerjiRiftTimingAndRewardMatrixTest::RunTest(const FString& Parameters)
 		AeyerjiRiftRules::IsCompletedInTime(900.f, 900.f));
 	TestFalse(TEXT("A boss death after 900 seconds is overtime."),
 		AeyerjiRiftRules::IsCompletedInTime(900.001f, 900.f));
+	TestFalse(TEXT("A non-finite elapsed time is never accepted."),
+		AeyerjiRiftRules::IsCompletedInTime(std::numeric_limits<float>::quiet_NaN(), 900.f));
+	TestFalse(TEXT("A non-finite time limit is never accepted."),
+		AeyerjiRiftRules::IsCompletedInTime(30.f, std::numeric_limits<float>::infinity()));
 
 	const EAeyerjiRiftRewardEligibility NoBoss = AeyerjiRiftRules::ResolveRewardEligibility(false, false, false);
 	const EAeyerjiRiftRewardEligibility Overtime = AeyerjiRiftRules::ResolveRewardEligibility(true, false, false);
@@ -62,6 +68,8 @@ bool FAeyerjiRiftTierProgressionAndMigrationTest::RunTest(const FString& Paramet
 		AeyerjiRiftRules::ResolveHighestUnlockedTier(3, 3, false, true), 3);
 	TestEqual(TEXT("An already-higher profile is never lowered."),
 		AeyerjiRiftRules::ResolveHighestUnlockedTier(8, 3, true, true), 8);
+	TestEqual(TEXT("Advancing the maximum tier saturates instead of overflowing."),
+		AeyerjiRiftRules::ResolveHighestUnlockedTier(MAX_int32, MAX_int32, true, true), MAX_int32);
 
 	int32 HighestTier = 0;
 	int32 LastSelectedTier = 0;
@@ -106,10 +114,33 @@ bool FAeyerjiRiftAllocationAndProgressTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Weighted middle group allocation."), WeightedAllocation[1], 3);
 	TestEqual(TEXT("Weighted final group allocation."), WeightedAllocation[2], 2);
 
+	const TArray<int32> InvalidWeightAllocation = AeyerjiRiftRules::AllocateLargestRemainder(
+		{std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), 1.f}, 4);
+	TestEqual(TEXT("NaN weights receive no allocation."), InvalidWeightAllocation[0], 0);
+	TestEqual(TEXT("Infinite weights receive no allocation."), InvalidWeightAllocation[1], 0);
+	TestEqual(TEXT("Finite weights preserve the full budget."), InvalidWeightAllocation[2], 4);
+
+	TestTrue(TEXT("An equal-index lateral region remains valid at the progression frontier."),
+		AeyerjiRiftRules::CanStageProgressionIndex(4, 4));
+	TestTrue(TEXT("A forward region remains valid at the progression frontier."),
+		AeyerjiRiftRules::CanStageProgressionIndex(5, 4));
+	TestFalse(TEXT("A region behind the progression frontier can never stage."),
+		AeyerjiRiftRules::CanStageProgressionIndex(3, 4));
+	const TArray<int32> TransferredPopulation =
+		AeyerjiRiftRules::AllocateTransferredPopulation(8, 3);
+	TestEqual(TEXT("Skipped population preserves forward destination count."), TransferredPopulation.Num(), 3);
+	TestEqual(TEXT("Stable forward order receives the first transfer remainder."), TransferredPopulation[0], 3);
+	TestEqual(TEXT("Stable forward order receives the second transfer remainder."), TransferredPopulation[1], 3);
+	TestEqual(TEXT("The final destination receives the remaining transfer."), TransferredPopulation[2], 2);
+	TestEqual(TEXT("Skipped transfer preserves the finite population."),
+		TransferredPopulation[0] + TransferredPopulation[1] + TransferredPopulation[2], 8);
+
 	TestEqual(TEXT("Progress clamps once at its target."),
 		AeyerjiRiftRules::ApplyAcceptedProgressAward(97, 100, 5), 100);
 	TestEqual(TEXT("Later events cannot add progress after completion."),
 		AeyerjiRiftRules::ApplyAcceptedProgressAward(100, 100, 5), 100);
+	TestEqual(TEXT("Progress addition saturates at the target without integer overflow."),
+		AeyerjiRiftRules::ApplyAcceptedProgressAward(MAX_int32 - 2, MAX_int32, MAX_int32), MAX_int32);
 	TestEqual(TEXT("Authored zero-point entries retain the one-point compatibility floor."),
 		AeyerjiRiftRules::ApplyAcceptedProgressAward(10, 100, 0), 11);
 	return true;

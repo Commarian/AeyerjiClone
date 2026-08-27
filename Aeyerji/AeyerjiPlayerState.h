@@ -192,10 +192,6 @@ public:
 	UFUNCTION(Client, Reliable)
 	void Client_ActionBarSwapBlocked(const FText& Reason, TSubclassOf<UGameplayAbility> AbilityClass);
 
-	/** Client-side commit of a server-approved profile snapshot. */
-	UFUNCTION(Client, Reliable)
-	void Client_CommitAuthoritativeProfile(const FAeyerjiSaveTransportHeader& Header, const TArray<uint8>& Bytes);
-
 	/** Begins a bounded server-to-owning-client profile commit transfer. */
 	UFUNCTION(Client, Reliable)
 	void Client_BeginAuthoritativeProfileCommit(const FAeyerjiSaveTransportHeader& Header, int32 TotalBytes, int32 ChunkSize);
@@ -273,7 +269,8 @@ public:
 	UFUNCTION(Server, Reliable, BlueprintCallable, Category="Aeyerji|Passives")
 	void Server_SelectPassive(FName PassiveId);
 
-	UFUNCTION(BlueprintCallable, Category="Aeyerji|Passives")
+	/** Applies a validated passive on authority; clients should use Server_SelectPassive. */
+	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Passives")
 	void SetPassiveLocal(FName PassiveId);
 
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Passives")
@@ -366,6 +363,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Frontend|Lobby")
 	int64 GetFrontendProfileRevision() const { return FrontendProfileRevision; }
+
+	/** Returns the server-bound profile owner established by a verified lobby preflight. */
+	const FString& GetFrontendProfileOwnerKey() const { return FrontendProfileOwnerKey; }
 
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Frontend|Lobby")
 	bool IsFrontendReady() const { return bFrontendReady; }
@@ -478,6 +478,8 @@ protected:
 private:
 	/** Applies the authoritative action-bar update and optionally enforces user-edit cooldown rules. */
 	void ApplyActionBarUpdate(const TArray<FAeyerjiAbilitySlot>& NewBar, bool bValidateCooldowns);
+	/** Rebuilds a client-requested slot from the authoritative ability catalog and progression state. */
+	bool ResolveAuthorizedAbilitySlot(const FAeyerjiAbilitySlot& RequestedSlot, FAeyerjiAbilitySlot& OutSlot) const;
 	void GrantAbilityFromSlotInternal(const FAeyerjiAbilitySlot& AbilitySlot);
 	void MirrorProgressionRanksIntoActionBar();
 	int32 GetProgressionRankForSlot(const FAeyerjiAbilitySlot& AbilitySlot) const;
@@ -513,8 +515,13 @@ private:
 	int32 PendingFrontendProfileChunkSize = 0;
 	bool bFrontendProfileTransferActive = false;
 
+	/**
+	 * Server-only owner binding for the connection's verified profile. This lets unauthenticated
+	 * NULL/LAN clients use their stable local development owner without trusting later owner changes.
+	 */
+	FString FrontendProfileOwnerKey;
+
 	void ResetPendingFrontendProfileSubmission();
 	void RejectFrontendProfileSubmission(const TCHAR* Reason);
 	static constexpr int32 FrontendProfileTransportChunkSize = 48 * 1024;
-	static constexpr int32 FrontendProfileMaximumBytes = 4 * 1024 * 1024;
 };

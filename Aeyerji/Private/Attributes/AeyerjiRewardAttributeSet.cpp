@@ -14,3 +14,11 @@ void UAeyerjiRewardAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProp
     DOREPLIFETIME_CONDITION_NOTIFY(UAeyerjiRewardAttributeSet, XPRewardBase, COND_None, REPNOTIFY_Always);
 }
 
+void UAeyerjiRewardAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue)
+{
+	Super::PreAttributeChange(Attribute, NewValue);
+	if (Attribute == GetXPRewardBaseAttribute())
+	{
+		NewValue = FMath::IsFinite(NewValue) ? FMath::Max(0.f, NewValue) : 0.f;
+	}
+}

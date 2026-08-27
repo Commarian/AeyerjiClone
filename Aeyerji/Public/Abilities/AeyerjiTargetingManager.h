@@ -6,7 +6,6 @@
 #include "CoreMinimal.h"
 #include "Abilities/AeyerjiAbilitySlot.h"
 #include "Engine/TimerHandle.h"
-#include "Net/UnrealNetwork.h"
 #include "AeyerjiTargetingManager.generated.h"
 
 class AAeyerjiPlayerController;
@@ -28,12 +27,15 @@ struct FAeyerjiTargetingTunables
 {
 	GENERATED_BODY()
 
+	/** Seconds between local range-preview redraws. Zero disables repeated redraws. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Targeting")
 	float RangePreviewTickRate = 0.05f;
 
+	/** Lifetime of each transient debug circle; normally slightly longer than the tick rate. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Targeting")
 	float RangePreviewDrawLife = 0.06f;
 
+	/** Line thickness of the local range-preview circle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|Targeting")
 	float RangePreviewThickness = 2.5f;
 };
@@ -97,8 +99,9 @@ private:
 	float ResolveAbilityPreviewRange(const FAeyerjiAbilitySlot& Slot) const;
 	void DrawAbilityRangePreview(float Range, EAeyerjiTargetMode Mode);
 	UAbilitySystemComponent* GetControlledAbilitySystem() const;
+	bool IsEligibleActorTarget(const AActor* TargetActor) const;
 
-	AAeyerjiPlayerController* OwnerPC = nullptr;
+	TWeakObjectPtr<AAeyerjiPlayerController> OwnerPC;
 	FAeyerjiTargetingTunables Tunables;
 	FAeyerjiTargetingHooks Hooks;
 

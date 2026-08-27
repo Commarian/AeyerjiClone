@@ -55,6 +55,9 @@ void UAeyerjiFrontendSubsystem::Deinitialize()
 	}
 	BoundGameState.Reset();
 	BoundPlayerState.Reset();
+	ProfileSubmissionPlayerState.Reset();
+	ProfileSubmissionRevision = 0;
+	bProfileSubmissionPending = false;
 	ResolvedProfile = nullptr;
 	Super::Deinitialize();
 }
@@ -88,8 +91,12 @@ void UAeyerjiFrontendSubsystem::HandleProfileResolved(const bool bSuccess, const
 	{
 		SubmitResolvedProfileToLobby();
 	}
-	UE_LOG(LogTemp, Display, TEXT("[Frontend] ProfileResolved Result=%d Existing=%d Revision=%lld Level=%d"),
-		bSuccess, bHadPersistedData, FrontendSnapshot.ProfileRevision, FrontendSnapshot.CharacterLevel);
+	UE_LOG(LogTemp, Display, TEXT("[Frontend] ProfileResolved Result=%d Existing=%d Owner=%s Revision=%lld Level=%d"),
+		bSuccess,
+		bHadPersistedData,
+		SaveData ? *SaveData->OwnerKey : TEXT("None"),
+		FrontendSnapshot.ProfileRevision,
+		FrontendSnapshot.CharacterLevel);
 }
 
 void UAeyerjiFrontendSubsystem::HandleProfileChanged(const FString& OwnerKey, const int64 Revision)
@@ -132,6 +139,17 @@ void UAeyerjiFrontendSubsystem::RefreshCurrentState()
 	SubmitResolvedProfileToLobby();
 }
 
+void UAeyerjiFrontendSubsystem::NotifyLocalPlayerStateReady(AAeyerjiPlayerState* PlayerState)
+{
+	if (!PlayerState || PlayerState != GetLocalAeyerjiPlayerState())
+	{
+		return;
+	}
+
+	BindLobbyState();
+	SubmitResolvedProfileToLobby();
+}
+
 bool UAeyerjiFrontendSubsystem::HostPublicParty(const FString& PartyName)
 {
 	UAeyerjiSessionSubsystem* Sessions = GetGameInstance()->GetSubsystem<UAeyerjiSessionSubsystem>();
@@ -154,6 +172,12 @@ bool UAeyerjiFrontendSubsystem::LeaveCurrentParty()
 {
 	UAeyerjiSessionSubsystem* Sessions = GetGameInstance()->GetSubsystem<UAeyerjiSessionSubsystem>();
 	return Sessions && Sessions->LeaveCurrentParty();
+}
+
+bool UAeyerjiFrontendSubsystem::OpenPartyInviteOverlay()
+{
+	UAeyerjiSessionSubsystem* Sessions = GetGameInstance()->GetSubsystem<UAeyerjiSessionSubsystem>();
+	return Sessions && Sessions->OpenPartyInviteOverlay();
 }
 
 bool UAeyerjiFrontendSubsystem::SetReady(const bool bReady)
@@ -217,6 +241,15 @@ void UAeyerjiFrontendSubsystem::HandleLobbySnapshot(const FAeyerjiLobbySnapshot&
 {
 	LobbySnapshot = Snapshot;
 	OnLobbySnapshotChanged.Broadcast(LobbySnapshot);
+
+	// Session travel replaces the local PlayerState after the profile has already resolved in
+	// the GameInstance. The first replicated lobby snapshot is the reliable signal that the new
+	// PlayerState exists and can receive the profile transport RPCs.
+	if (const AAeyerjiPlayerState* PS = GetLocalAeyerjiPlayerState();
+		PS && PS->GetFrontendProfileState() == EAeyerjiLobbyProfileState::NotSubmitted)
+	{
+		SubmitResolvedProfileToLobby();
+	}
 }
 
 void UAeyerjiFrontendSubsystem::HandlePostLoadMap(UWorld* LoadedWorld)
@@ -289,15 +322,40 @@ bool UAeyerjiFrontendSubsystem::SubmitResolvedProfileToLobby()
 	}
 	if (PS->GetFrontendProfileRevision() == ResolvedProfile->Revision && PS->IsFrontendProfileVerified())
 	{
+		ProfileSubmissionPlayerState = PS;
+		ProfileSubmissionRevision = ResolvedProfile->Revision;
+		bProfileSubmissionPending = false;
 		return true;
 	}
+
+	if (ProfileSubmissionPlayerState.Get() != PS)
+	{
+		ProfileSubmissionPlayerState = PS;
+		ProfileSubmissionRevision = 0;
+		bProfileSubmissionPending = false;
+	}
+	if (bProfileSubmissionPending && ProfileSubmissionRevision == ResolvedProfile->Revision)
+	{
+		return true;
+	}
+
 	FAeyerjiSaveTransportHeader Header;
 	TArray<uint8> Bytes;
 	if (!SaveManager->BuildTransportFromProfile(ResolvedProfile, Header, Bytes))
 	{
 		return false;
 	}
-	return PS->SubmitFrontendProfile(Header, Bytes);
+	const bool bSubmitted = PS->SubmitFrontendProfile(Header, Bytes);
+	if (bSubmitted)
+	{
+		ProfileSubmissionPlayerState = PS;
+		ProfileSubmissionRevision = ResolvedProfile->Revision;
+		bProfileSubmissionPending = true;
+		UE_LOG(LogTemp, Display,
+			TEXT("[Frontend] ProfileSubmissionQueued Player=%s Owner=%s Revision=%lld Bytes=%d"),
+			*PS->GetPlayerName(), *Header.OwnerKey, Header.Revision, Bytes.Num());
+	}
+	return bSubmitted;
 }
 
 FText UAeyerjiFrontendSubsystem::ResolveFailureText(const EAeyerjiFrontendFailure Failure)

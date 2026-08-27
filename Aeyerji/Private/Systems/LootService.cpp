@@ -31,10 +31,86 @@ static int32 ResolveEffectiveLootLevel(const FLootContext& Context);
 namespace
 {
 	constexpr float DifficultyLootMaxScalar = 100.f;
+	constexpr float MaxLootRuntimeScalar = 1000000.f;
+	constexpr float MaxLootWeight = 1000000000.f;
+	constexpr float MaxLootDebugDurationSeconds = 60.f;
+	constexpr int32 MaxLootPityAttempts = 1000000;
+	constexpr int32 MaxLootMultiDropResults = 1024;
+	constexpr int32 MaxLootMultiDropBuckets = 256;
+	constexpr int32 MaxLootUniquenessRetries = 64;
+	constexpr int32 MaxLootTablePoolsToInspect = 4096;
+	constexpr int32 MaxLootEntriesToInspect = 16384;
+	constexpr int32 MaxLootEntrySetsToInspect = 1024;
+	constexpr int32 MaxLootDefinitionsToInspect = 16384;
+
+	bool IsValidLootServiceRarity(const EItemRarity Rarity)
+	{
+		return IsValidLootDropRarity(Rarity);
+	}
+
+	float ResolveLootWeight(const float Weight)
+	{
+		return FMath::Clamp(FMath::IsFinite(Weight) ? Weight : 0.f, 0.f, MaxLootWeight);
+	}
+
+	float ResolveLootChanceFraction(const float Percentage)
+	{
+		return FMath::Clamp(FMath::IsFinite(Percentage) ? Percentage : 0.f, 0.f, 100.f) / 100.f;
+	}
+
+	FLootContext SanitizeLootContext(const FLootContext& Context, const UWorld* ExpectedWorld)
+	{
+		FLootContext Safe = Context;
+		if (!Safe.PlayerActor.IsValid()
+			|| (ExpectedWorld && Safe.PlayerActor->GetWorld() != ExpectedWorld))
+		{
+			Safe.PlayerActor.Reset();
+		}
+		if (!IsValid(Safe.ForcedItemDefinition))
+		{
+			Safe.ForcedItemDefinition = nullptr;
+		}
+		Safe.EnemyLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(Safe.EnemyLevel);
+		Safe.PlayerLevel = Safe.PlayerLevel > 0
+			? UAeyerjiDifficultySettings::ClampGameplayLevel(Safe.PlayerLevel)
+			: 0;
+		Safe.WorldTier = FMath::Clamp(Safe.WorldTier, 0, MaxLootPityAttempts);
+		Safe.BaseLegendaryChance = FMath::Clamp(
+			FMath::IsFinite(Safe.BaseLegendaryChance) ? Safe.BaseLegendaryChance : 0.f, 0.f, 1.f);
+		Safe.MinimumRarity = IsValidLootServiceRarity(Safe.MinimumRarity) ? Safe.MinimumRarity : EItemRarity::Common;
+		Safe.PitySuccessRarity = IsValidLootServiceRarity(Safe.PitySuccessRarity) ? Safe.PitySuccessRarity : EItemRarity::Legendary;
+		Safe.DifficultyScale = FMath::Clamp(
+			FMath::IsFinite(Safe.DifficultyScale) ? Safe.DifficultyScale : 1.f, 0.f, MaxLootRuntimeScalar);
+		Safe.RewardQualityMultiplier = FMath::Clamp(
+			FMath::IsFinite(Safe.RewardQualityMultiplier) ? Safe.RewardQualityMultiplier : 1.f, 0.f, MaxLootRuntimeScalar);
+		Safe.PitySoftStartOverride = FMath::Clamp(Safe.PitySoftStartOverride, -1, MaxLootPityAttempts);
+		Safe.PityHardAttemptsOverride = FMath::Clamp(Safe.PityHardAttemptsOverride, -1, MaxLootPityAttempts);
+		Safe.PitySoftSlopeOverride = FMath::IsFinite(Safe.PitySoftSlopeOverride)
+			? FMath::Clamp(Safe.PitySoftSlopeOverride, -1.f, 1.f)
+			: -1.f;
+		Safe.PityMaxChanceOverride = FMath::IsFinite(Safe.PityMaxChanceOverride)
+			? FMath::Clamp(Safe.PityMaxChanceOverride, -1.f, 1.f)
+			: -1.f;
+		for (auto WeightIt = Safe.RarityWeights.CreateIterator(); WeightIt; ++WeightIt)
+		{
+			if (!IsValidLootServiceRarity(WeightIt.Key()) || !FMath::IsFinite(WeightIt.Value()))
+			{
+				WeightIt.RemoveCurrent();
+			}
+			else
+			{
+				WeightIt.Value() = FMath::Clamp(WeightIt.Value(), 0.f, MaxLootWeight);
+			}
+		}
+		return Safe;
+	}
 
 	bool RollPercentChanceInternal(const float PercentageChance)
 	{
-		const float ClampedPercent = FMath::Clamp(PercentageChance, 0.f, 100.f);
+		const float ClampedPercent = FMath::Clamp(
+			FMath::IsFinite(PercentageChance) ? PercentageChance : 0.f,
+			0.f,
+			100.f);
 		if (ClampedPercent <= 0.f)
 		{
 			return false;
@@ -66,7 +142,8 @@ namespace
 		{
 			if (AAeyerjiLevelDirector* Director = *It)
 			{
-				return FMath::Clamp(Director->GetCurvedDifficulty(), 0.f, 1.f);
+				const float Difficulty = Director->GetCurvedDifficulty();
+				return FMath::Clamp(FMath::IsFinite(Difficulty) ? Difficulty : 0.f, 0.f, 1.f);
 			}
 		}
 
@@ -77,7 +154,7 @@ namespace
 	{
 		// Treat "1.0" as the blueprint default meaning "use the run difficulty" for the MVP.
 		// Explicit overrides are still supported by setting DifficultyScale to something else.
-		const float Provided = Context.DifficultyScale;
+		const float Provided = FMath::IsFinite(Context.DifficultyScale) ? Context.DifficultyScale : 1.f;
 		if (Provided > 0.f && !FMath::IsNearlyEqual(Provided, 1.f))
 		{
 			return Provided;
@@ -89,15 +166,18 @@ namespace
 
 	int32 RollCountWithVariance(int32 Base, int32 Variance)
 	{
-		const int32 SafeBase = FMath::Max(0, Base);
-		const int32 SafeVariance = FMath::Max(0, Variance);
+		const int32 SafeBase = FMath::Clamp(Base, 0, MaxLootMultiDropResults);
+		const int32 SafeVariance = FMath::Clamp(Variance, 0, MaxLootMultiDropResults);
 		if (SafeVariance <= 0)
 		{
 			return SafeBase;
 		}
 
 		const int32 Delta = FMath::RandRange(-SafeVariance, SafeVariance);
-		return FMath::Max(0, SafeBase + Delta);
+		return static_cast<int32>(FMath::Clamp<int64>(
+			static_cast<int64>(SafeBase) + Delta,
+			0,
+			MaxLootMultiDropResults));
 	}
 
 	int32 ResolveActorGameplayLevel(const AActor* Actor)
@@ -116,7 +196,10 @@ namespace
 
 			if (const UAeyerjiAttributeSet* Attr = ASC->GetSet<UAeyerjiAttributeSet>())
 			{
-				return UAeyerjiDifficultySettings::ClampGameplayLevel(FMath::RoundToInt(Attr->GetLevel()));
+				const float Level = Attr->GetLevel();
+				return FMath::IsFinite(Level)
+					? UAeyerjiDifficultySettings::FloatToGameplayLevel(Level)
+					: 0;
 			}
 
 			return 0;
@@ -154,7 +237,7 @@ namespace
 			return Result.ItemDefinitionKey;
 		}
 
-		if (Result.ItemDefinition)
+		if (IsValid(Result.ItemDefinition))
 		{
 			return Result.ItemDefinition->GetDefinitionKey();
 		}
@@ -179,13 +262,20 @@ namespace
 
 		if (World)
 		{
-			GEngine->AddOnScreenDebugMessage(-1, Duration, Color, Message);
+			const float SafeDuration = FMath::Clamp(
+				FMath::IsFinite(Duration) ? Duration : 0.f,
+				0.f,
+				MaxLootDebugDurationSeconds);
+			GEngine->AddOnScreenDebugMessage(-1, SafeDuration, Color, Message);
 		}
 	}
 
 	void ApplyRewardQualityBias(TMap<EItemRarity, float>& RarityWeights, const float RewardQualityMultiplier)
 	{
-		const float Quality = FMath::Max(RewardQualityMultiplier, 0.f);
+		const float Quality = FMath::Clamp(
+			FMath::IsFinite(RewardQualityMultiplier) ? RewardQualityMultiplier : 1.f,
+			0.f,
+			MaxLootRuntimeScalar);
 		if (RarityWeights.IsEmpty() || FMath::IsNearlyEqual(Quality, 1.f))
 		{
 			return;
@@ -193,7 +283,8 @@ namespace
 
 		for (TPair<EItemRarity, float>& Pair : RarityWeights)
 		{
-			if (Pair.Key == EItemRarity::Legendary || Pair.Value <= 0.f)
+			if (!IsValidLootServiceRarity(Pair.Key) || Pair.Key == EItemRarity::Legendary
+				|| !FMath::IsFinite(Pair.Value) || Pair.Value <= 0.f)
 			{
 				continue;
 			}
@@ -202,24 +293,41 @@ namespace
 			// and post-Epic authored rarities receiving a smooth monotonic progression.
 			const float RarityRank = static_cast<float>(static_cast<uint8>(Pair.Key));
 			const float Exponent = FMath::Clamp(RarityRank / static_cast<float>(static_cast<uint8>(EItemRarity::Epic)), 0.f, 2.f);
-			Pair.Value *= FMath::Pow(Quality, Exponent);
+			const double BiasedWeight = static_cast<double>(Pair.Value) * FMath::Pow(static_cast<double>(Quality), Exponent);
+			Pair.Value = FMath::IsFinite(BiasedWeight)
+				? static_cast<float>(FMath::Clamp(BiasedWeight, 0.0, static_cast<double>(MaxLootWeight)))
+				: MaxLootWeight;
 		}
 	}
 }
 
+bool IsValidLootDropRarity(const EItemRarity Rarity)
+{
+	const UEnum* const RarityEnum = StaticEnum<EItemRarity>();
+	return RarityEnum && RarityEnum->IsValidEnumValue(static_cast<int64>(Rarity));
+}
+
+bool IsUsableLootDropResult(const FLootDropResult& Result)
+{
+	return IsValidLootDropRarity(Result.Rarity)
+		&& IsValidLootDropRarity(Result.PitySuccessRarity)
+		&& (IsValid(Result.ItemDefinition) || !Result.ItemDefinitionKey.IsNone());
+}
+
 FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 {
+	const FLootContext SafeContext = SanitizeLootContext(Context, GetWorld());
 	FLootDropResult Result;
-	Result.SourceTag = Context.SourceTag;
-	Result.PityGroup = Context.PityGroup;
-	Result.PitySuccessRarity = Context.PitySuccessRarity;
+	Result.SourceTag = SafeContext.SourceTag;
+	Result.PityGroup = SafeContext.PityGroup;
+	Result.PitySuccessRarity = SafeContext.PitySuccessRarity;
 
-	UPlayerStatsTrackingComponent* StatsComp = ResolvePlayerStats(Context);
+	UPlayerStatsTrackingComponent* StatsComp = ResolvePlayerStats(SafeContext);
 	const FPlayerLootStats* Stats = StatsComp ? &StatsComp->GetLootStats() : nullptr;
-	const int32 EffectivePlayerLevelForEligibility = ResolveEffectiveLootLevel(Context);
+	const int32 EffectivePlayerLevelForEligibility = ResolveEffectiveLootLevel(SafeContext);
 
 	const UAeyerjiLootTable* LootTable = GetLootTable();
-	const FLootTablePool* MatchingPool = LootTable ? FindMatchingPool(Context, *LootTable) : nullptr;
+	const FLootTablePool* MatchingPool = LootTable ? FindMatchingPool(SafeContext, *LootTable) : nullptr;
 	if (!MatchingPool && LootTable && LootTable->Pools.Num() > 0)
 	{
 		// No match found: fall back to the first pool so tables take precedence over context gaps.
@@ -229,14 +337,14 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 	TArray<const FLootTableEntry*> PoolEntries;
 	CollectEntries(MatchingPool, PoolEntries, &EntrySetGateCache);
 
-	const float BaseLegendaryChance = FMath::Clamp(Context.BaseLegendaryChance, 0.f, 1.f);
-	const float FinalLegendaryChance = Stats ? ComputeLegendaryChance(Context, *Stats) : BaseLegendaryChance;
+	const float BaseLegendaryChance = SafeContext.BaseLegendaryChance;
+	const float FinalLegendaryChance = Stats ? ComputeLegendaryChance(SafeContext, *Stats) : BaseLegendaryChance;
 
 	bool bDropSuppressed = false;
 
-	FLootContext RarityContext = Context;
-	const UObject* DifficultyWorldContext = Context.PlayerActor.IsValid() ? Context.PlayerActor.Get() : static_cast<const UObject*>(this);
-	RarityContext.DifficultyScale = ResolveLootDifficultyScalar(Context, DifficultyWorldContext);
+	FLootContext RarityContext = SafeContext;
+	const UObject* DifficultyWorldContext = SafeContext.PlayerActor.IsValid() ? SafeContext.PlayerActor.Get() : static_cast<const UObject*>(this);
+	RarityContext.DifficultyScale = ResolveLootDifficultyScalar(SafeContext, DifficultyWorldContext);
 	if (LootTable && LootTable->RarityWeightsTable.IsValid())
 	{
 		LootTable->BuildRarityWeights(EffectivePlayerLevelForEligibility, RarityContext.DifficultyScale, RarityContext.RarityWeights);
@@ -246,7 +354,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 		TMap<EItemRarity, float> Aggregated;
 		for (const FLootTableEntry* Entry : PoolEntries)
 		{
-			if (Entry && Entry->Weight > 0.f)
+			if (Entry && ResolveLootWeight(Entry->Weight) > 0.f && IsValidLootServiceRarity(Entry->Rarity))
 			{
 				const FSoftObjectPath EntryPath = Entry->ItemDefinition.ToSoftObjectPath();
 				if (!EntryPath.IsValid())
@@ -260,11 +368,18 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 					continue;
 				}
 
-				const float DropChance = FMath::Clamp(Entry->PercentageChanceToDropInPool, 0.f, 100.f) / 100.f;
-				const float EffectiveWeight = DropChance > 0.f ? (Entry->Weight * DropChance) : 0.f;
+				const float DropChance = ResolveLootChanceFraction(Entry->PercentageChanceToDropInPool);
+				const double WeightedChance = static_cast<double>(ResolveLootWeight(Entry->Weight)) * DropChance;
+				const float EffectiveWeight = DropChance > 0.f
+					? static_cast<float>(FMath::Clamp(WeightedChance, 0.0, static_cast<double>(MaxLootWeight)))
+					: 0.f;
 				if (EffectiveWeight > 0.f)
 				{
-					Aggregated.FindOrAdd(Entry->Rarity) += EffectiveWeight;
+					float& AggregatedWeight = Aggregated.FindOrAdd(Entry->Rarity);
+					AggregatedWeight = static_cast<float>(FMath::Clamp(
+						static_cast<double>(AggregatedWeight) + EffectiveWeight,
+						0.0,
+						static_cast<double>(MaxLootWeight)));
 				}
 			}
 		}
@@ -274,11 +389,11 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 			RarityContext.RarityWeights = Aggregated;
 		}
 	}
-	else if (Context.RarityWeights.Num() > 0)
+	else if (SafeContext.RarityWeights.Num() > 0)
 	{
-		RarityContext.RarityWeights = Context.RarityWeights;
+		RarityContext.RarityWeights = SafeContext.RarityWeights;
 	}
-	ApplyRewardQualityBias(RarityContext.RarityWeights, Context.RewardQualityMultiplier);
+	ApplyRewardQualityBias(RarityContext.RarityWeights, SafeContext.RewardQualityMultiplier);
 
 	// Rarity rolls come from the pool weights when present; ensure your pool has entries with >0 weight for any rarity you allow here.
 	Result.Rarity = ChooseRarity(RarityContext, FinalLegendaryChance, RarityContext.MinimumRarity);
@@ -288,16 +403,16 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 	const int32 EffectivePlayerLevel = EffectivePlayerLevelForEligibility;
 
 	// Propagate forced item selection when provided so downstream spawn has a definition/key.
-	if (Context.ForcedItemDefinition && IsDefinitionEligibleForLootLevel(*Context.ForcedItemDefinition, EffectivePlayerLevel))
+	if (SafeContext.ForcedItemDefinition && IsDefinitionEligibleForLootLevel(*SafeContext.ForcedItemDefinition, EffectivePlayerLevel))
 	{
-		Result.ItemDefinition = Context.ForcedItemDefinition;
-		Result.ItemDefinitionKey = UItemDefinition::MakeDefinitionKey(Context.ForcedItemDefinition);
+		Result.ItemDefinition = SafeContext.ForcedItemDefinition;
+		Result.ItemDefinitionKey = UItemDefinition::MakeDefinitionKey(SafeContext.ForcedItemDefinition);
 	}
 
 	// Pick definition/key from your actual loot tables based on rarity and context.
 	if (!Result.ItemDefinition && Result.ItemDefinitionKey.IsNone())
 	{
-		ChooseDefinitionForContext(Context, Result.Rarity, MatchingPool, Result.ItemDefinition, Result.ItemDefinitionKey, bDropSuppressed, &EntrySetGateCache, &Result.Rarity);
+		ChooseDefinitionForContext(SafeContext, Result.Rarity, MatchingPool, Result.ItemDefinition, Result.ItemDefinitionKey, bDropSuppressed, &EntrySetGateCache, &Result.Rarity);
 	}
 
 	// Secondary table fallback: use the first available entry in the matched pool when nothing was selected.
@@ -305,7 +420,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 	{
 		for (const FLootTableEntry* Entry : PoolEntries)
 		{
-			if (!Entry || Entry->Weight <= 0.f)
+			if (!Entry || ResolveLootWeight(Entry->Weight) <= 0.f)
 			{
 				continue;
 			}
@@ -326,7 +441,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 				continue;
 			}
 
-			const float DropChance = FMath::Clamp(Entry->PercentageChanceToDropInPool, 0.f, 100.f) / 100.f;
+			const float DropChance = ResolveLootChanceFraction(Entry->PercentageChanceToDropInPool);
 			if (DropChance <= 0.f || (DropChance < 1.f && FMath::FRand() > DropChance))
 			{
 				continue;
@@ -348,7 +463,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 
 			if (Result.ItemDefinition || !Result.ItemDefinitionKey.IsNone())
 			{
-				Result.Rarity = Entry->Rarity;
+				Result.Rarity = IsValidLootServiceRarity(Entry->Rarity) ? Entry->Rarity : EItemRarity::Common;
 				break;
 			}
 		}
@@ -357,13 +472,15 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 	// Table-wide fallback: if the matched pool was empty, walk all pools and pick the first weighted entry.
 	if (!bDropSuppressed && !Result.ItemDefinition && Result.ItemDefinitionKey.IsNone() && LootTable)
 	{
-		for (const FLootTablePool& Pool : LootTable->Pools)
+		const int32 PoolCount = FMath::Min(LootTable->Pools.Num(), MaxLootTablePoolsToInspect);
+		for (int32 PoolIndex = 0; PoolIndex < PoolCount; ++PoolIndex)
 		{
+			const FLootTablePool& Pool = LootTable->Pools[PoolIndex];
 			TArray<const FLootTableEntry*> AnyEntries;
 			CollectEntries(&Pool, AnyEntries, &EntrySetGateCache);
 			for (const FLootTableEntry* Entry : AnyEntries)
 			{
-				if (!Entry || Entry->Weight <= 0.f)
+				if (!Entry || ResolveLootWeight(Entry->Weight) <= 0.f)
 				{
 					continue;
 				}
@@ -384,7 +501,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 					continue;
 				}
 
-				const float DropChance = FMath::Clamp(Entry->PercentageChanceToDropInPool, 0.f, 100.f) / 100.f;
+				const float DropChance = ResolveLootChanceFraction(Entry->PercentageChanceToDropInPool);
 				if (DropChance <= 0.f || (DropChance < 1.f && FMath::FRand() > DropChance))
 				{
 					continue;
@@ -406,7 +523,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 
 				if (Result.ItemDefinition || !Result.ItemDefinitionKey.IsNone())
 				{
-					Result.Rarity = Entry->Rarity;
+					Result.Rarity = IsValidLootServiceRarity(Entry->Rarity) ? Entry->Rarity : EItemRarity::Common;
 					break;
 				}
 			}
@@ -433,8 +550,8 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 		Result.ItemDefinitionKey = Result.ItemDefinition->GetDefinitionKey();
 	}
 
-	Result.bCountsAsPitySuccess = Context.PityGroup.IsValid()
-		&& static_cast<int32>(Result.Rarity) >= static_cast<int32>(Context.PitySuccessRarity)
+	Result.bCountsAsPitySuccess = SafeContext.PityGroup.IsValid()
+		&& static_cast<int32>(Result.Rarity) >= static_cast<int32>(SafeContext.PitySuccessRarity)
 		&& (Result.ItemDefinition || !Result.ItemDefinitionKey.IsNone());
 
 	if (StatsComp)
@@ -448,6 +565,7 @@ FLootDropResult ULootService::RollLoot(const FLootContext& Context)
 bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMultiDropConfig& Config, TArray<FLootDropResult>& OutResults)
 {
 	OutResults.Reset();
+	const FLootContext SafeBaseContext = SanitizeLootContext(BaseContext, GetWorld());
 
 	auto ShowDebug = [&](const FString& Msg)
 	{
@@ -467,8 +585,10 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 		return false;
 	}
 
-	for (const FLootMultiDropBucket& Bucket : Config.Buckets)
+	const int32 BucketCount = FMath::Min(Config.Buckets.Num(), MaxLootMultiDropBuckets);
+	for (int32 BucketIndex = 0; BucketIndex < BucketCount; ++BucketIndex)
 	{
+		const FLootMultiDropBucket& Bucket = Config.Buckets[BucketIndex];
 		if (Bucket.BaseDrops < 0 || Bucket.Variance < 0)
 		{
 			ShowDebug(FString::Printf(TEXT("Loot multi-drop bucket %s has negative BaseDrops/Variance."), *Bucket.Tag.ToString()));
@@ -484,7 +604,18 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 
 	const int32 TotalTarget = RollCountWithVariance(Config.TotalBaseDrops, Config.TotalVariance);
 
-	TArray<FLootMultiDropBucket> Buckets = Config.Buckets;
+	TArray<FLootMultiDropBucket> Buckets;
+	Buckets.Reserve(BucketCount);
+	for (int32 BucketIndex = 0; BucketIndex < BucketCount; ++BucketIndex)
+	{
+		FLootMultiDropBucket Bucket = Config.Buckets[BucketIndex];
+		Bucket.BaseDrops = FMath::Clamp(Bucket.BaseDrops, 0, MaxLootMultiDropResults);
+		Bucket.Variance = FMath::Clamp(Bucket.Variance, 0, MaxLootMultiDropResults);
+		Bucket.MinimumRarity = IsValidLootServiceRarity(Bucket.MinimumRarity)
+			? Bucket.MinimumRarity
+			: EItemRarity::Common;
+		Buckets.Add(MoveTemp(Bucket));
+	}
 	if (Config.bShuffleBuckets && Buckets.Num() > 1)
 	{
 		for (int32 Idx = Buckets.Num() - 1; Idx > 0; --Idx)
@@ -497,16 +628,17 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 		}
 	}
 
-	const int32 RetryBudget = FMath::Max(0, Config.UniquenessRetryCount);
+	const int32 RetryBudget = FMath::Clamp(Config.UniquenessRetryCount, 0, MaxLootUniquenessRetries);
 	const bool bEnforceGlobalUnique = Config.bRequireTotalUnique;
 
 	TSet<FName> GlobalSeen;
 
 	for (const FLootMultiDropBucket& Bucket : Buckets)
 	{
-		const int32 RemainingRoom = (TotalTarget > 0) ? FMath::Max(0, TotalTarget - OutResults.Num()) : INT32_MAX;
+		const int32 EffectiveTotalCap = TotalTarget > 0 ? TotalTarget : MaxLootMultiDropResults;
+		const int32 RemainingRoom = FMath::Max(0, EffectiveTotalCap - OutResults.Num());
 		int32 TargetForBucket = RollCountWithVariance(Bucket.BaseDrops, Bucket.Variance);
-		if (TotalTarget > 0 && TargetForBucket > RemainingRoom)
+		if (TargetForBucket > RemainingRoom)
 		{
 			TargetForBucket = RemainingRoom;
 		}
@@ -520,7 +652,7 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 
 		for (int32 RollIdx = 0; RollIdx < TargetForBucket; ++RollIdx)
 		{
-			FLootContext ContextForBucket = BaseContext;
+			FLootContext ContextForBucket = SafeBaseContext;
 			const int32 MergedMinRarity = FMath::Max(static_cast<int32>(ContextForBucket.MinimumRarity), static_cast<int32>(Bucket.MinimumRarity));
 			ContextForBucket.MinimumRarity = static_cast<EItemRarity>(MergedMinRarity);
 
@@ -570,13 +702,13 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 				ShowDebug(FString::Printf(TEXT("Loot multi-drop uniqueness exhausted in bucket %s"), *Bucket.Tag.ToString()));
 			}
 
-			if (TotalTarget > 0 && OutResults.Num() >= TotalTarget)
+			if (OutResults.Num() >= EffectiveTotalCap)
 			{
 				break;
 			}
 		}
 
-		if (TotalTarget > 0 && OutResults.Num() >= TotalTarget)
+		if (OutResults.Num() >= (TotalTarget > 0 ? TotalTarget : MaxLootMultiDropResults))
 		{
 			break;
 		}
@@ -587,7 +719,7 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 		const int32 Remaining = TotalTarget - OutResults.Num();
 		for (int32 Idx = 0; Idx < Remaining; ++Idx)
 		{
-			OutResults.Add(RollLoot(BaseContext));
+			OutResults.Add(RollLoot(SafeBaseContext));
 		}
 	}
 
@@ -596,15 +728,35 @@ bool ULootService::RollMultiDrop(const FLootContext& BaseContext, const FLootMul
 
 float ULootService::ComputeLegendaryChance(const FLootContext& Context, const FPlayerLootStats& Stats) const
 {
-	const float BaseChance = FMath::Clamp(Context.BaseLegendaryChance, 0.f, 1.f);
-	const FAeyerjiLootPityMemory* PityMemory = Context.PityGroup.IsValid()
-		? Stats.FindPityMemory(Context.PityGroup)
+	const FLootContext SafeContext = SanitizeLootContext(Context, GetWorld());
+	const float BaseChance = SafeContext.BaseLegendaryChance;
+	const FAeyerjiLootPityMemory* PityMemory = SafeContext.PityGroup.IsValid()
+		? Stats.FindPityMemory(SafeContext.PityGroup)
 		: nullptr;
-	const int32 Misses = PityMemory ? PityMemory->AttemptsSinceLastSuccess : Stats.DropsSinceLastLegendary;
-	const int32 EffectiveHardPity = Context.PityHardAttemptsOverride >= 0 ? Context.PityHardAttemptsOverride : HardPityDrops;
-	const int32 EffectiveSoftStart = Context.PitySoftStartOverride >= 0 ? Context.PitySoftStartOverride : SoftPityStart;
-	const float EffectiveSoftSlope = Context.PitySoftSlopeOverride >= 0.f ? Context.PitySoftSlopeOverride : SoftPitySlope;
-	const float EffectiveMaxChance = Context.PityMaxChanceOverride >= 0.f ? Context.PityMaxChanceOverride : MaxLegendaryChance;
+	const int32 Misses = FMath::Clamp(
+		PityMemory ? PityMemory->AttemptsSinceLastSuccess : Stats.DropsSinceLastLegendary,
+		0,
+		MaxLootPityAttempts);
+	const int32 EffectiveHardPity = FMath::Clamp(
+		SafeContext.PityHardAttemptsOverride >= 0 ? SafeContext.PityHardAttemptsOverride : HardPityDrops,
+		0,
+		MaxLootPityAttempts);
+	const int32 EffectiveSoftStart = FMath::Clamp(
+		SafeContext.PitySoftStartOverride >= 0 ? SafeContext.PitySoftStartOverride : SoftPityStart,
+		0,
+		MaxLootPityAttempts);
+	const float EffectiveSoftSlope = FMath::Clamp(
+		FMath::IsFinite(SafeContext.PitySoftSlopeOverride) && SafeContext.PitySoftSlopeOverride >= 0.f
+			? SafeContext.PitySoftSlopeOverride
+			: (FMath::IsFinite(SoftPitySlope) ? SoftPitySlope : 0.f),
+		0.f,
+		1.f);
+	const float EffectiveMaxChance = FMath::Clamp(
+		FMath::IsFinite(SafeContext.PityMaxChanceOverride) && SafeContext.PityMaxChanceOverride >= 0.f
+			? SafeContext.PityMaxChanceOverride
+			: (FMath::IsFinite(MaxLegendaryChance) ? MaxLegendaryChance : 0.25f),
+		0.f,
+		1.f);
 
 	// Hard pity: force success when threshold reached.
 	if (EffectiveHardPity > 0 && Misses >= EffectiveHardPity)
@@ -612,27 +764,28 @@ float ULootService::ComputeLegendaryChance(const FLootContext& Context, const FP
 		return 1.0f;
 	}
 
-	float Chance = BaseChance;
+	double Chance = BaseChance;
 	if (EffectiveSoftStart > 0 && Misses > EffectiveSoftStart)
 	{
 		const int32 Over = Misses - EffectiveSoftStart;
-		Chance += Over * EffectiveSoftSlope;
+		Chance += static_cast<double>(Over) * EffectiveSoftSlope;
 	}
 
-	const bool bWindowHasData = Stats.WindowCount >= StarvedWindowMinCount;
+	const int32 SafeWindowMinCount = FMath::Clamp(StarvedWindowMinCount, 0, MaxLootPityAttempts);
+	const bool bWindowHasData = Stats.WindowCount >= SafeWindowMinCount;
 	const bool bWindowStarved = bWindowHasData && Stats.LegendariesInWindow == 0;
 	if (bWindowStarved)
 	{
-		Chance += StarvedWindowBonus;
+		Chance += FMath::Clamp(FMath::IsFinite(StarvedWindowBonus) ? StarvedWindowBonus : 0.f, 0.f, 1.f);
 	}
 
-	return FMath::Clamp(Chance, 0.f, EffectiveMaxChance);
+	return static_cast<float>(FMath::Clamp(Chance, 0.0, static_cast<double>(EffectiveMaxChance)));
 }
 
 UPlayerStatsTrackingComponent* ULootService::ResolvePlayerStats(const FLootContext& Context) const
 {
 	AActor* Actor = Context.PlayerActor.Get();
-	if (!Actor)
+	if (!IsValid(Actor) || (GetWorld() && Actor->GetWorld() != GetWorld()))
 	{
 		return nullptr;
 	}
@@ -675,8 +828,10 @@ UAeyerjiLootTable* ULootService::GetLootTable() const
 
 const FLootTablePool* ULootService::FindMatchingPool(const FLootContext& Context, const UAeyerjiLootTable& Table) const
 {
-	for (const FLootTablePool& Pool : Table.Pools)
+	const int32 PoolCount = FMath::Min(Table.Pools.Num(), MaxLootTablePoolsToInspect);
+	for (int32 PoolIndex = 0; PoolIndex < PoolCount; ++PoolIndex)
 	{
+		const FLootTablePool& Pool = Table.Pools[PoolIndex];
 		if (Pool.SourceTag.IsValid())
 		{
 			if (!Context.SourceTag.IsValid() || !Context.SourceTag.MatchesTag(Pool.SourceTag))
@@ -714,8 +869,11 @@ const FLootTablePool* ULootService::FindMatchingPool(const FLootContext& Context
 
 EItemRarity ULootService::ChooseRarity(const FLootContext& Context, float LegendaryChance, EItemRarity MinimumRarity) const
 {
+	MinimumRarity = IsValidLootServiceRarity(MinimumRarity) ? MinimumRarity : EItemRarity::Common;
+	LegendaryChance = FMath::Clamp(FMath::IsFinite(LegendaryChance) ? LegendaryChance : 0.f, 0.f, 1.f);
 	const float Roll = FMath::FRand();
-	if (Roll <= LegendaryChance)
+	if (Roll <= LegendaryChance
+		&& static_cast<int32>(EItemRarity::Legendary) >= static_cast<int32>(MinimumRarity))
 	{
 		return EItemRarity::Legendary;
 	}
@@ -726,26 +884,27 @@ EItemRarity ULootService::ChooseRarity(const FLootContext& Context, float Legend
 		TArray<TPair<EItemRarity, float>> Entries;
 		Entries.Reserve(Context.RarityWeights.Num());
 
-		float TotalWeight = 0.f;
+		double TotalWeight = 0.0;
 		for (const TPair<EItemRarity, float>& Pair : Context.RarityWeights)
 		{
-			if (Pair.Key == EItemRarity::Legendary)
+			if (!IsValidLootServiceRarity(Pair.Key) || Pair.Key == EItemRarity::Legendary
+				|| static_cast<int32>(Pair.Key) < static_cast<int32>(MinimumRarity))
 			{
 				continue; // handled by LegendaryChance above
 			}
 
-			const float Weight = FMath::Max(0.f, Pair.Value);
+			const float Weight = ResolveLootWeight(Pair.Value);
 			if (Weight > 0.f)
 			{
-				Entries.Add(Pair);
-				TotalWeight += Weight;
+				Entries.Emplace(Pair.Key, Weight);
+				TotalWeight = FMath::Min(TotalWeight + static_cast<double>(Weight), static_cast<double>(MaxLootWeight));
 			}
 		}
 
 		if (TotalWeight > KINDA_SMALL_NUMBER)
 		{
-			const float RollWeight = FMath::FRandRange(0.f, TotalWeight);
-			float Accum = 0.f;
+			const double RollWeight = static_cast<double>(FMath::FRand()) * TotalWeight;
+			double Accum = 0.0;
 			for (const TPair<EItemRarity, float>& Pair : Entries)
 			{
 				Accum += Pair.Value;
@@ -773,9 +932,11 @@ static UItemDefinition* ChooseFallbackItemDefinition(int32 EffectivePlayerLevel)
 	}
 
 	TArray<UItemDefinition*> Candidates;
-	Candidates.Reserve(AssetIds.Num());
-	for (const FPrimaryAssetId& AssetId : AssetIds)
+	const int32 AssetCount = FMath::Min(AssetIds.Num(), MaxLootDefinitionsToInspect);
+	Candidates.Reserve(AssetCount);
+	for (int32 AssetIndex = 0; AssetIndex < AssetCount; ++AssetIndex)
 	{
+		const FPrimaryAssetId& AssetId = AssetIds[AssetIndex];
 		UItemDefinition* Def = Cast<UItemDefinition>(Manager.GetPrimaryAssetObject(AssetId));
 		if (!Def)
 		{
@@ -797,8 +958,14 @@ static UItemDefinition* ChooseFallbackItemDefinition(int32 EffectivePlayerLevel)
 
 static bool SupportsRarity(const UItemDefinition& Definition, EItemRarity Rarity)
 {
-	for (const FItemRarityAffixRange& Range : Definition.RarityAffixRanges)
+	if (!IsValidLootServiceRarity(Rarity))
 	{
+		return false;
+	}
+	const int32 RangeCount = FMath::Min(Definition.RarityAffixRanges.Num(), MaxLootEntrySetsToInspect);
+	for (int32 RangeIndex = 0; RangeIndex < RangeCount; ++RangeIndex)
+	{
+		const FItemRarityAffixRange& Range = Definition.RarityAffixRanges[RangeIndex];
 		if (Range.Rarity == Rarity)
 		{
 			return true;
@@ -836,7 +1003,7 @@ static bool RollPercentChance(const float PercentageChance)
 
 static bool PassesEntrySetGate(const UAeyerjiLootEntrySet* Set, FLootEntrySetGateCache* GateCache)
 {
-	if (!Set)
+	if (!IsValid(Set))
 	{
 		return true;
 	}
@@ -858,6 +1025,7 @@ static bool PassesEntrySetGate(const UAeyerjiLootEntrySet* Set, FLootEntrySetGat
 
 static void CollectEntries(const FLootTablePool* Pool, TArray<const FLootTableEntry*>& OutEntries, FLootEntrySetGateCache* GateCache)
 {
+	OutEntries.Reset();
 	if (!Pool)
 	{
 		return;
@@ -865,16 +1033,20 @@ static void CollectEntries(const FLootTablePool* Pool, TArray<const FLootTableEn
 
 	auto AppendEntries = [&](const TArray<FLootTableEntry>& Source)
 	{
-		for (const FLootTableEntry& Entry : Source)
+		const int32 Available = MaxLootEntriesToInspect - OutEntries.Num();
+		const int32 EntryCount = FMath::Min(Source.Num(), FMath::Max(0, Available));
+		for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 		{
-			OutEntries.Add(&Entry);
+			OutEntries.Add(&Source[EntryIndex]);
 		}
 	};
 
 	AppendEntries(Pool->Entries);
 
-	for (const TSoftObjectPtr<UAeyerjiLootEntrySet>& SetPtr : Pool->EntrySets)
+	const int32 SetCount = FMath::Min(Pool->EntrySets.Num(), MaxLootEntrySetsToInspect);
+	for (int32 SetIndex = 0; SetIndex < SetCount && OutEntries.Num() < MaxLootEntriesToInspect; ++SetIndex)
 	{
+		const TSoftObjectPtr<UAeyerjiLootEntrySet>& SetPtr = Pool->EntrySets[SetIndex];
 		const UAeyerjiLootEntrySet* Set = SetPtr.LoadSynchronous();
 		if (!Set)
 		{
@@ -898,8 +1070,8 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 
 	if (Pool)
 	{
-		float TotalWeight = 0.f;
-		float AnyTotal = 0.f;
+		double TotalWeight = 0.0;
+		double AnyTotal = 0.0;
 		bool bHadEligibleEntries = false;
 		bool bAnyPassedDropChance = false;
 
@@ -912,20 +1084,25 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 		};
 
 		TArray<FWeightedEntry> WeightedEntries;
-		WeightedEntries.Reserve(Pool->Entries.Num());
+		WeightedEntries.Reserve(FMath::Min(Pool->Entries.Num(), MaxLootEntriesToInspect));
 
 		auto AppendEntries = [&](const TArray<FLootTableEntry>& Source, const UAeyerjiLootEntrySet* OwningSet)
 		{
-			for (const FLootTableEntry& Entry : Source)
+			const int32 Available = MaxLootEntriesToInspect - WeightedEntries.Num();
+			const int32 EntryCount = FMath::Min(Source.Num(), FMath::Max(0, Available));
+			for (int32 EntryIndex = 0; EntryIndex < EntryCount; ++EntryIndex)
 			{
+				const FLootTableEntry& Entry = Source[EntryIndex];
 				WeightedEntries.Add({ &Entry, OwningSet, 0.f, Entry.ItemDefinition.ToSoftObjectPath() });
 			}
 		};
 
 		AppendEntries(Pool->Entries, nullptr);
 
-		for (const TSoftObjectPtr<UAeyerjiLootEntrySet>& SetPtr : Pool->EntrySets)
+		const int32 SetCount = FMath::Min(Pool->EntrySets.Num(), MaxLootEntrySetsToInspect);
+		for (int32 SetIndex = 0; SetIndex < SetCount && WeightedEntries.Num() < MaxLootEntriesToInspect; ++SetIndex)
 		{
+			const TSoftObjectPtr<UAeyerjiLootEntrySet>& SetPtr = Pool->EntrySets[SetIndex];
 			if (const UAeyerjiLootEntrySet* Set = SetPtr.LoadSynchronous())
 			{
 				AppendEntries(Set->Entries, Set);
@@ -945,7 +1122,7 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 				continue;
 			}
 
-			if (Entry->Weight <= 0.f)
+			if (ResolveLootWeight(Entry->Weight) <= 0.f || !IsValidLootServiceRarity(Entry->Rarity))
 			{
 				continue;
 			}
@@ -973,7 +1150,7 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 				continue;
 			}
 
-			const float DropChance = FMath::Clamp(Entry->PercentageChanceToDropInPool, 0.f, 100.f) / 100.f;
+			const float DropChance = ResolveLootChanceFraction(Entry->PercentageChanceToDropInPool);
 			if (DropChance <= 0.f)
 			{
 				continue;
@@ -986,25 +1163,25 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 
 			bAnyPassedDropChance = true;
 
-			const float EffectiveWeight = FMath::Max(0.f, Entry->Weight);
+			const float EffectiveWeight = ResolveLootWeight(Entry->Weight);
 			if (EffectiveWeight <= 0.f)
 			{
 				continue;
 			}
 
 			Candidate.EffectiveWeight = EffectiveWeight;
-			AnyTotal += EffectiveWeight;
+			AnyTotal = FMath::Min(AnyTotal + EffectiveWeight, static_cast<double>(MaxLootWeight));
 
 			if (Entry->Rarity == Rarity)
 			{
-				TotalWeight += EffectiveWeight;
+				TotalWeight = FMath::Min(TotalWeight + EffectiveWeight, static_cast<double>(MaxLootWeight));
 			}
 		}
 
 		if (TotalWeight > KINDA_SMALL_NUMBER && WeightedEntries.Num() > 0)
 		{
-			const float Roll = FMath::FRandRange(0.f, TotalWeight);
-			float Accum = 0.f;
+			const double Roll = static_cast<double>(FMath::FRand()) * TotalWeight;
+			double Accum = 0.0;
 			for (const FWeightedEntry& Candidate : WeightedEntries)
 			{
 				const FLootTableEntry* Entry = Candidate.Entry;
@@ -1044,8 +1221,8 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 		{
 			if (AnyTotal > KINDA_SMALL_NUMBER)
 			{
-				const float RollAny = FMath::FRandRange(0.f, AnyTotal);
-				float AccumAny = 0.f;
+				const double RollAny = static_cast<double>(FMath::FRand()) * AnyTotal;
+				double AccumAny = 0.0;
 				for (const FWeightedEntry& Candidate : WeightedEntries)
 				{
 					const FLootTableEntry* Entry = Candidate.Entry;
@@ -1091,11 +1268,15 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 	static TArray<FPrimaryAssetId> CachedAssetIds;
 	static TArray<TWeakObjectPtr<UItemDefinition>> CachedDefinitions;
 
-	if (!bCacheBuilt)
+	if (!bCacheBuilt || CachedAssetIds.IsEmpty())
 	{
 		bCacheBuilt = true;
 
 		Manager.GetPrimaryAssetIdList(AssetType, CachedAssetIds);
+		if (CachedAssetIds.Num() > MaxLootDefinitionsToInspect)
+		{
+			CachedAssetIds.SetNum(MaxLootDefinitionsToInspect, EAllowShrinking::No);
+		}
 		CachedDefinitions.SetNum(CachedAssetIds.Num());
 
 		for (int32 Idx = 0; Idx < CachedAssetIds.Num(); ++Idx)
@@ -1120,11 +1301,12 @@ static void ChooseDefinitionForContext(const FLootContext& Context, EItemRarity 
 	}
 
 	TArray<UItemDefinition*> Candidates;
-	Candidates.Reserve(CachedDefinitions.Num());
+	Candidates.Reserve(FMath::Min(CachedDefinitions.Num(), MaxLootDefinitionsToInspect));
 
 	auto AppendCandidates = [&](bool bRequireSourceTag)
 	{
-		for (int32 Idx = 0; Idx < CachedAssetIds.Num(); ++Idx)
+		const int32 AssetCount = FMath::Min(CachedAssetIds.Num(), MaxLootDefinitionsToInspect);
+		for (int32 Idx = 0; Idx < AssetCount && Candidates.Num() < MaxLootDefinitionsToInspect; ++Idx)
 		{
 			UItemDefinition* Def = CachedDefinitions.IsValidIndex(Idx) ? CachedDefinitions[Idx].Get() : nullptr;
 			if (!Def)
