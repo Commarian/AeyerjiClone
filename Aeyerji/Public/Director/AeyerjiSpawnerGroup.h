@@ -242,9 +242,23 @@ struct AEYERJI_API FAeyerjiEnemyPoolSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling", meta=(ClampMin="1"))
 	int32 PrewarmPerTick = 4;
 
-	/** Relative location from this spawner where inactive pooled enemies are hidden and parked. */
+	/**
+	 * Relative location from this spawner where inactive pooled enemies are hidden and parked.
+	 * This pool jail is insurance only: parked enemies are fully dormant (no collision, AI,
+	 * movement, damage, or ticking), so correctness never depends on this distance. Keep it
+	 * far outside gameplay query ranges and off the playable nav mesh. Never park below the
+	 * map: an underground spot is indistinguishable from a catastrophic nav failure.
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling")
-	FVector PoolParkingOffset = FVector(0.f, 0.f, -5000.f);
+	FVector PoolParkingOffset = FVector(250000.f, 0.f, 20000.f);
+
+	/** Spacing between parked enemies in the pool jail grid so parked actors stay inspectable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling", meta=(ClampMin="0.0", Units="cm"))
+	float PoolParkingSlotSpacing = 300.f;
+
+	/** Parked enemies per jail grid row before wrapping to the next row. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Pooling", meta=(ClampMin="1"))
+	int32 PoolParkingSlotsPerRow = 10;
 };
 
 USTRUCT(BlueprintType)
@@ -775,6 +789,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Spawner|Difficulty")
 	TSoftObjectPtr<UDataTable> EnemyScalingTable;
 
+	/**
+	 * Applies explicit level/world-tier inputs to subsequent spawns from a transient combat test.
+	 * Values are runtime-only, are never serialized, and are ignored until this method is called.
+	 */
+	void SetCombatTestScalingOverrides(int32 InEnemyLevel, int32 InWorldTier);
+
+	/** Clears runtime-only combat-test scaling inputs and restores normal director/player resolution. */
+	void ClearCombatTestScalingOverrides();
+
 protected:
 	UFUNCTION()
 	void HandleActivationOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
@@ -805,6 +828,12 @@ protected:
 	/** Picks a location/orientation for the next enemy to appear. */
 	bool ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, FTransform& OutTransform);
 
+	/**
+	 * Removes marker/owner scale from a spawn transform so markers place but never resize pawns.
+	 * Warns once per source actor; unit-scale transforms pass through untouched.
+	 */
+	FTransform StripSpawnSourceScale(const FTransform& SourceTransform, const AActor* SourceActor);
+
 	/** Spawns one pawn from the provided wave/set definition and begins tracking it. */
 	bool SpawnOneFromSet(int32 WaveIndex, int32 SetIndex);
 
@@ -823,6 +852,14 @@ protected:
 	/** Restores attributes, scale, gameplay tags, effects, abilities, and VFX that this spawner applied previously. */
 	void RestorePooledEnemyForCheckout(APawn* EnemyPawn, const FEnemySet& ResolvedEnemySet, const FTransform& SpawnTransform);
 
+	/**
+	 * Server-only diagnostic: warns with pawn/archetype attribution when a non-elite finishes
+	 * spawning with anomalous actor scale. Elites, mini-bosses, and bosses carry intentional
+	 * multipliers and are excluded. Reports are throttled; clients apply the same spawn
+	 * transform the server used, so a server-side anomaly covers the presentation path too.
+	 */
+	void CheckSpawnedPawnScale(APawn* SpawnedPawn, const FEnemySet& ResolvedEnemySet);
+
 	/** Removes the current spawner-applied package from a pooled enemy without touching blueprint/base startup grants. */
 	void CleanupSpawnerAppliedRuntimeState(APawn* EnemyPawn);
 
@@ -832,6 +869,12 @@ protected:
 	void TrackPooledEffect(APawn* EnemyPawn, FActiveGameplayEffectHandle EffectHandle);
 	void TrackPooledNiagara(APawn* EnemyPawn, UNiagaraComponent* NiagaraComponent);
 	FVector ResolvePooledOriginalScale(APawn* EnemyPawn) const;
+	/**
+	 * Next free pool-jail grid slot. Each parked pawn takes a new slot so pooled actors never
+	 * stack exactly and stay individually inspectable. Server-side only: the resolved LOCATION
+	 * replicates to clients, so the counter itself never causes a server/client mismatch.
+	 */
+	mutable int32 PoolParkingSlotCounter = 0;
 	FVector GetPoolParkingLocation() const;
 	void SetPooledEnemyInactiveState(APawn* EnemyPawn, const FVector& ParkingLocation);
 	void SetPooledEnemyActiveState(APawn* EnemyPawn, const FTransform& SpawnTransform);
@@ -1015,6 +1058,15 @@ protected:
 	bool bExactPoolPrewarmInProgress = false;
 	bool bExactPoolPrewarmFinalized = false;
 
+	/** Source actors already warned about for non-unit spawn scale (their scale keeps being stripped). */
+	TSet<FName> WarnedScaledSpawnSources;
+
+	/** Last world time an overscale-spawn warning was emitted, used to throttle repeat reports. */
+	double LastOverscaleWarningTime = -1.0;
+
+	/** Overscale spawns detected but suppressed by the warning throttle since the last report. */
+	int32 SuppressedOverscaleWarningCount = 0;
+
 	/** Exact planned actor count per class/archetype/elite key for the current frozen run. */
 	TMap<FAeyerjiEnemyPoolKey, int32> ExactPoolKeyCapacities;
 
@@ -1049,6 +1101,12 @@ protected:
 
 	/** Runtime copy of waves (from inline authoring or encounter definition). */
 	TArray<FWaveDefinition> EncounterWavesRuntime;
+
+	/** Explicit enemy level used only by the transient combat-balance test harness; zero uses normal resolution. */
+	int32 CombatTestEnemyLevelOverride = 0;
+
+	/** Explicit world tier used only by the transient combat-balance test harness; INDEX_NONE uses normal resolution. */
+	int32 CombatTestWorldTierOverride = INDEX_NONE;
 
 	/** Spawn point iteration cache for sequential/symmetrical patterns. */
 	TArray<int32> SpawnPointOrder;

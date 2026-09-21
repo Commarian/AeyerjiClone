@@ -1,5 +1,6 @@
 #include "GUI/W_EndRunScreen.h"
 
+#include "Animation/WidgetAnimation.h"
 #include "Aeyerji/AeyerjiGameInstance.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
 #include "Components/Button.h"
@@ -9,6 +10,7 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GUI/AeyerjiStringLibrary.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 
 namespace
@@ -203,6 +205,12 @@ void UW_EndRunScreen::ApplyRunResults(const FAeyerjiRunResults& InResults)
 	RefreshDifficultyControls();
 }
 
+void UW_EndRunScreen::NativePreConstruct()
+{
+	Super::NativePreConstruct();
+	ApplyLivingTheme();
+}
+
 void UW_EndRunScreen::NativeConstruct()
 {
 	Super::NativeConstruct();
@@ -227,6 +235,14 @@ void UW_EndRunScreen::NativeConstruct()
 
 	RefreshDisplayedValues();
 	RefreshDifficultyControls();
+
+	if (EndRunOpen)
+	{
+		StopAnimation(EndRunOpen);
+		const float AuthoredDuration = EndRunOpen->GetEndTime() - EndRunOpen->GetStartTime();
+		PlayAnimation(EndRunOpen, 0.f, 1, EUMGSequencePlayMode::Forward,
+			FMath::Max(0.01f, AuthoredDuration) / UAeyerjiUIStyleLibrary::PanelEntranceSeconds);
+	}
 }
 
 void UW_EndRunScreen::NativeDestruct()
@@ -447,4 +463,46 @@ void UW_EndRunScreen::RefreshDifficultyControls()
 	{
 		DifficultyValueText->SetText(FText::AsNumber(DifficultyDisplayValue(GameInstance->GetDifficultySlider())));
 	}
+}
+
+void UW_EndRunScreen::ApplyLivingTheme()
+{
+	UAeyerjiUIStyleLibrary::StyleScreenHeading(ResultTitleText);
+	UAeyerjiUIStyleLibrary::StyleBodyText(ResultDetailText);
+
+	UTextBlock* const MetricLabels[] = {
+		UnitsKilledLabelText,
+		UnitsGoalLabelText,
+		TimeElapsedLabelText,
+		TimeRemainingLabelText,
+		SpeedBonusLabelText,
+		BestTimeLabelText,
+		DifficultyLabelText,
+		FailureReasonLabelText
+	};
+	for (UTextBlock* Label : MetricLabels)
+	{
+		UAeyerjiUIStyleLibrary::StyleMetricLabel(Label);
+	}
+
+	UTextBlock* const MetricValues[] = {
+		UnitsKilledValueText,
+		UnitsGoalValueText,
+		TimeElapsedValueText,
+		TimeRemainingValueText,
+		SpeedBonusValueText,
+		BestTimeValueText,
+		DifficultyValueText
+	};
+	for (UTextBlock* Value : MetricValues)
+	{
+		UAeyerjiUIStyleLibrary::StyleMetricValue(Value);
+	}
+	UAeyerjiUIStyleLibrary::StyleMetricValue(FailureReasonText, true);
+
+	UAeyerjiUIStyleLibrary::ApplyMenuButtonStyle(RetryButton);
+	UAeyerjiUIStyleLibrary::ApplyMenuButtonStyle(ReturnToMenuButton);
+	UAeyerjiUIStyleLibrary::StyleMenuButtonLabel(RetryButtonLabel);
+	UAeyerjiUIStyleLibrary::StyleMenuButtonLabel(ReturnToMenuButtonLabel);
+	UAeyerjiUIStyleLibrary::StyleSlider(RetryDifficultySlider);
 }

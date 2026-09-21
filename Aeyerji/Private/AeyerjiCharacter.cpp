@@ -82,6 +82,13 @@ AAeyerjiCharacter::AAeyerjiCharacter(
     MeshComponent->SetGenerateOverlapEvents(false);
     MeshComponent->SetCanEverAffectNavigation(false);
   }
+
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		// Every player and enemy derives from this class. Their capsules block one another laterally,
+		// but must never act as stairs or a floor that allows living characters to stack vertically.
+		Capsule->CanCharacterStepUpOn = ECB_No;
+	}
 }
 
 void AAeyerjiCharacter::OnConstruction(const FTransform& Transform)
@@ -94,6 +101,11 @@ void AAeyerjiCharacter::OnConstruction(const FTransform& Transform)
 
 void AAeyerjiCharacter::BeginPlay() {
   Super::BeginPlay();
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		// Enforce the shared grounded-collision contract after Blueprint component defaults are applied.
+		Capsule->CanCharacterStepUpOn = ECB_No;
+	}
   CaptureBaseCollisionCapsuleSize();
   RefreshCollisionCapsuleSize();
   WarnOnScaledRootCapsule();

@@ -96,6 +96,7 @@ public:
 	bool ShouldShowSurvivalRoundHUD(const FAeyerjiSurvivalRoundState& SurvivalState) const;
 
 protected:
+	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 
 	/** Blueprint presentation hook fired whenever ApplyObjectiveState() receives a new snapshot. */
@@ -320,6 +321,18 @@ private:
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
 	TObjectPtr<UTextBlock> MapMissionDescript;
 
+	/** Optional heading shown above the current mission copy. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
+	TObjectPtr<UTextBlock> MapMissionHeader;
+
+	/** Optional world-tier caption shown with the current mission. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
+	TObjectPtr<UTextBlock> MapWorldTier;
+
+	/** Optional one-shot mission or round announcement text. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
+	TObjectPtr<UTextBlock> Message;
+
 	/** Optional Blueprint widget used by native greater-rift objective presentation for kill-count text. */
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
 	TObjectPtr<UTextBlock> MapProgressKills;
@@ -327,6 +340,10 @@ private:
 	/** Optional Blueprint widget used by native greater-rift objective presentation for kill-progress fill. */
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
 	TObjectPtr<UProgressBar> MapProgressBar;
+
+	/** Optional countdown/progress bar paired with the mission description. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
+	TObjectPtr<UProgressBar> MapTimerBar;
 
 	/** Optional Blueprint widget used by native defense-objective cleanup to hide inactive survival health text. */
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
@@ -339,6 +356,14 @@ private:
 	/** Optional Blueprint widget used by native defense-objective cleanup to hide inactive survival labels. */
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
 	TObjectPtr<UTextBlock> ObjectiveLabel;
+
+	/** Optional temporary +gold amount shown before it merges into the total. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
+	TObjectPtr<UTextBlock> GoldDeltaText;
+
+	/** Optional persistent profile-gold total. */
+	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"))
+	TObjectPtr<UTextBlock> GoldTotalText;
 
 	FTimerHandle GoldMergeTimerHandle;
 	FTimerHandle GoldCountTimerHandle;

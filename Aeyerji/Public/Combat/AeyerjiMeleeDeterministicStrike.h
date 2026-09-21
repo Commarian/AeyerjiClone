@@ -8,6 +8,29 @@
  */
 struct AEYERJI_API FAeyerjiMeleeDeterministicStrikePolicy
 {
+	/** Sanitizes a per-archetype animation play-rate multiplier. Non-positive or non-finite values mean "no adjustment". */
+	static float SanitizeAnimationPlayRateMultiplier(float AnimationMultiplier)
+	{
+		return (FMath::IsFinite(AnimationMultiplier) && AnimationMultiplier > 0.f) ? AnimationMultiplier : 1.f;
+	}
+
+	/** Combines the AttackSpeed-derived base rate with the per-archetype animation multiplier. */
+	static float CalculateEffectiveMontagePlayRate(float BasePlayRate, float AnimationMultiplier)
+	{
+		const float SafeBase = FMath::IsFinite(BasePlayRate) ? FMath::Max(BasePlayRate, KINDA_SMALL_NUMBER) : 1.f;
+		return FMath::Max(SafeBase * SanitizeAnimationPlayRateMultiplier(AnimationMultiplier), KINDA_SMALL_NUMBER);
+	}
+
+	/**
+	 * Sanitizes a per-archetype primary-attack cooldown override.
+	 * Returns the override when it is a positive finite duration, otherwise 0 to signal
+	 * "fall back to the shared AttackSpeed-derived cooldown path".
+	 */
+	static float SanitizePrimaryAttackCooldownOverride(float CooldownOverrideSeconds)
+	{
+		return (FMath::IsFinite(CooldownOverrideSeconds) && CooldownOverrideSeconds > 0.f) ? CooldownOverrideSeconds : 0.f;
+	}
+
 	/** Returns the server impact delay after attack-speed scaling. */
 	static float CalculateImpactDelay(float WindupDuration, float StrikeDelay, float MontagePlayRate)
 	{

@@ -2,6 +2,7 @@
 
 #include "Blueprint/WidgetTree.h"
 #include "Components/TextBlock.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 
 void UW_AeyerjiCombatText::ApplyCombatText(
 	const FText& InDisplayText,
@@ -59,12 +60,7 @@ void UW_AeyerjiCombatText::EnsureNativeTextBlock()
 	}
 
 	NativeTextBlock->SetJustification(ETextJustify::Center);
-	NativeTextBlock->SetShadowOffset(FVector2D(1.f, 1.f));
-	NativeTextBlock->SetShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f));
-
-	FSlateFontInfo FontInfo = NativeTextBlock->GetFont();
-	FontInfo.Size = 22;
-	NativeTextBlock->SetFont(FontInfo);
+	UAeyerjiUIStyleLibrary::StyleCombatText(NativeTextBlock);
 
 	WidgetTree->RootWidget = NativeTextBlock;
 }
@@ -77,6 +73,7 @@ void UW_AeyerjiCombatText::RefreshNativeTextBlock()
 	}
 
 	NativeTextBlock->SetText(DisplayText);
+	UAeyerjiUIStyleLibrary::StyleCombatText(NativeTextBlock);
 	NativeTextBlock->SetColorAndOpacity(FSlateColor(TextColor));
 	SetRenderScale(FVector2D(TextScale, TextScale));
 }

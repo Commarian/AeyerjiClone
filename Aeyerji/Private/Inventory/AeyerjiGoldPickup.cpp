@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Aeyerji.
 
 #include "Inventory/AeyerjiGoldPickup.h"
+#include "Inventory/AeyerjiPickupCollisionPolicy.h"
 
 #include "../../AeyerjiPlayerController.h"
 #include "../../AeyerjiPlayerState.h"
@@ -95,6 +96,7 @@ AAeyerjiGoldPickup* AAeyerjiGoldPickup::SpawnGold(
 void AAeyerjiGoldPickup::BeginPlay()
 {
 	Super::BeginPlay();
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(*this, PickupSphere);
 
 	if (PickupSphere)
 	{
@@ -151,6 +153,7 @@ void AAeyerjiGoldPickup::OnConstruction(const FTransform& Transform)
 	{
 		PickupSphere->SetSphereRadius(GetInteractionRadius_Implementation());
 	}
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(*this, PickupSphere);
 	UpdateGoldLabel();
 }
 

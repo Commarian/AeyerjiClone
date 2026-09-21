@@ -160,6 +160,16 @@ void UAeyerjiViewDistanceCullComponent::EvaluateCulling()
 			continue;
 		}
 
+		// Actor tags and classes can change after the spawn callback registers an actor.
+		// In particular, encounter spawners add ViewCull.Ignore during construction or
+		// pooled checkout, so re-evaluate policy before applying a stale cull entry.
+		if (!IsCullableActor(Actor))
+		{
+			ApplyCullState(Actor, Pair.Value, false);
+			ToRemove.Add(Pair.Key);
+			continue;
+		}
+
 		const float DistSq = FVector::DistSquared(ViewLoc, Actor->GetActorLocation());
 		const bool bCurrentlyCulled = Pair.Value.bCulled;
 		const bool bShouldCull = bCurrentlyCulled ? (DistSq > EnterRadiusSq) : (DistSq > ExitRadiusSq);
@@ -461,11 +471,10 @@ void UAeyerjiViewDistanceCullComponent::ApplyCullState(
 			}
 
 			FComponentVisibilityState& CompState = State.Components.FindOrAdd(Comp);
-			if (!CompState.bCachedVisibility)
+			if (!CompState.bCachedHiddenState)
 			{
-				CompState.bOriginalVisible = Comp->GetVisibleFlag();
 				CompState.bOriginalHiddenInGame = Comp->bHiddenInGame;
-				CompState.bCachedVisibility = true;
+				CompState.bCachedHiddenState = true;
 			}
 
 			if (!CompState.bHiddenBySystem)
@@ -482,13 +491,12 @@ void UAeyerjiViewDistanceCullComponent::ApplyCullState(
 			if (UPrimitiveComponent* Comp = Pair.Key.Get())
 			{
 				const FComponentVisibilityState& CompState = Pair.Value;
-				if (CompState.bHiddenBySystem)
+				// Restore only the HiddenInGame value this component actually changed. If
+				// another lifecycle owner (such as pooled checkout) has already cleared it,
+				// do not overwrite that newer state with a stale cached value.
+				if (CompState.bHiddenBySystem && Comp->bHiddenInGame)
 				{
 					Comp->SetHiddenInGame(CompState.bOriginalHiddenInGame, false);
-					if (Comp->GetVisibleFlag() != CompState.bOriginalVisible)
-					{
-						Comp->SetVisibility(CompState.bOriginalVisible, false);
-					}
 				}
 			}
 		}

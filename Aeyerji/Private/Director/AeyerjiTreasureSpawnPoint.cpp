@@ -37,7 +37,10 @@ AAeyerjiTreasureSpawnPoint::AAeyerjiTreasureSpawnPoint()
 	PreviewMesh->SetGenerateOverlapEvents(false);
 	PreviewMesh->SetCanEverAffectNavigation(false);
 	PreviewMesh->SetHiddenInGame(true);
+
+#if WITH_EDITORONLY_DATA
 	PreviewMesh->SetIsVisualizationComponent(true);
+#endif
 }
 
 void AAeyerjiTreasureSpawnPoint::OnConstruction(const FTransform& Transform)

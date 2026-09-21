@@ -6,6 +6,7 @@
 #include "AbilitySystemInterface.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Attributes/AeyerjiRewardAttributeSet.h"
+#include "Director/AeyerjiLevelDirector.h"
 #include "Progression/AeyerjiLevelingComponent.h"
 #include "Progression/AeyerjiRewardTuning.h"
 #include "Progression/AeyerjiRewardConfigComponent.h"
@@ -14,6 +15,7 @@
 #include "GameFramework/PlayerState.h"
 #include "Kismet/GameplayStatics.h"
 #include "Enemy/EnemyParentNative.h"
+#include "Enemy/AeyerjiEnemyArchetypeComponent.h"
 #include "GenericTeamAgentInterface.h"
 #include "EngineUtils.h"
 
@@ -23,6 +25,7 @@ namespace
 	constexpr float MaxRewardScalar = 1000000.f;
 	constexpr float MaxRewardRadius = 10000000.f;
 	constexpr int32 MaxRewardPlayers = 128;
+	FOnAeyerjiEnemyXPAwarded EnemyXPAwardedDelegate;
 
 	float SafeRewardValue(const float Value, const float DefaultValue, const float MinValue, const float MaxValue)
 	{
@@ -101,6 +104,38 @@ namespace
         }
         return 1;
     }
+
+	bool IsTrashEnemy(const AActor* EnemyActor)
+	{
+		if (!IsValid(EnemyActor))
+		{
+			return false;
+		}
+
+		static const FGameplayTag MobRoleTag =
+			FGameplayTag::RequestGameplayTag(TEXT("Enemy.Role.Mob"), /*ErrorIfNotFound=*/false);
+		if (!MobRoleTag.IsValid())
+		{
+			return false;
+		}
+
+		if (const UAeyerjiEnemyArchetypeComponent* Archetype =
+			EnemyActor->FindComponentByClass<UAeyerjiEnemyArchetypeComponent>())
+		{
+			if (Archetype->GetArchetypeTag().MatchesTag(MobRoleTag))
+			{
+				return true;
+			}
+		}
+
+		const UAbilitySystemComponent* ASC = GetASCFromActor(EnemyActor);
+		return ASC && ASC->HasMatchingGameplayTag(MobRoleTag);
+	}
+}
+
+FOnAeyerjiEnemyXPAwarded& UAeyerjiXPLibrary::OnEnemyXPAwarded()
+{
+	return EnemyXPAwardedDelegate;
 }
 
 int32 UAeyerjiXPLibrary::GetHighestPlayerLevel(const UObject* WorldContextObject)
@@ -288,6 +323,22 @@ static bool Resolve_KillerBonusPercent(const UAeyerjiRewardTuning* Tuning, float
     return false;
 }
 
+static bool Resolve_TrashXPRewardMultiplier(const UAeyerjiRewardTuning* Tuning, float& OutMultiplier)
+{
+    const UAeyerjiRewardTuning* Cur = Tuning;
+    int32 Guard = 64;
+    while (Cur && Guard-- > 0)
+    {
+        if (Cur->bOverride_TrashXPRewardMultiplier)
+        {
+			OutMultiplier = SafeRewardValue(Cur->TrashXPRewardMultiplier, UAeyerjiRewardTuning::DefaultTrashXPRewardMultiplier, 0.f, MaxRewardScalar);
+            return true;
+        }
+        Cur = Cur->Parent;
+    }
+    return false;
+}
+
 void UAeyerjiXPLibrary::ApplyRewardTuningToActor(AActor* Actor, const UAeyerjiRewardTuning* RewardTuning)
 {
 	if (!IsValid(Actor) || !Actor->HasAuthority() || !RewardTuning) return;
@@ -320,11 +371,13 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
     float EffectiveBonus  = 1.0f;
     float EffectiveDiffMin = 1.0f;
     float EffectiveDiffMax = 1.0f;
+	float EffectiveTrashMultiplier = UAeyerjiRewardTuning::DefaultTrashXPRewardMultiplier;
     if (const UAeyerjiRewardTuning* Tuning = GetRewardTuningFromActor(EnemyActor))
     {
         float V;
         if (Resolve_PerLevelScalar(Tuning, V))       EffectiveScalar = V;
         if (Resolve_KillerBonusPercent(Tuning, V))   EffectiveBonus  = V;
+		if (Resolve_TrashXPRewardMultiplier(Tuning, V)) EffectiveTrashMultiplier = V;
         float MinV, MaxV;
         if (Resolve_DifficultyMultiplierRange(Tuning, MinV, MaxV))
         {
@@ -349,6 +402,15 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
     {
         return;
     }
+
+	const float RoleMultiplier = IsTrashEnemy(EnemyActor)
+		? SafeRewardValue(EffectiveTrashMultiplier, UAeyerjiRewardTuning::DefaultTrashXPRewardMultiplier, 0.f, MaxRewardScalar)
+		: 1.f;
+	const float RoleAdjustedXP = SafeRewardValue(ScaledXP * RoleMultiplier, 0.f, 0.f, MaxRewardXP);
+	if (RoleAdjustedXP <= 0.f)
+	{
+		return;
+	}
 
 	const float BonusFrac = SafeRewardValue(EffectiveBonus, 0.f, 0.f, 100.f) * 0.01f; // 1.0 -> 0.01
 
@@ -390,8 +452,20 @@ void UAeyerjiXPLibrary::AwardXPOnEnemyDeath(const UObject* WorldContextObject,
 
         const bool bIsKiller = (PS == KillerPS);
         const float Mult = bHasKillerPS ? (bIsKiller ? (1.f + BonusFrac) : (1.f - BonusFrac)) : 1.f;
-		const float ToGive = SafeRewardValue(ScaledXP * Mult, 0.f, 0.f, MaxRewardXP);
+		const float ToGive = SafeRewardValue(RoleAdjustedXP * Mult, 0.f, 0.f, MaxRewardXP);
         Leveling->AddXP(ToGive);
+
+		FAeyerjiEnemyXPAward Award;
+		Award.EnemyActor = EnemyActor;
+		Award.RecipientPawn = Pawn;
+		Award.BaseXP = GetBaseXPFromActor(EnemyActor);
+		Award.ScaledXPBeforeRoleMultiplier = ScaledXP;
+		Award.RoleMultiplier = RoleMultiplier;
+		Award.KillerMultiplier = Mult;
+		Award.AwardedXP = ToGive;
+		Award.EnemyLevel = GetActorLevel_Safe(EnemyActor);
+		Award.bRecipientWasKiller = bIsKiller;
+		EnemyXPAwardedDelegate.Broadcast(Award);
     }
 }
 
@@ -403,6 +477,19 @@ void UAeyerjiXPLibrary::AwardXPToEnemiesOnPlayerDeath(const UObject* WorldContex
     UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr;
 	if (!World || !IsValid(DeadPlayer) || DeadPlayer->GetWorld() != World || !DeadPlayer->HasAuthority()) return;
     if (World->GetNetMode() == NM_Client) return; // server only
+
+	// Rift difficulty is snapshotted when the run starts. Player deaths must not
+	// mutate living enemy levels and create a death-driven difficulty/XP spiral.
+	for (TActorIterator<AAeyerjiLevelDirector> It(World); It; ++It)
+	{
+		if (IsValid(*It) && It->IsRiftRunActive())
+		{
+			UE_LOG(LogTemp, Display,
+				TEXT("[EnemyXP] Suppressed player-death enemy XP during active Rift. Director=%s Player=%s"),
+				*GetNameSafe(*It), *GetNameSafe(DeadPlayer));
+			return;
+		}
+	}
 	if (!IsValid(Killer) || Killer->GetWorld() != World)
 	{
 		Killer = nullptr;

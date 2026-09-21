@@ -30,8 +30,15 @@ namespace
 	constexpr int32 MaxRewardVisualMeshes = 128;
 	constexpr float MaxRewardDistance = 1000000.f;
 	constexpr float MaxRewardDurationSeconds = 86400.f;
+	constexpr float DefaultRewardInteractionRadius = 350.f;
 	constexpr float MinimumTreasureAutoOpenPollingInterval = 0.05f;
 	constexpr float MaximumTreasureAutoOpenPollingInterval = 60.f;
+
+	float ResolveRewardInteractionRadius(const float Radius)
+	{
+		const float FiniteRadius = FMath::IsFinite(Radius) ? Radius : DefaultRewardInteractionRadius;
+		return FMath::Clamp(FiniteRadius > 0.f ? FiniteRadius : DefaultRewardInteractionRadius, 1.f, MaxRewardDistance);
+	}
 
 	bool IsFiniteRewardVector(const FVector& Value)
 	{
@@ -95,7 +102,7 @@ AAeyerjiRewardPresentationActor::AAeyerjiRewardPresentationActor()
 	InteractionSphere->SetCollisionObjectType(ECC_WorldDynamic);
 	InteractionSphere->SetCollisionResponseToAllChannels(ECR_Ignore);
 	InteractionSphere->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block);
-	InteractionSphere->SetSphereRadius(ReleaseInteractionRadius > 0.f ? ReleaseInteractionRadius : 350.f);
+	InteractionSphere->SetSphereRadius(ResolveRewardInteractionRadius(ReleaseInteractionRadius));
 	InteractionSphere->SetGenerateOverlapEvents(false);
 	InteractionSphere->SetCanEverAffectNavigation(false);
 	RefreshInteractionCollision();
@@ -131,8 +138,8 @@ bool AAeyerjiRewardPresentationActor::CanInteract_Implementation(AAeyerjiPlayerC
 	{
 		return false;
 	}
-	if (ReleaseInteractionRadius > 0.f
-		&& FVector::DistSquared2D(PawnLocation, InteractionLocation) > FMath::Square(ReleaseInteractionRadius))
+	const float InteractionRadius = GetInteractionRadius_Implementation();
+	if (FVector::DistSquared2D(PawnLocation, InteractionLocation) > FMath::Square(InteractionRadius))
 	{
 		return false;
 	}
@@ -159,7 +166,7 @@ FVector AAeyerjiRewardPresentationActor::GetInteractionLocation_Implementation()
 
 float AAeyerjiRewardPresentationActor::GetInteractionRadius_Implementation()
 {
-	return FMath::Clamp(FMath::IsFinite(ReleaseInteractionRadius) ? ReleaseInteractionRadius : 350.f, 0.f, MaxRewardDistance);
+	return ResolveRewardInteractionRadius(ReleaseInteractionRadius);
 }
 
 void AAeyerjiRewardPresentationActor::Interact_Implementation(AAeyerjiPlayerController* Controller)
@@ -284,6 +291,7 @@ void AAeyerjiRewardPresentationActor::InitializeReward(
 		MaxRewardDurationSeconds);
 	bReleased = false;
 	bReleaseInProgress = false;
+	bTreasureRuntimeConfigured = false;
 	bTreasureAutoOpenRequestPending = false;
 	bInitialized = true;
 
@@ -294,12 +302,13 @@ void AAeyerjiRewardPresentationActor::InitializeReward(
 		SnapPresentationToGround();
 	}
 
-	AJ_LOG(this, TEXT("[Interaction][RewardPresentation] Initialized RewardCount=%d Source=%s Instigator=%s DropMode=%d ReleasePolicy=%d ScatterRadius=%.1f"),
+	AJ_LOG(this, TEXT("[Interaction][RewardPresentation] Initialized RewardCount=%d Source=%s Instigator=%s DropMode=%d ReleasePolicy=%d ReleaseOffset=%s ScatterRadius=%.1f"),
 		RewardCount,
 		*RewardSourceTag.ToString(),
 		*GetNameSafe(RewardInstigator.Get()),
 		static_cast<int32>(DropMode),
 		static_cast<int32>(ReleasePolicy),
+		*LootReleaseOffset.ToCompactString(),
 		FMath::Max(0.f, LootReleaseScatterRadius));
 	OnRewardInitialized();
 	OnRewardInitializedReplicated();
@@ -373,6 +382,7 @@ void AAeyerjiRewardPresentationActor::ConfigureTreasureAutomation(
 		return;
 	}
 
+	bTreasureRuntimeConfigured = true;
 	bTreasureAutoOpenEnabled = bEnableAutoOpen
 		&& ReleasePolicy == EAeyerjiRewardPresentationReleasePolicy::InteractToRelease;
 	bTreasureAutoOpenRequestPending = false;
@@ -495,7 +505,10 @@ int32 AAeyerjiRewardPresentationActor::GetPendingPrivateRewardCount(const APlaye
 
 bool AAeyerjiRewardPresentationActor::ReleaseStoredLoot(AActor* Activator)
 {
-	const FTransform ReleaseTransform(GetActorRotation(), GetActorLocation() + LootReleaseOffset, GetActorScale3D());
+	const FTransform ReleaseTransform(
+		GetActorRotation(),
+		GetActorLocation() + LootReleaseOffset,
+		GetActorScale3D());
 	return ReleaseStoredLootAtTransform(ReleaseTransform, Activator);
 }
 
@@ -519,9 +532,49 @@ bool AAeyerjiRewardPresentationActor::ReleaseStoredLootAtTransform(const FTransf
 			*GetNameSafe(this), *GetNameSafe(Activator));
 		return false;
 	}
+
+	FTransform EffectiveReleaseTransform = ReleaseTransform;
+	FVector EffectiveReleaseLocation = EffectiveReleaseTransform.GetLocation();
+	const FVector HorizontalOffset(
+		EffectiveReleaseLocation.X - GetActorLocation().X,
+		EffectiveReleaseLocation.Y - GetActorLocation().Y,
+		0.f);
+	const float HorizontalDistance = HorizontalOffset.Size2D();
+	const FVector AuthoredHorizontalEjection(LootReleaseOffset.X, LootReleaseOffset.Y, 0.f);
+	const float RequiredHorizontalDistance = AuthoredHorizontalEjection.Size2D();
+	if (bTreasureRuntimeConfigured
+		&& RequiredHorizontalDistance > KINDA_SMALL_NUMBER
+		&& HorizontalDistance < RequiredHorizontalDistance)
+	{
+		// Blueprint presentation graphs may call the explicit-transform function directly. Enforce the
+		// authored horizontal offset here so that path cannot leave a pickup embedded in its container.
+		FVector EjectionDirection = HorizontalOffset.GetSafeNormal2D();
+		if (EjectionDirection.IsNearlyZero())
+		{
+			EjectionDirection = AuthoredHorizontalEjection.GetSafeNormal2D();
+		}
+		if (EjectionDirection.IsNearlyZero() && IsValid(Activator))
+		{
+			EjectionDirection = (Activator->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
+		}
+		if (EjectionDirection.IsNearlyZero())
+		{
+			EjectionDirection = GetActorForwardVector().GetSafeNormal2D();
+		}
+		if (EjectionDirection.IsNearlyZero())
+		{
+			EjectionDirection = FVector::ForwardVector;
+		}
+		EffectiveReleaseLocation += EjectionDirection * (RequiredHorizontalDistance - HorizontalDistance);
+		EffectiveReleaseTransform.SetLocation(EffectiveReleaseLocation);
+		AJ_LOG(this, TEXT("[Interaction][RewardPresentation] Applied authored loot release offset Requested=%s Effective=%s Offset=%s"),
+			*ReleaseTransform.GetLocation().ToCompactString(),
+			*EffectiveReleaseLocation.ToCompactString(),
+			*LootReleaseOffset.ToCompactString());
+	}
 	if (!PrivateRewardBundles.IsEmpty())
 	{
-		return ReleasePrivateRewardAtTransform(ReleaseTransform, Activator);
+		return ReleasePrivateRewardAtTransform(EffectiveReleaseTransform, Activator);
 	}
 
 	bReleaseInProgress = true;
@@ -546,7 +599,7 @@ bool AAeyerjiRewardPresentationActor::ReleaseStoredLootAtTransform(const FTransf
 	AJ_LOG(this, TEXT("[Interaction][RewardPresentation] Releasing loot StoredResults=%d Activator=%s Location=%s Source=%s ScatterRadius=%.1f"),
 		PendingLootResults.Num(),
 		*GetNameSafe(EffectiveInstigator),
-		*ReleaseTransform.GetLocation().ToCompactString(),
+		*EffectiveReleaseTransform.GetLocation().ToCompactString(),
 		*RewardSourceTag.ToString(),
 		FMath::Max(0.f, LootReleaseScatterRadius));
 	FAeyerjiLootSpawnSummary SpawnSummary;
@@ -556,7 +609,7 @@ bool AAeyerjiRewardPresentationActor::ReleaseStoredLootAtTransform(const FTransf
 	for (int32 ResultIndex = 0; ResultIndex < StoredResultCount; ++ResultIndex)
 	{
 		const FVector SpawnLocation = ResolveRewardScatterLocation(
-			ReleaseTransform.GetLocation(),
+			EffectiveReleaseTransform.GetLocation(),
 			ResultIndex,
 			StoredResultCount,
 			LootReleaseScatterRadius,
@@ -565,7 +618,7 @@ bool AAeyerjiRewardPresentationActor::ReleaseStoredLootAtTransform(const FTransf
 			this,
 			TArray<FLootDropResult>{PendingLootResults[ResultIndex]},
 			SpawnLocation,
-			ReleaseTransform.Rotator(),
+			EffectiveReleaseTransform.Rotator(),
 			/*SeedOverride=*/0,
 			DropMode,
 			EffectiveInstigator,
@@ -1049,6 +1102,9 @@ void AAeyerjiRewardPresentationActor::TrackSpawnedLootPickups(
 	{
 		if (IsValid(Pickup) && Pickup->GetWorld() == GetWorld())
 		{
+			// Reward containers should reveal their contents immediately; enemy drops may still use
+			// the controller's show-loot input and hover behavior independently.
+			Pickup->SetLabelVisible(true);
 			SpawnedLootPickups.AddUnique(TWeakObjectPtr<AAeyerjiLootPickup>(Pickup));
 		}
 	}
@@ -1082,7 +1138,7 @@ void AAeyerjiRewardPresentationActor::RefreshInteractionCollision()
 		&& !bReleased
 		&& RewardCount > 0;
 	InteractionSphere->SetCollisionEnabled(bCanBeInteractedWith ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
-	InteractionSphere->SetSphereRadius(ReleaseInteractionRadius > 0.f ? ReleaseInteractionRadius : 350.f, true);
+	InteractionSphere->SetSphereRadius(ResolveRewardInteractionRadius(ReleaseInteractionRadius), true);
 }
 
 void AAeyerjiRewardPresentationActor::OnRep_RewardSummary()
@@ -1134,10 +1190,7 @@ void AAeyerjiRewardPresentationActor::RefreshRewardSummary()
 
 void AAeyerjiRewardPresentationActor::SanitizeRuntimeSettings()
 {
-	ReleaseInteractionRadius = FMath::Clamp(
-		FMath::IsFinite(ReleaseInteractionRadius) ? ReleaseInteractionRadius : 350.f,
-		0.f,
-		MaxRewardDistance);
+	ReleaseInteractionRadius = ResolveRewardInteractionRadius(ReleaseInteractionRadius);
 	AutoReleaseDelaySeconds = FMath::Clamp(
 		FMath::IsFinite(AutoReleaseDelaySeconds) ? AutoReleaseDelaySeconds : 0.f,
 		0.f,

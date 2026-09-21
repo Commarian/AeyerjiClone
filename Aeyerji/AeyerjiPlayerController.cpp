@@ -10,6 +10,7 @@
 #include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystemInterface.h"
 #include "AbilitySystemComponent.h"
+#include "Abilities/GameplayAbility.h"
 #include "AbilitySystemGlobals.h"
 #include "AeyerjiCharacter.h"
 #include "AeyerjiGameState.h"
@@ -31,7 +32,9 @@
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
 #include "GameFramework/GameUserSettings.h"
+#include "GameDelegates.h"
 #include "GenericTeamAgentInterface.h"
+#include "HAL/PlatformStackWalk.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "NavigationSystem.h"
 #include "Engine/LocalPlayer.h"
@@ -42,6 +45,7 @@
 #include "Abilities/GA_PrimaryMeleeBasic.h"
 #include "Components/CapsuleComponent.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
+#include "Inventory/AeyerjiRewardPresentationActor.h"
 #include "AeyerjiGameplayTags.h"
 #include "Abilities/GA_AeyerjiTargetedEffectBase.h"
 #include "Attributes/AeyerjiAttributeSet.h"
@@ -53,6 +57,7 @@
 #include "GUI/W_InventoryBag_Native.h"
 #include "EngineUtils.h"
 #include "Player/PlayerParentNative.h"
+#include "Player/AeyerjiPlayerCameraManager.h"
 #include "DrawDebugHelpers.h"
 #include "InputCoreTypes.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
@@ -63,6 +68,7 @@
 #include "Components/AeyerjiViewDistanceCullComponent.h"
 #include "Director/AeyerjiEncounterDirector.h"
 #include "Director/AeyerjiLevelDirector.h"
+#include "Testing/AeyerjiCombatBalanceTestHarness.h"
 #include "Engine/StaticMesh.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerState.h"
@@ -71,10 +77,15 @@
 #include "GUI/W_EndRunScreen.h"
 #include "GUI/W_ItemTile.h"
 #include "GUI/W_AeyerjiMissionHUD.h"
+#include "GUI/W_PlayerStatusHUD.h"
 #include "GUI/W_AeyerjiMinimap.h"
+#include "GUI/W_AeyerjiCheatDrawer.h"
 #include "Frontend/AeyerjiFrontendSubsystem.h"
+#include "Progression/AeyerjiLevelingComponent.h"
+#include "Systems/AeyerjiStreamingSubsystem.h"
 #include "Systems/LootService.h"
 #include "Systems/LootTable.h"
+#include "Items/ItemDefinition.h"
 #include "Navigation/AeyerjiNavSafetyLibrary.h"
 
 template <class TAsset>
@@ -92,6 +103,14 @@ static void LoadIfNull(TObjectPtr<TAsset>& Dest, const TCHAR* AssetPath)
 
 namespace
 {
+	constexpr float DefaultGenericInteractionRadius = 350.f;
+	constexpr float MaxGenericInteractionRadius = 1000000.f;
+	constexpr float RemoteClientInteractionApproachScale = 0.75f;
+	constexpr float InteractionGoalScale = 0.75f;
+	constexpr float PersistentGroundMoveRetryInterval = 0.35f;
+	constexpr float PersistentGroundMoveStuckSeconds = 0.75f;
+	constexpr float PersistentGroundMoveProgressDistance = 20.f;
+
 	EWindowMode::Type ResolveWindowModeFromIndex(const int32 WindowMode)
 	{
 		switch (WindowMode)
@@ -473,11 +492,12 @@ namespace
 			return false;
 		}
 
-		const bool bActivatedByTag = ASC->TryActivateAbilitiesByTag(AbilitySlot.Tag, false);
-		if (!bActivatedByTag && AbilitySlot.Class)
+		// A legacy grant can share the slot's tag. Only activate the authorized class;
+		// a rejected native potion must never fall through to the old Blueprint potion.
+		if (AbilitySlot.Class)
 		{
 			const bool bActivatedByClass = ASC->TryActivateAbilityByClass(AbilitySlot.Class);
-			AJ_LOG(LogContext, TEXT("%s: TryActivateByTag failed, TryActivateByClass %s (Tag=%s Class=%s)"),
+			AJ_LOG(LogContext, TEXT("%s: TryActivateByClass %s (Tag=%s Class=%s)"),
 				ContextLabel,
 				bActivatedByClass ? TEXT("succeeded") : TEXT("failed"),
 				*AbilitySlot.Tag.ToString(),
@@ -485,6 +505,7 @@ namespace
 			return bActivatedByClass;
 		}
 
+		const bool bActivatedByTag = ASC->TryActivateAbilitiesByTag(AbilitySlot.Tag, false);
 		AJ_LOG(LogContext, TEXT("%s: TryActivateAbilitiesByTag %s (Tag=%s)"),
 			ContextLabel,
 			bActivatedByTag ? TEXT("succeeded") : TEXT("failed"),
@@ -496,6 +517,8 @@ namespace
 
 AAeyerjiPlayerController::AAeyerjiPlayerController()
 {
+	// The project camera manager owns the final local-camera invariant during UE's post-actor camera update.
+	PlayerCameraManagerClass = AAeyerjiPlayerCameraManager::StaticClass();
 	bShowMouseCursor = true;
 	DefaultMouseCursor = EMouseCursor::Default;
 	bEnableClickEvents = false;
@@ -563,9 +586,22 @@ AAeyerjiPlayerController::AAeyerjiPlayerController()
 }
 void AAeyerjiPlayerController::Tick(float DeltaSeconds)
 {
+	AActor* ViewTargetBeforeSuper = IsLocalController() ? GetViewTarget() : nullptr;
+
 	Super::Tick(DeltaSeconds);
 
+	AActor* ViewTargetAfterSuper = IsLocalController() ? GetViewTarget() : nullptr;
+	if (ViewTargetBeforeSuper != ViewTargetAfterSuper)
+	{
+		UE_LOG(LogAeyerji, Warning,
+			TEXT("[CameraTrace] ViewTarget changed during controller tick. Before=%s After=%s Pawn=%s"),
+			*GetNameSafe(ViewTargetBeforeSuper),
+			*GetNameSafe(ViewTargetAfterSuper),
+			*GetNameSafe(GetPawn()));
+	}
+
 	UpdatePathFollowingForPawnState();
+	UpdatePersistentGroundMoveIntent();
 	UpdatePrimaryMeleeRotationLock();
 
 	if (!IsLocalController())
@@ -660,16 +696,45 @@ void AAeyerjiPlayerController::Tick(float DeltaSeconds)
 
 }
 
+void AAeyerjiPlayerController::UpdateCameraManager(float DeltaSeconds)
+{
+	if (IsLocalController())
+	{
+		// BeginPlay can precede final local-player association in some PIE flows. Bind again at the
+		// last camera phase so focus-loss target changes cannot bypass the guarded notification path.
+		if (!CameraViewTargetChangedHandle.IsValid())
+		{
+			CameraViewTargetChangedHandle = FGameDelegates::Get().GetViewTargetChangedDelegate().AddUObject(
+				this,
+				&AAeyerjiPlayerController::HandleCameraViewTargetChanged);
+			UE_LOG(LogAeyerji, Display, TEXT("[CameraTrace] Bound view-target interception during camera-manager update."));
+		}
+
+		// UE updates cameras after all actor ticks. Repairing here closes the PIE focus-loss window
+		// between the controller tick and APlayerCameraManager::UpdateCamera().
+		RecoverLocalPlayerCameraFromControllerFallback();
+	}
+
+	Super::UpdateCameraManager(DeltaSeconds);
+}
+
 void AAeyerjiPlayerController::OnPossess(APawn* InPawn)
 {
 	// Blueprint class defaults are applied after the native constructor. Disable this before the
 	// engine possession path so APlayerController cannot replace our explicitly restored view target.
 	DisableAutomaticCameraTargetManagement();
 	UnbindMouseCommandRecoveryDelegates();
+	UnbindAbilityFailureFeedback();
 	Super::OnPossess(InPawn);
+	bAllowControllerViewTargetDuringUnpossess = false;
+	CameraFallbackStackLoggedPawn.Reset();
+	LastCameraFallbackDiagnosticTime = -1.0;
 
 	bMoveClickHeld = false;
 	bAttackClickHeld = false;
+	LastPrimaryAttackTarget.Reset();
+	LastServerPrimaryAttackCommandSerial = 0;
+	LastServerPrimaryAttackCommandTarget.Reset();
 	PopPrimaryMeleeRotationLockMode();
 	PrimaryMeleeRotationLockReleaseTime = -1.0;
 	bPrimaryMeleeMovementBlockActive = false;
@@ -677,6 +742,7 @@ void AAeyerjiPlayerController::OnPossess(APawn* InPawn)
 	ResetForMoveOnly();
 	ResetExtractionCountdownState();
 	BindMouseCommandRecoveryDelegates();
+	BindAbilityFailureFeedback();
 
 	if (UPathFollowingComponent* PFC = FindComponentByClass<UPathFollowingComponent>())
 	{
@@ -736,6 +802,74 @@ void AAeyerjiPlayerController::AutoManageActiveCameraTarget(AActor* /*SuggestedT
 	DisableAutomaticCameraTargetManagement();
 }
 
+void AAeyerjiPlayerController::RecoverLocalPlayerCameraFromControllerFallback()
+{
+	APlayerParentNative* PlayerPawn = Cast<APlayerParentNative>(GetPawn());
+	if (!IsValid(PlayerPawn))
+	{
+		return;
+	}
+
+	AActor* CurrentViewTarget = GetViewTarget();
+	if (IsValid(CurrentViewTarget) && CurrentViewTarget != this)
+	{
+		// Preserve deliberate view targets such as cinematic cameras or a future camera-rig actor.
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const double Now = World ? World->GetTimeSeconds() : 0.0;
+	if (LastCameraFallbackDiagnosticTime < 0.0 || (Now - LastCameraFallbackDiagnosticTime) >= 1.0)
+	{
+		LastCameraFallbackDiagnosticTime = Now;
+		AJ_LOG(this,
+			TEXT("[Camera] Polling safety net detected controller fallback. Pawn=%s ViewTarget=%s PendingKill=%s BeingDestroyed=%s ControllerState=%s PawnController=%s"),
+			*GetNameSafe(PlayerPawn),
+			*GetNameSafe(CurrentViewTarget),
+			BoolText(PlayerPawn->IsPendingKillPending()),
+			BoolText(PlayerPawn->IsActorBeingDestroyed()),
+			*GetStateName().ToString(),
+			*GetNameSafe(PlayerPawn->GetController()));
+	}
+	SetViewTarget(PlayerPawn);
+}
+
+void AAeyerjiPlayerController::HandleCameraViewTargetChanged(
+	APlayerController* ChangedController,
+	AActor* OldViewTarget,
+	AActor* NewViewTarget)
+{
+	if (ChangedController != this || NewViewTarget != this || bAllowControllerViewTargetDuringUnpossess || bRepairingCameraViewTarget)
+	{
+		return;
+	}
+
+	APlayerParentNative* PlayerPawn = Cast<APlayerParentNative>(GetPawn());
+	if (!IsLocalController()
+		|| !IsValid(PlayerPawn)
+		|| PlayerPawn->GetController() != this
+		|| !IsInState(NAME_Playing))
+	{
+		return;
+	}
+
+	if (CameraFallbackStackLoggedPawn.Get() != PlayerPawn)
+	{
+		CameraFallbackStackLoggedPawn = PlayerPawn;
+
+		ANSICHAR NativeStack[8192] = {};
+		FPlatformStackWalk::StackWalkAndDump(NativeStack, UE_ARRAY_COUNT(NativeStack), 2);
+		UE_LOG(LogAeyerji, Warning,
+			TEXT("[CameraTrace] Intercepted controller fallback while player remained possessed. Pawn=%s OldViewTarget=%s NativeStack:\n%s"),
+			*GetNameSafe(PlayerPawn),
+			*GetNameSafe(OldViewTarget),
+			ANSI_TO_TCHAR(NativeStack));
+	}
+
+	TGuardValue<bool> RepairGuard(bRepairingCameraViewTarget, true);
+	SetViewTarget(PlayerPawn);
+}
+
 void AAeyerjiPlayerController::OnUnPossess()
 {
 	APawn* PreviousPawn = GetPawn();
@@ -747,12 +881,16 @@ void AAeyerjiPlayerController::OnUnPossess()
 	}
 
 	UnbindMouseCommandRecoveryDelegates();
+	UnbindAbilityFailureFeedback();
 	CancelMouseCommandRecovery(/*bSuppressCurrentCommandUntilRelease=*/false);
 	AbortMovement_Both();
 	StopPendingTeleporter();
 	StopPendingInteraction();
 	bMoveClickHeld = false;
 	bAttackClickHeld = false;
+	LastPrimaryAttackTarget.Reset();
+	LastServerPrimaryAttackCommandSerial = 0;
+	LastServerPrimaryAttackCommandTarget.Reset();
 	ClearMouseCommandData();
 	CancelFaceActor();
 	PopPrimaryMeleeRotationLockMode();
@@ -772,7 +910,9 @@ void AAeyerjiPlayerController::OnUnPossess()
 	ResetCursorFollowHold();
 	ResetExtractionCountdownState();
 
+	bAllowControllerViewTargetDuringUnpossess = true;
 	Super::OnUnPossess();
+	bAllowControllerViewTargetDuringUnpossess = false;
 
 	if (IsLocalController())
 	{
@@ -814,6 +954,12 @@ void AAeyerjiPlayerController::RestoreLocalCameraToPossessedPawn()
 
 void AAeyerjiPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (CameraViewTargetChangedHandle.IsValid())
+	{
+		FGameDelegates::Get().GetViewTargetChangedDelegate().Remove(CameraViewTargetChangedHandle);
+		CameraViewTargetChangedHandle.Reset();
+	}
+
 	UnbindMouseCommandRecoveryDelegates();
 	CancelMouseCommandRecovery(/*bSuppressCurrentCommandUntilRelease=*/false);
 	StopPendingTeleporter();
@@ -866,6 +1012,7 @@ void AAeyerjiPlayerController::OnRep_Pawn()
 	// before Super::OnRep_Pawn, whose client-restart path otherwise auto-selects a camera target.
 	DisableAutomaticCameraTargetManagement();
 	UnbindMouseCommandRecoveryDelegates();
+	UnbindAbilityFailureFeedback();
 	Super::OnRep_Pawn();
 
 	AbortMovement_Local();
@@ -882,6 +1029,7 @@ void AAeyerjiPlayerController::OnRep_Pawn()
 	ResetForMoveOnly();
 	ResetExtractionCountdownState();
 	BindMouseCommandRecoveryDelegates();
+	BindAbilityFailureFeedback();
 
 	if (UPathFollowingComponent* PFC = FindComponentByClass<UPathFollowingComponent>())
 	{
@@ -1255,6 +1403,15 @@ void AAeyerjiPlayerController::EnsureMissionHUD()
 	}
 
 	ApplyCurrentGoldStateToMissionHUD();
+}
+
+bool AAeyerjiPlayerController::IsActionBarAccessible() const
+{
+	const AAeyerjiGameState* GS = GetWorld() ? GetWorld()->GetGameState<AAeyerjiGameState>() : nullptr;
+	const AAeyerjiPlayerState* PS = GetPlayerState<AAeyerjiPlayerState>();
+	return GS && GS->GetWorldFlowPhase() == EAeyerjiWorldFlowPhase::Gameplay
+		&& IsValid(GetPawn()) && PS && PS->IsProfileLoadApplied()
+		&& !IsControlledPawnDead() && !IsGameplayInputSuppressedByModalUI();
 }
 
 void AAeyerjiPlayerController::EnsureMinimap()
@@ -1952,6 +2109,7 @@ void AAeyerjiPlayerController::AbortMovement_Local() const
 void AAeyerjiPlayerController::Server_AbortMovement_Implementation()
 {
 	AJ_LOG_VERY_VERBOSE(this, TEXT("[MoveDiag] Server_AbortMovement received."));
+	ClearPersistentGroundMoveIntent();
 	AbortMovement_Local();
 }
 
@@ -1962,6 +2120,7 @@ void AAeyerjiPlayerController::AbortMovement_Both()
 		*GetNameSafe(MoveLoopTarget.Get()),
 		MoveLoopModeText(MoveLoopMode));
 	StopMoveToActorLoop();
+	ClearPersistentGroundMoveIntent();
 	AbortMovement_Local();
 	if (!HasAuthority())
 	{
@@ -2449,6 +2608,12 @@ void AAeyerjiPlayerController::UpdatePrimaryMeleeRotationLock()
 	{
 		PrimaryMeleeRotationLockReleaseTime = Now + FMath::Max(0.f, PrimaryMeleeRotationLockGraceSeconds);
 	}
+	else if (MouseCommand.bSkipMeleeGraceForRetarget)
+	{
+		// A replacement target should begin chasing as soon as the committed swing releases.
+		PrimaryMeleeRotationLockReleaseTime = -1.0;
+		MouseCommand.bSkipMeleeGraceForRetarget = false;
+	}
 
 	const bool bWithinGrace = PrimaryMeleeRotationLockReleaseTime >= 0.0 && Now < PrimaryMeleeRotationLockReleaseTime;
 	const bool bShouldLock = bHasActivePrimaryMeleePhase || bWithinGrace;
@@ -2611,6 +2776,10 @@ bool AAeyerjiPlayerController::ComputeTeleporterGoal(const AAeyerjiLinkedTelepor
 
 void AAeyerjiPlayerController::StartPendingInteraction(AActor* InteractableActor)
 {
+	++PendingLootRequestSerial;
+	bPendingLootRequestInFlight = false;
+	bPendingLootNeedsApproach = false;
+	NextPendingLootUpdateTime = 0.0;
 	PendingInteractable = InteractableActor;
 	GetWorldTimerManager().SetTimer(
 		PendingInteractionTimer,
@@ -2624,6 +2793,9 @@ void AAeyerjiPlayerController::StartPendingInteraction(AActor* InteractableActor
 
 void AAeyerjiPlayerController::StopPendingInteraction()
 {
+	++PendingLootRequestSerial; // Late replies must not cancel a newer click, even on the same item.
+	bPendingLootRequestInFlight = false;
+	bPendingLootNeedsApproach = false;
 	if (PendingInteractable.IsValid())
 	{
 		AJ_LOG_VERY_VERBOSE(this, TEXT("[Interaction] Pending interaction stopped Target=%s"),
@@ -2636,6 +2808,11 @@ void AAeyerjiPlayerController::StopPendingInteraction()
 
 void AAeyerjiPlayerController::ProcessPendingInteraction()
 {
+	if (IsControlledPawnDead() || IsGameplayInputSuppressedByModalUI())
+	{
+		StopPendingInteraction();
+		return;
+	}
 	AActor* InteractableActor = PendingInteractable.Get();
 	if (!IsValid(InteractableActor) || !InteractableActor->GetClass()->ImplementsInterface(UAeyerjiInteractable::StaticClass()))
 	{
@@ -2655,20 +2832,186 @@ void AAeyerjiPlayerController::ProcessPendingInteraction()
 	}
 
 	const FVector InteractionLocation = IAeyerjiInteractable::Execute_GetInteractionLocation(InteractableActor);
-	const float InteractionRadius = IAeyerjiInteractable::Execute_GetInteractionRadius(InteractableActor);
+	const float InteractionRadius = ResolveInteractionRadius(InteractableActor);
+	const float InteractionApproachRadius = ResolveInteractionApproachRadius(InteractionRadius);
 	const float Distance2D = FVector::Dist2D(ControlledPawn->GetActorLocation(), InteractionLocation);
-	if (InteractionRadius <= 0.f || Distance2D <= InteractionRadius)
+	if (Cast<AAeyerjiLootPickup>(InteractableActor))
 	{
-		AJ_LOG(this, TEXT("[Interaction] Pending interaction reached range Target=%s Pawn=%s Distance=%.1f Radius=%.1f Unlimited=%d"),
+		if (InteractableActor->IsActorBeingDestroyed() || InteractableActor->IsHidden()
+			|| !InteractableActor->GetActorEnableCollision())
+		{
+			StopPendingInteraction();
+			return;
+		}
+		const double Now = GetWorld()->GetTimeSeconds();
+		if (IsAbilityCastInputLocked() || bPendingLootRequestInFlight || Now < NextPendingLootUpdateTime) { return; }
+		NextPendingLootUpdateTime = Now + 0.35;
+		if (Distance2D <= InteractionApproachRadius && !bPendingLootNeedsApproach)
+		{
+			AbortMovement_Both();
+			bPendingLootRequestInFlight = true;
+			Server_RequestPendingLootUse(InteractableActor, PendingLootRequestSerial);
+		}
+		else
+		{
+			FVector Goal;
+			if (ComputeInteractionGoal(InteractableActor, Goal))
+			{
+				IssueMoveRPC(Goal);
+				bPendingLootNeedsApproach = false;
+			}
+		}
+		return;
+	}
+	if (Distance2D <= InteractionApproachRadius)
+	{
+		AJ_LOG(this, TEXT("[Interaction] Pending interaction reached range Target=%s Pawn=%s Distance=%.1f ApproachRadius=%.1f ValidationRadius=%.1f"),
 			*GetNameSafe(InteractableActor),
 			*GetNameSafe(ControlledPawn),
 			Distance2D,
-			InteractionRadius,
-			InteractionRadius <= 0.f ? 1 : 0);
+			InteractionApproachRadius,
+			InteractionRadius);
 		AbortMovement_Both();
 		Server_RequestInteractableUse(InteractableActor);
 		StopPendingInteraction();
 	}
+}
+
+void AAeyerjiPlayerController::SetPersistentGroundMoveIntent(const FVector& Goal)
+{
+	APawn* ControlledPawn = GetPawn();
+	if (!ControlledPawn || IsControlledPawnDead())
+	{
+		ClearPersistentGroundMoveIntent();
+		return;
+	}
+
+	bHasPersistentGroundMoveIntent = true;
+	PersistentGroundMoveGoal = Goal;
+	PersistentGroundMoveProgressLocation = ControlledPawn->GetActorLocation();
+	PersistentGroundMoveProgressTime = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.0;
+	LastPersistentGroundMoveRetryTime = -1.0;
+}
+
+void AAeyerjiPlayerController::ClearPersistentGroundMoveIntent()
+{
+	bHasPersistentGroundMoveIntent = false;
+	PersistentGroundMoveGoal = FVector::ZeroVector;
+	PersistentGroundMoveProgressLocation = FVector::ZeroVector;
+	PersistentGroundMoveProgressTime = -1.0;
+	LastPersistentGroundMoveRetryTime = -1.0;
+}
+
+void AAeyerjiPlayerController::UpdatePersistentGroundMoveIntent()
+{
+	if (!bHasPersistentGroundMoveIntent || bCursorFollowActive)
+	{
+		return;
+	}
+
+	APawn* ControlledPawn = GetPawn();
+	UWorld* World = GetWorld();
+	if (!ControlledPawn || !World || IsControlledPawnDead())
+	{
+		ClearPersistentGroundMoveIntent();
+		return;
+	}
+
+	const float DistanceToGoal = FVector::Dist2D(ControlledPawn->GetActorLocation(), PersistentGroundMoveGoal);
+	if (DistanceToGoal <= FMath::Max(20.f, MinMoveDistanceCm))
+	{
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[MoveRetry] Retained ground goal reached. Goal=%s Distance=%.1f"),
+			*PersistentGroundMoveGoal.ToCompactString(), DistanceToGoal);
+		ClearPersistentGroundMoveIntent();
+		return;
+	}
+
+	// Movement-blocking abilities own the pawn temporarily. Preserve the destination, but do not
+	// fight their root or cast movement with repeated path requests.
+	if (IsAbilityCastInputLocked())
+	{
+		PersistentGroundMoveProgressLocation = ControlledPawn->GetActorLocation();
+		PersistentGroundMoveProgressTime = World->GetTimeSeconds();
+		return;
+	}
+
+	const double Now = World->GetTimeSeconds();
+	if (PersistentGroundMoveProgressTime < 0.0
+		|| FVector::DistSquared2D(ControlledPawn->GetActorLocation(), PersistentGroundMoveProgressLocation)
+			>= FMath::Square(PersistentGroundMoveProgressDistance))
+	{
+		PersistentGroundMoveProgressLocation = ControlledPawn->GetActorLocation();
+		PersistentGroundMoveProgressTime = Now;
+	}
+
+	UPathFollowingComponent* PFC = FindComponentByClass<UPathFollowingComponent>();
+	const bool bPathIdle = !PFC || PFC->GetStatus() == EPathFollowingStatus::Idle;
+	const bool bNoProgress = PersistentGroundMoveProgressTime >= 0.0
+		&& (Now - PersistentGroundMoveProgressTime) >= PersistentGroundMoveStuckSeconds;
+	const bool bRetryReady = LastPersistentGroundMoveRetryTime < 0.0
+		|| (Now - LastPersistentGroundMoveRetryTime) >= PersistentGroundMoveRetryInterval;
+	if ((!bPathIdle && !bNoProgress) || !bRetryReady)
+	{
+		return;
+	}
+
+	FVector RetryGoal = PersistentGroundMoveGoal;
+	const bool bUsingSidestep = bNoProgress && AdjustGoalForShortAvoidance(RetryGoal, /*bAllowWhenStopped=*/true);
+	UAIBlueprintHelperLibrary::SimpleMoveToLocation(this, RetryGoal);
+	LastPersistentGroundMoveRetryTime = Now;
+	if (bNoProgress)
+	{
+		PersistentGroundMoveProgressLocation = ControlledPawn->GetActorLocation();
+		PersistentGroundMoveProgressTime = Now;
+	}
+
+	UE_LOG(LogAeyerji, Log, TEXT("[MoveRetry] Reissued retained ground goal. FinalGoal=%s MoveGoal=%s Distance=%.1f Idle=%s Stuck=%s Sidestep=%s Authority=%s"),
+		*PersistentGroundMoveGoal.ToCompactString(),
+		*RetryGoal.ToCompactString(),
+		DistanceToGoal,
+		BoolText(bPathIdle),
+		BoolText(bNoProgress),
+		BoolText(bUsingSidestep),
+		BoolText(HasAuthority()));
+}
+
+float AAeyerjiPlayerController::ResolveInteractionRadius(AActor* InteractableActor) const
+{
+	if (!IsValid(InteractableActor)
+		|| !InteractableActor->GetClass()->ImplementsInterface(UAeyerjiInteractable::StaticClass()))
+	{
+		return DefaultGenericInteractionRadius;
+	}
+
+	const float AuthoredRadius = IAeyerjiInteractable::Execute_GetInteractionRadius(InteractableActor);
+	if (FMath::IsFinite(AuthoredRadius) && AuthoredRadius > 0.f)
+	{
+		return FMath::Clamp(AuthoredRadius, 1.f, MaxGenericInteractionRadius);
+	}
+
+	// Some legacy Blueprint interactables deliberately use zero for unlimited interaction. Only reward
+	// presentations have a finite native fallback contract that an empty Blueprint override must not bypass.
+	AAeyerjiRewardPresentationActor* RewardPresentation = Cast<AAeyerjiRewardPresentationActor>(InteractableActor);
+	const float NativeRewardRadius = RewardPresentation
+		? RewardPresentation->GetInteractionRadius_Implementation()
+		: MaxGenericInteractionRadius;
+	const float EffectiveRadius = FMath::IsFinite(NativeRewardRadius) && NativeRewardRadius > 0.f
+		? NativeRewardRadius
+		: DefaultGenericInteractionRadius;
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[Interaction] Invalid authored radius normalized Target=%s Authored=%.1f Effective=%.1f RewardPresentation=%d"),
+		*GetNameSafe(InteractableActor),
+		AuthoredRadius,
+		EffectiveRadius,
+		RewardPresentation ? 1 : 0);
+	return FMath::Clamp(EffectiveRadius, 1.f, MaxGenericInteractionRadius);
+}
+
+float AAeyerjiPlayerController::ResolveInteractionApproachRadius(const float InteractionRadius) const
+{
+	const float ValidationRadius = FMath::Clamp(InteractionRadius, 1.f, MaxGenericInteractionRadius);
+	return HasAuthority() || ValidationRadius >= MaxGenericInteractionRadius
+		? ValidationRadius
+		: FMath::Max(1.f, ValidationRadius * RemoteClientInteractionApproachScale);
 }
 
 bool AAeyerjiPlayerController::ComputeInteractionGoal(AActor* InteractableActor, FVector& OutGoal) const
@@ -2682,12 +3025,24 @@ bool AAeyerjiPlayerController::ComputeInteractionGoal(AActor* InteractableActor,
 	}
 
 	const FVector Center = IAeyerjiInteractable::Execute_GetInteractionLocation(InteractableActor);
-	const float Radius = FMath::Max(IAeyerjiInteractable::Execute_GetInteractionRadius(InteractableActor), 30.f);
+	const float Radius = ResolveInteractionRadius(InteractableActor);
+	const float ApproachRadius = ResolveInteractionApproachRadius(Radius);
+	const bool bIsLoot = InteractableActor->IsA<AAeyerjiLootPickup>();
+	// SimpleMove may finish a capsule radius before the goal. Leave that room
+	// inside the pickup threshold, and validate the projected point as well.
+	const float LootGoalRadius = FMath::Max(0.f, ApproachRadius - ControlledPawn->GetSimpleCollisionRadius() - 15.f);
+	const float PreferredDistance = FMath::Min(
+		ApproachRadius,
+		FMath::Max(60.f, ApproachRadius * InteractionGoalScale));
 	FNavLocation Projected;
 
 	auto TryProject = [&](const FVector& Probe, const FVector& Extents)
 	{
 		if (!Nav->ProjectPointToNavigation(Probe, Projected, Extents))
+		{
+			return false;
+		}
+		if (bIsLoot && FVector::DistSquared2D(Projected.Location, Center) > FMath::Square(LootGoalRadius))
 		{
 			return false;
 		}
@@ -2700,14 +3055,14 @@ bool AAeyerjiPlayerController::ComputeInteractionGoal(AActor* InteractableActor,
 	const FVector FromCenterToPawn = (PawnLoc - Center).GetSafeNormal2D();
 	if (!FromCenterToPawn.IsNearlyZero())
 	{
-		const FVector Preferred = Center + FromCenterToPawn * FMath::Clamp(Radius * 0.75f, 60.f, Radius);
+		const FVector Preferred = Center + FromCenterToPawn * (bIsLoot ? LootGoalRadius : PreferredDistance);
 		if (TryProject(Preferred, FVector(80.f, 80.f, 600.f)))
 		{
 			return true;
 		}
 	}
 
-	if (TryProject(Center, FVector(Radius, Radius, 600.f)))
+	if (TryProject(Center, FVector(ApproachRadius, ApproachRadius, 600.f)))
 	{
 		return true;
 	}
@@ -2717,13 +3072,13 @@ bool AAeyerjiPlayerController::ComputeInteractionGoal(AActor* InteractableActor,
 	{
 		const float Angle = (2.f * PI * Index) / NumSamples;
 		const FVector Dir(FMath::Cos(Angle), FMath::Sin(Angle), 0.f);
-		if (TryProject(Center + Dir * Radius, FVector(80.f, 80.f, 600.f)))
+		if (TryProject(Center + Dir * (bIsLoot ? LootGoalRadius : PreferredDistance), FVector(80.f, 80.f, 600.f)))
 		{
 			return true;
 		}
 	}
 
-	UE_LOG(LogAeyerji, Warning, TEXT("[Interaction] Failed to find interaction goal Target=%s"), *GetNameSafe(InteractableActor));
+	UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Interaction] Failed to find interaction goal Target=%s"), *GetNameSafe(InteractableActor));
 	return false;
 }
 
@@ -2754,6 +3109,47 @@ void AAeyerjiPlayerController::Server_RequestLinkedTeleporterUse_Implementation(
 	Teleporter->TryTeleport(this, EndpointIndex);
 }
 
+void AAeyerjiPlayerController::Server_RequestPendingLootUse_Implementation(AActor* LootActor, uint32 RequestSerial)
+{
+	AAeyerjiLootPickup* Loot = Cast<AAeyerjiLootPickup>(LootActor);
+	APawn* ControlledPawn = GetPawn();
+	if (!IsValid(Loot) || Loot->IsActorBeingDestroyed() || Loot->IsHidden() || !IsValid(ControlledPawn)
+		|| IsControlledPawnDead() || !Loot->CanInteract_Implementation(this))
+	{
+		Client_PendingLootUseResult(RequestSerial, false);
+		return;
+	}
+	const FVector Location = IAeyerjiInteractable::Execute_GetInteractionLocation(Loot);
+	const float Radius = ResolveInteractionRadius(Loot);
+	if (Location.ContainsNaN() || ControlledPawn->GetActorLocation().ContainsNaN())
+	{
+		Client_PendingLootUseResult(RequestSerial, false);
+		return;
+	}
+	if (FVector::DistSquared2D(ControlledPawn->GetActorLocation(), Location) > FMath::Square(Radius))
+	{
+		Client_PendingLootUseResult(RequestSerial, true);
+		return;
+	}
+	// Item-owned validation/transfer still owns reservations, inventory capacity,
+	// rewards and removal. Capacity/ownership rejection is terminal, not an auto-retry.
+	IAeyerjiInteractable::Execute_Interact(Loot, this);
+	Client_PendingLootUseResult(RequestSerial, false);
+}
+
+void AAeyerjiPlayerController::Client_PendingLootUseResult_Implementation(uint32 RequestSerial, bool bRetryApproach)
+{
+	if (!bPendingLootRequestInFlight || RequestSerial != PendingLootRequestSerial) { return; }
+	bPendingLootRequestInFlight = false;
+	if (!bRetryApproach)
+	{
+		StopPendingInteraction();
+		return;
+	}
+	bPendingLootNeedsApproach = true;
+	NextPendingLootUpdateTime = 0.0;
+}
+
 void AAeyerjiPlayerController::Server_RequestInteractableUse_Implementation(AActor* InteractableActor)
 {
 	if (!IsValid(InteractableActor) || !InteractableActor->GetClass()->ImplementsInterface(UAeyerjiInteractable::StaticClass()))
@@ -2772,9 +3168,9 @@ void AAeyerjiPlayerController::Server_RequestInteractableUse_Implementation(AAct
 	}
 
 	const FVector InteractionLocation = IAeyerjiInteractable::Execute_GetInteractionLocation(InteractableActor);
-	const float InteractionRadius = IAeyerjiInteractable::Execute_GetInteractionRadius(InteractableActor);
+	const float InteractionRadius = ResolveInteractionRadius(InteractableActor);
 	const float Distance2D = FVector::Dist2D(ControlledPawn->GetActorLocation(), InteractionLocation);
-	if (InteractionRadius > 0.f && Distance2D > InteractionRadius)
+	if (Distance2D > InteractionRadius)
 	{
 		AJ_LOG(this, TEXT("[Interaction][Server] Request rejected: out of range Pawn=%s Target=%s Distance=%.1f Radius=%.1f"),
 			*GetNameSafe(ControlledPawn),
@@ -2784,12 +3180,11 @@ void AAeyerjiPlayerController::Server_RequestInteractableUse_Implementation(AAct
 		return;
 	}
 
-	AJ_LOG(this, TEXT("[Interaction][Server] Request accepted Target=%s Pawn=%s Distance=%.1f Radius=%.1f Unlimited=%d; executing interactable-owned validation"),
+	AJ_LOG(this, TEXT("[Interaction][Server] Request accepted Target=%s Pawn=%s Distance=%.1f Radius=%.1f; executing interactable-owned validation"),
 		*GetNameSafe(InteractableActor),
 		*GetNameSafe(ControlledPawn),
 		Distance2D,
-		InteractionRadius,
-		InteractionRadius <= 0.f ? 1 : 0);
+		InteractionRadius);
 	IAeyerjiInteractable::Execute_Interact(InteractableActor, this);
 }
 
@@ -3393,6 +3788,12 @@ void AAeyerjiPlayerController::BeginPlay()
 	// class defaults are available, before the controller begins any camera or possession work.
 	DisableAutomaticCameraTargetManagement();
     Super::BeginPlay();
+	if (IsLocalController() && !CameraViewTargetChangedHandle.IsValid())
+	{
+		CameraViewTargetChangedHandle = FGameDelegates::Get().GetViewTargetChangedDelegate().AddUObject(
+			this,
+			&AAeyerjiPlayerController::HandleCameraViewTargetChanged);
+	}
 	EnableCheats();
 	AddCheats(true);
     EnsureTargetingManagerInitialized();
@@ -3426,6 +3827,11 @@ void AAeyerjiPlayerController::BeginPlay()
 void AAeyerjiPlayerController::SetupInputComponent()
 {
 	Super::SetupInputComponent();
+#if !UE_BUILD_SHIPPING
+	// The drawer deliberately has a native fallback key so routine testing never depends on
+	// remembering console syntax or authoring a Blueprint input asset.
+	InputComponent->BindKey(EKeys::F1, IE_Pressed, this, &ThisClass::AJ_Cheats);
+#endif
 	if (IMC_Default)
 	{
 		auto ResolvePhysicalKeyForAction = [this](const UInputAction* Action, FKey& InOutPhysicalKey, const TCHAR* Label)
@@ -3500,14 +3906,19 @@ void AAeyerjiPlayerController::SetupInputComponent()
 		}
 		if (IA_Interact)
 		{
-			if (InteractClickPhysicalKey.IsValid() && InteractClickPhysicalKey == AttackClickPhysicalKey)
+			if (IsInteractClickMappedToAttackClick())
 			{
-				UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] IA_Interact shares %s with IA_Attack_Click; binding both and suppressing duplicate same-key handling."),
+				// The controller-owned left-click path already arbitrates teleporters, hostiles,
+				// interactables, and ground. Binding both actions lets callback order erase a held attack.
+				UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] IA_Interact shares %s with IA_Attack_Click; using the contextual attack-click path only."),
 					*InteractClickPhysicalKey.ToString());
 			}
-			EIC->BindAction(IA_Interact, ETriggerEvent::Started, this, &AAeyerjiPlayerController::OnInteractClickPressed);
-			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Interaction][Input] Bound IA_Interact=%s to Started."),
-				*GetNameSafe(IA_Interact));
+			else
+			{
+				EIC->BindAction(IA_Interact, ETriggerEvent::Started, this, &AAeyerjiPlayerController::OnInteractClickPressed);
+				UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Interaction][Input] Bound IA_Interact=%s to Started."),
+					*GetNameSafe(IA_Interact));
+			}
 		}
 		else
 		{
@@ -3576,14 +3987,16 @@ void AAeyerjiPlayerController::ClearMouseCommandData()
 	LastMouseAttackRangeLogTime = -1.0;
 }
 
-void AAeyerjiPlayerController::CancelMouseOwnedMovement()
+void AAeyerjiPlayerController::CancelMouseOwnedMovement(const bool bCommitFinalGroundGoal)
 {
-	const bool bCommitFinalCursorGoal = IsLocalController() && !HasAuthority() && bCursorFollowHasSmoothedGoal;
-	const FVector FinalCursorGoal = CursorFollowSmoothedGoal;
+	const FVector FinalCursorGoal = bCursorFollowHasSmoothedGoal
+		? CursorFollowSmoothedGoal
+		: MouseCommand.GroundGoal;
+	const bool bHasFinalGroundGoal = bCommitFinalGroundGoal && !FinalCursorGoal.IsNearlyZero();
 	if (IsLocalController() && !HasAuthority())
 	{
 		const uint32 UpdateId = ++NextCursorFollowUpdateId;
-		if (bCommitFinalCursorGoal)
+		if (bHasFinalGroundGoal)
 		{
 			Server_EndCursorFollow(FinalCursorGoal, UpdateId);
 		}
@@ -3607,6 +4020,14 @@ void AAeyerjiPlayerController::CancelMouseOwnedMovement()
 	bHasCursorFollowNetworkGoal = false;
 	ResetCursorFollowHold();
 	ResetCursorFollowTurnRate();
+	if (bHasFinalGroundGoal)
+	{
+		SetPersistentGroundMoveIntent(FinalCursorGoal);
+	}
+	else
+	{
+		ClearPersistentGroundMoveIntent();
+	}
 }
 
 void AAeyerjiPlayerController::CancelMouseOwnedCombat()
@@ -3720,6 +4141,156 @@ bool AAeyerjiPlayerController::TryResolveDirectHostileUnderCursor(FHitResult& Ou
 	return false;
 }
 
+bool AAeyerjiPlayerController::TryResolveHeldAttackReplacement(FHitResult& OutHit, AActor*& OutTarget) const
+{
+	if (TryResolveDirectHostileUnderCursor(OutHit, OutTarget))
+	{
+		return true;
+	}
+
+	OutTarget = nullptr;
+	UWorld* World = GetWorld();
+	if (!World || !MouseCommand.bHasLastValidAttackTargetLocation
+		|| HeldAttackRetargetScreenRadiusPx <= 0.f || HeldAttackRetargetWorldRadiusCm <= 0.f)
+	{
+		return false;
+	}
+
+	float MouseX = 0.f;
+	float MouseY = 0.f;
+	int32 ViewportWidth = 0;
+	int32 ViewportHeight = 0;
+	if (!GetMousePosition(MouseX, MouseY))
+	{
+		return false;
+	}
+	GetViewportSize(ViewportWidth, ViewportHeight);
+	if (ViewportWidth <= 0 || ViewportHeight <= 0)
+	{
+		return false;
+	}
+
+	const FVector2D CursorPosition(MouseX, MouseY);
+	AEnemyParentNative* BestEnemy = nullptr;
+	float BestScreenDistanceSq = TNumericLimits<float>::Max();
+	float BestWorldDistanceSq = TNumericLimits<float>::Max();
+	FString BestName;
+
+	for (TActorIterator<AEnemyParentNative> It(World); It; ++It)
+	{
+		AEnemyParentNative* Enemy = *It;
+		if (!IsValid(Enemy) || !IsAttackableActor(Enemy))
+		{
+			continue;
+		}
+
+		const FVector EnemyLocation = Enemy->GetActorLocation();
+		if (EnemyLocation.ContainsNaN())
+		{
+			continue;
+		}
+		const float WorldDistanceSq = FVector::DistSquared2D(
+			MouseCommand.LastValidAttackTargetLocation,
+			EnemyLocation);
+		if (!IsHeldAttackReplacementWithinRadii(
+			/*ScreenDistanceSq=*/0.f,
+			WorldDistanceSq,
+			HeldAttackRetargetScreenRadiusPx,
+			HeldAttackRetargetWorldRadiusCm))
+		{
+			continue;
+		}
+
+		FVector2D MinScreen;
+		FVector2D MaxScreen;
+		if (!GetProjectedActorScreenBounds(this, Enemy, MinScreen, MaxScreen)
+			|| MaxScreen.X < 0.f || MaxScreen.Y < 0.f
+			|| MinScreen.X > static_cast<float>(ViewportWidth)
+			|| MinScreen.Y > static_cast<float>(ViewportHeight))
+		{
+			continue;
+		}
+
+		const FVector2D ClosestScreenPoint(
+			FMath::Clamp(CursorPosition.X, MinScreen.X, MaxScreen.X),
+			FMath::Clamp(CursorPosition.Y, MinScreen.Y, MaxScreen.Y));
+		const float ScreenDistanceSq = FVector2D::DistSquared(CursorPosition, ClosestScreenPoint);
+		if (!IsHeldAttackReplacementWithinRadii(
+			ScreenDistanceSq,
+			WorldDistanceSq,
+			HeldAttackRetargetScreenRadiusPx,
+			HeldAttackRetargetWorldRadiusCm))
+		{
+			continue;
+		}
+
+		const FString CandidateName = Enemy->GetName();
+		if (IsHeldAttackReplacementBetter(
+			ScreenDistanceSq,
+			WorldDistanceSq,
+			CandidateName,
+			BestScreenDistanceSq,
+			BestWorldDistanceSq,
+			BestName,
+			BestEnemy != nullptr))
+		{
+			BestEnemy = Enemy;
+			BestScreenDistanceSq = ScreenDistanceSq;
+			BestWorldDistanceSq = WorldDistanceSq;
+			BestName = CandidateName;
+		}
+	}
+
+	if (!BestEnemy)
+	{
+		return false;
+	}
+
+	OutTarget = BestEnemy;
+	return BuildSyntheticCursorHit(BestEnemy, BestEnemy->GetActorLocation(), OutHit);
+}
+
+bool AAeyerjiPlayerController::IsHeldAttackReplacementWithinRadii(
+	const float ScreenDistanceSq,
+	const float WorldDistanceSq,
+	const float ScreenRadiusPx,
+	const float WorldRadiusCm)
+{
+	return ScreenRadiusPx > 0.f
+		&& WorldRadiusCm > 0.f
+		&& ScreenDistanceSq <= FMath::Square(ScreenRadiusPx)
+		&& WorldDistanceSq <= FMath::Square(WorldRadiusCm);
+}
+
+bool AAeyerjiPlayerController::IsHeldAttackReplacementBetter(
+	const float ScreenDistanceSq,
+	const float WorldDistanceSq,
+	const FString& ActorName,
+	const float BestScreenDistanceSq,
+	const float BestWorldDistanceSq,
+	const FString& BestActorName,
+	const bool bHasBestActor)
+{
+	if (!bHasBestActor)
+	{
+		return true;
+	}
+
+	const bool bSameScreenDistance = FMath::IsNearlyEqual(ScreenDistanceSq, BestScreenDistanceSq);
+	if (!bSameScreenDistance)
+	{
+		return ScreenDistanceSq < BestScreenDistanceSq;
+	}
+
+	const bool bSameWorldDistance = FMath::IsNearlyEqual(WorldDistanceSq, BestWorldDistanceSq);
+	if (!bSameWorldDistance)
+	{
+		return WorldDistanceSq < BestWorldDistanceSq;
+	}
+
+	return ActorName.Compare(BestActorName, ESearchCase::CaseSensitive) < 0;
+}
+
 AActor* AAeyerjiPlayerController::ResolveAttackableActorFromCursorHit(const FHitResult& Hit) const
 {
 	if (AActor* HitActor = Hit.GetActor())
@@ -3781,17 +4352,20 @@ bool AAeyerjiPlayerController::IsMouseCommandTargetInBasicAttackRange(AActor* Ta
 	return FVector::DistSquared2D(ControlledPawn->GetActorLocation(), TargetActor->GetActorLocation()) <= FMath::Square(StopRange);
 }
 
-void AAeyerjiPlayerController::CancelPrimaryAttackForRetarget(AActor* NewTarget)
+void AAeyerjiPlayerController::PreparePrimaryAttackForRetarget(
+	AActor* PreviousTarget,
+	AActor* NewTarget,
+	const bool bWasRetarget,
+	const bool bPreviousTargetWasInvalid)
 {
-	if (!IsAttackableActor(NewTarget))
+	if (NewTarget && !IsAttackableActor(NewTarget))
 	{
 		return;
 	}
 
-	AActor* PreviousTarget = LastPrimaryAttackTarget.Get();
-	if (!IsAttackableActor(PreviousTarget) || PreviousTarget == NewTarget)
+	AActor* PreviousAbilityTarget = LastPrimaryAttackTarget.Get();
+	if (PreviousAbilityTarget == NewTarget)
 	{
-		LastPrimaryAttackTarget = NewTarget;
 		return;
 	}
 
@@ -3806,25 +4380,34 @@ void AAeyerjiPlayerController::CancelPrimaryAttackForRetarget(AActor* NewTarget)
 	{
 		if (UGA_PrimaryMeleeBasic* MeleeAbility = Cast<UGA_PrimaryMeleeBasic>(ActiveSpec->GetPrimaryInstance()))
 		{
-			// A committed stage may no longer be cancellable, but it must not use
-			// this click as a combo request against the previously captured target.
+			// Keep the already scheduled strike intact, but do not let its buffered combo
+			// continue against the previously captured target after the cursor retargets.
 			MeleeAbility->NotifyExternalRetarget(NewTarget);
 		}
-
-		// CancelAbilityHandle observes the ability's CanBeCanceled state. A committed hit
-		// window stays intact, while a wind-up can be cleanly replaced by this new target.
-		ASC->CancelAbilityHandle(AbilityHandle);
 	}
 
-	if (!HasAuthority())
+	if (!HasAuthority() && bWasRetarget)
 	{
-		Server_CancelPrimaryAttackForRetarget(NewTarget);
+		Server_PreparePrimaryAttackForRetarget(NewTarget, MouseCommand.CommandSerial, bWasRetarget, bPreviousTargetWasInvalid);
+	}
+	else if (bWasRetarget)
+	{
+		AAeyerjiCombatBalanceTestHarness::RecordTargetingEvent(
+			this,
+			PreviousAbilityTarget ? PreviousAbilityTarget : PreviousTarget,
+			NewTarget,
+			EAeyerjiCombatTargetingTelemetryEvent::PlayerTargetHandoff,
+			bPreviousTargetWasInvalid ? TEXT("PreviousTargetInvalid") : TEXT("CursorRetarget"),
+			MouseCommand.CommandSerial);
 	}
 	LastPrimaryAttackTarget = NewTarget;
 
-	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Retarget requested. Previous=%s New=%s LocalPrimaryActive=%s Authority=%s"),
+	UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Retarget requested. Previous=%s AbilityPrevious=%s New=%s Serial=%u PreviousInvalid=%s LocalPrimaryActive=%s Authority=%s"),
 		*GetNameSafe(PreviousTarget),
+		*GetNameSafe(PreviousAbilityTarget),
 		*GetNameSafe(NewTarget),
+		MouseCommand.CommandSerial,
+		BoolText(bPreviousTargetWasInvalid),
 		BoolText(bLocalPrimaryWasActive),
 		BoolText(HasAuthority()));
 }
@@ -3833,7 +4416,7 @@ void AAeyerjiPlayerController::EnsureMouseActorChase(AActor* TargetActor)
 {
 	if (!IsAttackableActor(TargetActor) || IsControlledPawnDead())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Chase skipped: invalid target or dead pawn. Target=%s Pawn=%s Dead=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Chase skipped: invalid target or dead pawn. Target=%s Pawn=%s Dead=%s"),
 			*GetNameSafe(TargetActor),
 			*GetNameSafe(GetPawn()),
 			BoolText(IsControlledPawnDead()));
@@ -3842,7 +4425,7 @@ void AAeyerjiPlayerController::EnsureMouseActorChase(AActor* TargetActor)
 
 	if (HandleMovementBlockedByAbilities())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Chase queued by ability movement block. Target=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Chase queued by ability movement block. Target=%s"),
 			*GetNameSafe(TargetActor));
 		QueueMovementCommand(TargetActor, /*bIsContinuous=*/true);
 		return;
@@ -3861,7 +4444,7 @@ void AAeyerjiPlayerController::EnsureMouseActorChase(AActor* TargetActor)
 		IssueMoveRPC(TargetActor);
 		const APawn* ControlledPawn = GetPawn();
 		const float Dist2D = ControlledPawn ? FVector::Dist2D(ControlledPawn->GetActorLocation(), TargetActor->GetActorLocation()) : -1.f;
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Chase issued. Target=%s Idle=%s Dist2D=%.1f PFC=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Chase issued. Target=%s Idle=%s Dist2D=%.1f PFC=%s"),
 			*GetNameSafe(TargetActor),
 			BoolText(bPathIdle),
 			Dist2D,
@@ -3875,7 +4458,7 @@ void AAeyerjiPlayerController::EnsureMouseActorChase(AActor* TargetActor)
 			LastMouseAttackChaseLogTime = Now;
 			const APawn* ControlledPawn = GetPawn();
 			const float Dist2D = ControlledPawn ? FVector::Dist2D(ControlledPawn->GetActorLocation(), TargetActor->GetActorLocation()) : -1.f;
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Chase continuing without reissue. Target=%s Dist2D=%.1f IssuedTarget=%s %s"),
+			UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Chase continuing without reissue. Target=%s Dist2D=%.1f IssuedTarget=%s %s"),
 				*GetNameSafe(TargetActor),
 				Dist2D,
 				*GetNameSafe(MouseCommand.IssuedMoveTarget.Get()),
@@ -3900,6 +4483,7 @@ void AAeyerjiPlayerController::StartMouseGroundMove(const FVector& Goal, const b
 	EnsureLocomotionRotationMode();
 	PendingMoveTarget = nullptr;
 	MouseCommand.IssuedMoveTarget = nullptr;
+	SetPersistentGroundMoveIntent(Goal);
 	IssueMoveRPC(Goal);
 	BeginCursorFollowHold(Goal);
 	if (bSpawnCursorFX)
@@ -3929,6 +4513,7 @@ void AAeyerjiPlayerController::UpdateMouseGroundMove(const FVector& Goal)
 	EnsureLocomotionRotationMode();
 	PendingMoveTarget = nullptr;
 	MouseCommand.IssuedMoveTarget = nullptr;
+	PersistentGroundMoveGoal = Goal;
 	UpdateContinuousMoveGoal(Goal);
 }
 
@@ -3938,10 +4523,15 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 	AActor* OldTarget = MouseCommand.TargetActor.Get();
 	const bool bTargetChanged = OldTarget != NewTarget;
 	const bool bIntentChanged = OldIntent != NewIntent;
-
-	if (NewIntent == EAeyerjiMouseIntent::BasicAttack && bTargetChanged)
+	const bool bOldTargetWasInvalid = OldTarget && !IsAttackableActor(OldTarget);
+	if (OldTarget && IsValid(OldTarget))
 	{
-		CancelPrimaryAttackForRetarget(NewTarget);
+		const FVector OldTargetLocation = OldTarget->GetActorLocation();
+		if (!OldTargetLocation.ContainsNaN())
+		{
+			MouseCommand.LastValidAttackTargetLocation = OldTargetLocation;
+			MouseCommand.bHasLastValidAttackTargetLocation = true;
+		}
 	}
 
 	if (bIntentChanged || bTargetChanged)
@@ -3959,6 +4549,15 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 	MouseCommand.Intent = NewIntent;
 	MouseCommand.TargetActor = NewTarget;
 	MouseCommand.GroundGoal = NewGroundGoal;
+	if (NewIntent == EAeyerjiMouseIntent::BasicAttack && IsAttackableActor(NewTarget))
+	{
+		const FVector NewTargetLocation = NewTarget->GetActorLocation();
+		if (!NewTargetLocation.ContainsNaN())
+		{
+			MouseCommand.LastValidAttackTargetLocation = NewTargetLocation;
+			MouseCommand.bHasLastValidAttackTargetLocation = true;
+		}
+	}
 
 	if (bIntentChanged || bTargetChanged)
 	{
@@ -3969,8 +4568,18 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 		if (NewIntent == EAeyerjiMouseIntent::BasicAttack)
 		{
 			MouseCommand.CommandSerial = NextMouseCommandSerial++;
+			MouseCommand.bSkipMeleeGraceForRetarget = OldIntent == EAeyerjiMouseIntent::BasicAttack && bTargetChanged;
 		}
 		MouseCommand.LastAttackAttemptTime = -1.0;
+	}
+
+	if (NewIntent == EAeyerjiMouseIntent::BasicAttack && bTargetChanged)
+	{
+		PreparePrimaryAttackForRetarget(
+			OldTarget,
+			NewTarget,
+			OldIntent == EAeyerjiMouseIntent::BasicAttack,
+			bOldTargetWasInvalid);
 	}
 
 	switch (NewIntent)
@@ -3978,7 +4587,7 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 	case EAeyerjiMouseIntent::GroundMove:
 		if (bIntentChanged || bTargetChanged)
 		{
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Intent -> GroundMove. Owner=%d Phase=%d OldIntent=%d OldTarget=%s Goal=%s SpawnFX=%s"),
+			UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Intent -> GroundMove. Owner=%d Phase=%d OldIntent=%d OldTarget=%s Goal=%s SpawnFX=%s"),
 				static_cast<int32>(MouseCommand.Owner),
 				static_cast<int32>(MouseCommand.Phase),
 				static_cast<int32>(OldIntent),
@@ -4002,7 +4611,7 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 		{
 			const APawn* ControlledPawn = GetPawn();
 			const float Dist2D = (ControlledPawn && NewTarget) ? FVector::Dist2D(ControlledPawn->GetActorLocation(), NewTarget->GetActorLocation()) : -1.f;
-			UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Intent -> BasicAttack. Owner=%d Phase=%d OldIntent=%d OldTarget=%s Target=%s Dist2D=%.1f"),
+			UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Intent -> BasicAttack. Owner=%d Phase=%d OldIntent=%d OldTarget=%s Target=%s Dist2D=%.1f"),
 				static_cast<int32>(MouseCommand.Owner),
 				static_cast<int32>(MouseCommand.Phase),
 				static_cast<int32>(OldIntent),
@@ -4031,17 +4640,6 @@ void AAeyerjiPlayerController::TransitionMouseIntent(const EAeyerjiMouseIntent N
 
 void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Button)
 {
-	if (Button == EAeyerjiMouseButton::Left && WasSameKeyInteractionHandledRecently())
-	{
-		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Interaction][Input] Suppressed duplicate left-click path after same-key interaction handling."));
-		ClearMouseCommandData();
-		MouseCommand.Owner = Button;
-		MouseCommand.Phase = EAeyerjiMousePhase::Held;
-		MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
-		bAttackClickHeld = true;
-		return;
-	}
-
 	CancelMouseCommandCompletely();
 
 	MouseCommand.Owner = Button;
@@ -4055,6 +4653,20 @@ void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Butto
 	{
 		MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
 		return;
+	}
+
+	if (Button == EAeyerjiMouseButton::Left)
+	{
+		EnsureTargetingManagerInitialized();
+		FHitResult LootHit;
+		AActor* Loot = nullptr;
+		// Ability targeting retains ownership; deliberate visual loot clicks beat enemy capsules.
+		if ((!TargetingManager || !TargetingManager->IsTargeting()) && TryGetExplicitLootHit(LootHit, Loot))
+		{
+			MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
+			HandleInteractableUnderCursor(Loot, LootHit);
+			return;
+		}
 	}
 
 	if (IsAbilityCastInputLocked())
@@ -4094,7 +4706,6 @@ void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Butto
 		if (TryGetLinkedTeleporterHit(TeleporterHit, LinkedTeleporter, LinkedTeleporterEndpointIndex))
 		{
 			MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
-			MarkSameKeyInteractionHandled();
 			UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] Contextual left click found linked teleporter Target=%s Endpoint=%d"),
 				*GetNameSafe(LinkedTeleporter),
 				static_cast<int32>(LinkedTeleporterEndpointIndex));
@@ -4109,10 +4720,6 @@ void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Butto
 		AActor* HostileTarget = nullptr;
 		if (TryResolveDirectHostileUnderCursor(HostileHit, HostileTarget))
 		{
-			// Retarget before BP can consume the click, so BP-owned move commands cannot
-			// leave a cancellable primary swing locked to the previous enemy.
-			CancelPrimaryAttackForRetarget(HostileTarget);
-
 			if (TryConsumePawnHit(HostileHit))
 			{
 				MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
@@ -4129,7 +4736,6 @@ void AAeyerjiPlayerController::BeginMouseCommand(const EAeyerjiMouseButton Butto
 		if (TryGetInteractableHit(InteractableHit, InteractableActor))
 		{
 			MouseCommand.Intent = EAeyerjiMouseIntent::SuppressedUntilRelease;
-			MarkSameKeyInteractionHandled();
 			UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] Contextual left click found interactable Target=%s HitActor=%s Component=%s Impact=%s"),
 				*GetNameSafe(InteractableActor),
 				*GetNameSafe(InteractableHit.GetActor()),
@@ -4183,7 +4789,7 @@ void AAeyerjiPlayerController::ReleaseMouseCommand(const EAeyerjiMouseButton But
 
 	if (MouseCommand.Intent == EAeyerjiMouseIntent::GroundMove)
 	{
-		CancelMouseOwnedMovement();
+		CancelMouseOwnedMovement(/*bCommitFinalGroundGoal=*/true);
 	}
 
 	ClearMouseCommandData();
@@ -4292,6 +4898,15 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 	}
 
 	AActor* TargetActor = MouseCommand.TargetActor.Get();
+	if (TargetActor && IsValid(TargetActor))
+	{
+		const FVector TargetLocation = TargetActor->GetActorLocation();
+		if (!TargetLocation.ContainsNaN())
+		{
+			MouseCommand.LastValidAttackTargetLocation = TargetLocation;
+			MouseCommand.bHasLastValidAttackTargetLocation = true;
+		}
+	}
 	if (!IsAttackableActor(TargetActor))
 	{
 		if (TargetActor)
@@ -4307,23 +4922,25 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 		{
 			FHitResult HostileHit;
 			AActor* NewTarget = nullptr;
-			if (TryResolveDirectHostileUnderCursor(HostileHit, NewTarget))
+			if (TryResolveHeldAttackReplacement(HostileHit, NewTarget))
 			{
 				TransitionMouseIntent(EAeyerjiMouseIntent::BasicAttack, NewTarget, FVector::ZeroVector, /*bSpawnMoveFx=*/false);
 				return;
 			}
 
-			// Stay in combat intent while held. The next tick can acquire a living enemy
-			// under the cursor; falling back to ground movement here drops that handoff.
+			// Stay in combat intent while held. Transitioning through the controller-owned
+			// path suppresses any buffered combo against the dead target on client and server.
 			if (TargetActor)
 			{
-				CancelMouseOwnedMovement();
+				TransitionMouseIntent(EAeyerjiMouseIntent::BasicAttack, nullptr, FVector::ZeroVector, /*bSpawnMoveFx=*/false);
 			}
-			MouseCommand.TargetActor.Reset();
-			MouseCommand.IssuedMoveTarget.Reset();
-			MouseCommand.bAttackCommitted = false;
-			MouseCommand.bAwaitingServerAttackResult = false;
-			MouseCommand.LastAttackAttemptTime = -1.0;
+			else
+			{
+				MouseCommand.IssuedMoveTarget.Reset();
+				MouseCommand.bAttackCommitted = false;
+				MouseCommand.bAwaitingServerAttackResult = false;
+				MouseCommand.LastAttackAttemptTime = -1.0;
+			}
 			return;
 		}
 
@@ -4358,7 +4975,7 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 			if (LastMouseAttackRangeLogTime < 0.0 || (Now - LastMouseAttackRangeLogTime) >= 0.25)
 			{
 				LastMouseAttackRangeLogTime = Now;
-				UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Out of range, chasing. Target=%s Dist2D=%.1f AttackRange=%.1f StopRange=%.1f Phase=%d Committed=%s"),
+				UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Out of range, chasing. Target=%s Dist2D=%.1f AttackRange=%.1f StopRange=%.1f Phase=%d Committed=%s"),
 					*GetNameSafe(TargetActor),
 					Dist2D,
 					AttackRange,
@@ -4377,7 +4994,7 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 		const float AttackRange = UCharacterStatsLibrary::GetAttackRangeFromActorASC(ControlledPawn, 150.f);
 		const float StopRange = FMath::Max(0.f, AttackRange * PrimaryAttackMoveStopAtPercentOfRange + PrimaryAttackMoveStopExtraBufferCm);
 		const float Dist2D = ControlledPawn ? FVector::Dist2D(ControlledPawn->GetActorLocation(), TargetActor->GetActorLocation()) : -1.f;
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] In range, aborting movement before attack. Target=%s Dist2D=%.1f AttackRange=%.1f StopRange=%.1f Phase=%d"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] In range, aborting movement before attack. Target=%s Dist2D=%.1f AttackRange=%.1f StopRange=%.1f Phase=%d"),
 			*GetNameSafe(TargetActor),
 			Dist2D,
 			AttackRange,
@@ -4393,9 +5010,9 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 		return;
 	}
 
-	if (IsAbilityCastInputLocked())
+	if (IsPrimaryAttackTemporarilyBlocked())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Attack attempt blocked by ability cast lock. Target=%s Phase=%d"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Attack attempt deferred by a transient gameplay-state block. Target=%s Phase=%d"),
 			*GetNameSafe(TargetActor),
 			static_cast<int32>(MouseCommand.Phase));
 		return;
@@ -4405,7 +5022,7 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 	const bool bLocallyActivated = ActivatePrimaryAttackAbility(TargetActor);
 	if (!HasAuthority() && MouseCommand.bAwaitingServerAttackResult)
 	{
-		UE_LOG(LogAeyerji, Log,
+		UE_LOG(LogAeyerji, VeryVerbose,
 			TEXT("[MouseAttack] Waiting for server activation result. Target=%s Serial=%u LocalActivated=%s Phase=%d"),
 			*GetNameSafe(TargetActor),
 			MouseCommand.CommandSerial,
@@ -4416,7 +5033,7 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 
 	if (bLocallyActivated)
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] ActivatePrimaryAttackAbility returned true. Target=%s Phase=%d Held=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] ActivatePrimaryAttackAbility returned true. Target=%s Phase=%d Held=%s"),
 			*GetNameSafe(TargetActor),
 			static_cast<int32>(MouseCommand.Phase),
 			BoolText(MouseCommand.Phase == EAeyerjiMousePhase::Held));
@@ -4428,7 +5045,7 @@ void AAeyerjiPlayerController::UpdateMouseCommand(const float DeltaSeconds)
 	}
 	else
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] ActivatePrimaryAttackAbility returned false. Target=%s Phase=%d"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] ActivatePrimaryAttackAbility returned false. Target=%s Phase=%d"),
 			*GetNameSafe(TargetActor),
 			static_cast<int32>(MouseCommand.Phase));
 	}
@@ -4479,24 +5096,28 @@ void AAeyerjiPlayerController::HandleObservedAbilityEnded(const FAbilityEndedDat
 {
 	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
 	const FGameplayAbilitySpecHandle PrimaryAttackHandle = FindPrimaryAttackAbilityHandle(ASC);
-	const bool bHeldPrimaryAttackEnded =
-		!EndedData.bWasCancelled
-		&& PrimaryAttackHandle.IsValid()
-		&& EndedData.AbilitySpecHandle == PrimaryAttackHandle
-		&& MouseCommand.Owner == EAeyerjiMouseButton::Left
-		&& MouseCommand.Phase == EAeyerjiMousePhase::Held
-		&& MouseCommand.Intent == EAeyerjiMouseIntent::BasicAttack
-		&& IsMouseButtonPhysicallyDown(EAeyerjiMouseButton::Left)
-		&& IsAttackableActor(MouseCommand.TargetActor.Get());
+	const bool bMatchingPrimaryAttack = PrimaryAttackHandle.IsValid()
+		&& EndedData.AbilitySpecHandle == PrimaryAttackHandle;
+	const bool bHeldPrimaryAttackEnded = ShouldRearmHeldPrimaryCommand(
+		bMatchingPrimaryAttack,
+		MouseCommand.Owner,
+		MouseCommand.Phase,
+		MouseCommand.Intent,
+		IsMouseButtonPhysicallyDown(EAeyerjiMouseButton::Left));
 	if (bHeldPrimaryAttackEnded)
 	{
-		// A normal swing completion is the handoff point for continuous held melee.
-		// The next controller tick revalidates the cursor target and submits the next hit.
+		// Normal completion and crowd-control cancellation both rearm the physical hold.
+		// GAS state tags defer the next request until the pawn can attack again.
 		MouseCommand.bAttackCommitted = false;
 		MouseCommand.IssuedMoveTarget.Reset();
 		MouseCommand.LastAttackAttemptTime = -1.0;
-		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Held primary ended; rearmed. Target=%s Serial=%u"),
-			*GetNameSafe(MouseCommand.TargetActor.Get()), MouseCommand.CommandSerial);
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Held primary ended; rearmed. Target=%s Serial=%u Cancelled=%s"),
+			*GetNameSafe(MouseCommand.TargetActor.Get()), MouseCommand.CommandSerial, BoolText(EndedData.bWasCancelled));
+
+		if (EndedData.bWasCancelled)
+		{
+			return;
+		}
 	}
 
 	if (!bMouseCommandPausedByAbilityCast && !bMouseCommandRecoveryPending)
@@ -4515,6 +5136,28 @@ void AAeyerjiPlayerController::HandleObservedAbilityEnded(const FAbilityEndedDat
 	}
 
 	ScheduleMouseCommandRecovery();
+}
+
+bool AAeyerjiPlayerController::ShouldRearmHeldPrimaryCommand(
+	const bool bMatchingPrimaryAttack,
+	const EAeyerjiMouseButton Owner,
+	const EAeyerjiMousePhase Phase,
+	const EAeyerjiMouseIntent Intent,
+	const bool bLeftMousePhysicallyDown)
+{
+	return bMatchingPrimaryAttack
+		&& Owner == EAeyerjiMouseButton::Left
+		&& Phase == EAeyerjiMousePhase::Held
+		&& Intent == EAeyerjiMouseIntent::BasicAttack
+		&& bLeftMousePhysicallyDown;
+}
+
+bool AAeyerjiPlayerController::IsNewerPrimaryCommandSerial(
+	const uint32 CandidateSerial,
+	const uint32 BaselineSerial)
+{
+	return CandidateSerial != 0
+		&& (BaselineSerial == 0 || static_cast<int32>(CandidateSerial - BaselineSerial) > 0);
 }
 
 void AAeyerjiPlayerController::HandleCastingTagChanged(const FGameplayTag Tag, const int32 NewCount)
@@ -4652,29 +5295,6 @@ bool AAeyerjiPlayerController::IsInteractClickMappedToAttackClick() const
 	return InteractClickPhysicalKey.IsValid() && InteractClickPhysicalKey == AttackClickPhysicalKey;
 }
 
-bool AAeyerjiPlayerController::WasSameKeyInteractionHandledRecently() const
-{
-	if (!IsInteractClickMappedToAttackClick() || LastSameKeyInteractionHandledTime < 0.0)
-	{
-		return false;
-	}
-
-	const UWorld* World = GetWorld();
-	const double Now = World ? World->GetTimeSeconds() : FPlatformTime::Seconds();
-	return (Now - LastSameKeyInteractionHandledTime) <= 0.05;
-}
-
-void AAeyerjiPlayerController::MarkSameKeyInteractionHandled()
-{
-	if (!IsInteractClickMappedToAttackClick())
-	{
-		return;
-	}
-
-	const UWorld* World = GetWorld();
-	LastSameKeyInteractionHandledTime = World ? World->GetTimeSeconds() : FPlatformTime::Seconds();
-}
-
 void AAeyerjiPlayerController::OnAttackClickPressed(const FInputActionValue&)
 {
 	BeginMouseCommand(EAeyerjiMouseButton::Left);
@@ -4700,12 +5320,6 @@ void AAeyerjiPlayerController::OnAttackClickReleased(const FInputActionValue&)
 
 void AAeyerjiPlayerController::OnInteractClickPressed(const FInputActionValue&)
 {
-	if (WasSameKeyInteractionHandledRecently())
-	{
-		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[Interaction][Input] Ignored duplicate same-key interaction press."));
-		return;
-	}
-
 	if (IsGameplayInputSuppressedByModalUI())
 	{
 		UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] Press ignored: gameplay input suppressed."));
@@ -4714,7 +5328,13 @@ void AAeyerjiPlayerController::OnInteractClickPressed(const FInputActionValue&)
 
 	if (IsAbilityCastInputLocked())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] Press ignored: ability cast lock active."));
+		FHitResult LootHit;
+		AActor* Loot = nullptr;
+		if (TryGetExplicitLootHit(LootHit, Loot))
+		{
+			CancelMouseCommandCompletely();
+			HandleInteractableUnderCursor(Loot, LootHit);
+		}
 		return;
 	}
 
@@ -4725,10 +5345,9 @@ void AAeyerjiPlayerController::OnInteractClickPressed(const FInputActionValue&)
 	uint8 LinkedTeleporterEndpointIndex = 0;
 	if (TryGetLinkedTeleporterHit(TeleporterHit, LinkedTeleporter, LinkedTeleporterEndpointIndex))
 	{
-		ClearAttackInputIntent();
+		CancelMouseCommandCompletely();
 		if (HandleLinkedTeleporterUnderCursor(LinkedTeleporter, LinkedTeleporterEndpointIndex, TeleporterHit))
 		{
-			MarkSameKeyInteractionHandled();
 			UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] Handled linked teleporter Target=%s Endpoint=%d."),
 				*GetNameSafe(LinkedTeleporter),
 				static_cast<int32>(LinkedTeleporterEndpointIndex));
@@ -4740,10 +5359,9 @@ void AAeyerjiPlayerController::OnInteractClickPressed(const FInputActionValue&)
 	AActor* InteractableActor = nullptr;
 	if (TryGetInteractableHit(InteractableHit, InteractableActor))
 	{
-		ClearAttackInputIntent();
+		CancelMouseCommandCompletely();
 		if (HandleInteractableUnderCursor(InteractableActor, InteractableHit))
 		{
-			MarkSameKeyInteractionHandled();
 			UE_LOG(LogAeyerji, Log, TEXT("[Interaction][Input] Handled interactable Target=%s."),
 				*GetNameSafe(InteractableActor));
 			return;
@@ -4757,7 +5375,7 @@ bool AAeyerjiPlayerController::ActivatePrimaryAttackAbility(AActor* ExplicitTarg
 {
 	if (IsAbilityCastInputLocked())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Activate blocked: ability cast lock active. ExplicitTarget=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Activate blocked: ability cast lock active. ExplicitTarget=%s"),
 			*GetNameSafe(ExplicitTarget));
 		return false;
 	}
@@ -4765,7 +5383,7 @@ bool AAeyerjiPlayerController::ActivatePrimaryAttackAbility(AActor* ExplicitTarg
 	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
 	if (!ASC)
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Activate blocked: no controlled ASC. ExplicitTarget=%s Pawn=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Activate blocked: no controlled ASC. ExplicitTarget=%s Pawn=%s"),
 			*GetNameSafe(ExplicitTarget),
 			*GetNameSafe(GetPawn()));
 		return false;
@@ -4784,13 +5402,13 @@ bool AAeyerjiPlayerController::ActivatePrimaryAttackAbility(AActor* ExplicitTarg
 
 	if (!IsAttackableActor(ExplicitTarget))
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Activate blocked: explicit target not attackable. ExplicitTarget=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Activate blocked: explicit target not attackable. ExplicitTarget=%s"),
 			*GetNameSafe(ExplicitTarget));
 		return false;
 	}
 
 	const bool bLocalTriggered = TriggerPrimaryAttackAbility(ASC, ExplicitTarget);
-	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Activate explicit target requested. Target=%s LocalTriggered=%s Authority=%s ASC=%s"),
+	UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Activate explicit target requested. Target=%s LocalTriggered=%s Authority=%s ASC=%s"),
 		*GetNameSafe(ExplicitTarget),
 		BoolText(bLocalTriggered),
 		BoolText(HasAuthority()),
@@ -4814,10 +5432,27 @@ bool AAeyerjiPlayerController::ActivatePrimaryAttackAbility(AActor* ExplicitTarg
 
 	if (bLocalTriggered)
 	{
+		AActor* PreviousTarget = LastPrimaryAttackTarget.Get();
 		LastPrimaryAttackTarget = ExplicitTarget;
+		AAeyerjiCombatBalanceTestHarness::RecordTargetingEvent(
+			this,
+			PreviousTarget,
+			ExplicitTarget,
+			EAeyerjiCombatTargetingTelemetryEvent::PlayerPrimaryActivated,
+			TEXT("AuthorityAccepted"),
+			MouseCommand.Intent == EAeyerjiMouseIntent::BasicAttack ? MouseCommand.CommandSerial : 0);
 	}
 
 	return bLocalTriggered;
+}
+
+bool AAeyerjiPlayerController::IsPrimaryAttackTemporarilyBlocked() const
+{
+	const UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
+	return IsAbilityCastInputLocked()
+		|| (ASC && (ASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead)
+			|| ASC->HasMatchingGameplayTag(AeyerjiTags::State_CrowdControl_Stunned)
+			|| ASC->HasMatchingGameplayTag(AeyerjiTags::State_CrowdControl_Staggered)));
 }
 
 FGameplayAbilitySpecHandle AAeyerjiPlayerController::FindPrimaryAttackAbilityHandle(UAbilitySystemComponent* ASC) const
@@ -4849,7 +5484,7 @@ bool AAeyerjiPlayerController::TriggerPrimaryAttackAbility(UAbilitySystemCompone
 {
 	if (!ASC || !ExplicitTarget || !ASC->AbilityActorInfo.IsValid())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] TriggerAbilityFromGameplayEvent blocked: ASC=%s Target=%s AbilityActorInfoValid=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] TriggerAbilityFromGameplayEvent blocked: ASC=%s Target=%s AbilityActorInfoValid=%s"),
 			*GetNameSafe(ASC),
 			*GetNameSafe(ExplicitTarget),
 			BoolText(ASC && ASC->AbilityActorInfo.IsValid()));
@@ -4859,7 +5494,7 @@ bool AAeyerjiPlayerController::TriggerPrimaryAttackAbility(UAbilitySystemCompone
 	const FGameplayAbilitySpecHandle AbilityHandle = FindPrimaryAttackAbilityHandle(ASC);
 	if (!AbilityHandle.IsValid())
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] TriggerAbilityFromGameplayEvent blocked: primary attack handle invalid. ASC=%s Target=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] TriggerAbilityFromGameplayEvent blocked: primary attack handle invalid. ASC=%s Target=%s"),
 			*GetNameSafe(ASC),
 			*GetNameSafe(ExplicitTarget));
 		return false;
@@ -4873,7 +5508,7 @@ bool AAeyerjiPlayerController::TriggerPrimaryAttackAbility(UAbilitySystemCompone
 	EventData.TargetData = UAbilitySystemBlueprintLibrary::AbilityTargetDataFromActor(ExplicitTarget);
 
 	const bool bTriggered = ASC->TriggerAbilityFromGameplayEvent(AbilityHandle, ASC->AbilityActorInfo.Get(), EventData.EventTag, &EventData, *ASC);
-	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] TriggerAbilityFromGameplayEvent result=%s Handle=%s Target=%s EventTag=%s"),
+	UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] TriggerAbilityFromGameplayEvent result=%s Handle=%s Target=%s EventTag=%s"),
 		BoolText(bTriggered),
 		*AbilityHandle.ToString(),
 		*GetNameSafe(ExplicitTarget),
@@ -4883,18 +5518,38 @@ bool AAeyerjiPlayerController::TriggerPrimaryAttackAbility(UAbilitySystemCompone
 
 void AAeyerjiPlayerController::Server_ActivatePrimaryAttackOnActor_Implementation(AActor* TargetActor, const uint32 CommandSerial)
 {
+	const bool bNewerCommand = IsNewerPrimaryCommandSerial(CommandSerial, LastServerPrimaryAttackCommandSerial);
+	const bool bMatchesCurrentCommand = CommandSerial != 0
+		&& CommandSerial == LastServerPrimaryAttackCommandSerial
+		&& LastServerPrimaryAttackCommandTarget.Get() == TargetActor;
+	if (!bNewerCommand && !bMatchesCurrentCommand)
+	{
+		UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Server activate ignored: stale or mismatched command. Target=%s Serial=%u LastSerial=%u LastTarget=%s"),
+			*GetNameSafe(TargetActor),
+			CommandSerial,
+			LastServerPrimaryAttackCommandSerial,
+			*GetNameSafe(LastServerPrimaryAttackCommandTarget.Get()));
+		Client_PrimaryAttackActivationResult(TargetActor, CommandSerial, false);
+		return;
+	}
+
 	if (!IsAttackableActor(TargetActor))
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server activate ignored: target not attackable. Target=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Server activate ignored: target not attackable. Target=%s"),
 			*GetNameSafe(TargetActor));
 		Client_PrimaryAttackActivationResult(TargetActor, CommandSerial, false);
 		return;
+	}
+	if (bNewerCommand)
+	{
+		LastServerPrimaryAttackCommandSerial = CommandSerial;
+		LastServerPrimaryAttackCommandTarget = TargetActor;
 	}
 
 	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
 	if (!ASC)
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server activate ignored: no ASC. Target=%s Pawn=%s"),
+		UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Server activate ignored: no ASC. Target=%s Pawn=%s"),
 			*GetNameSafe(TargetActor),
 			*GetNameSafe(GetPawn()));
 		Client_PrimaryAttackActivationResult(TargetActor, CommandSerial, false);
@@ -4904,9 +5559,17 @@ void AAeyerjiPlayerController::Server_ActivatePrimaryAttackOnActor_Implementatio
 	const bool bTriggered = TriggerPrimaryAttackAbility(ASC, TargetActor);
 	if (bTriggered)
 	{
+		AActor* PreviousTarget = LastPrimaryAttackTarget.Get();
 		LastPrimaryAttackTarget = TargetActor;
+		AAeyerjiCombatBalanceTestHarness::RecordTargetingEvent(
+			this,
+			PreviousTarget,
+			TargetActor,
+			EAeyerjiCombatTargetingTelemetryEvent::PlayerPrimaryActivated,
+			TEXT("ServerAccepted"),
+			CommandSerial);
 	}
-	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server activate explicit target result=%s Target=%s ASC=%s"),
+	UE_LOG(LogAeyerji, VeryVerbose, TEXT("[MouseAttack] Server activate explicit target result=%s Target=%s ASC=%s"),
 		BoolText(bTriggered),
 		*GetNameSafe(TargetActor),
 		*GetNameSafe(ASC));
@@ -4945,7 +5608,7 @@ void AAeyerjiPlayerController::Client_PrimaryAttackActivationResult_Implementati
 			MouseCommand.IssuedMoveTarget.Reset();
 			MouseCommand.LastAttackAttemptTime = -1.0;
 		}
-		UE_LOG(LogAeyerji, Log,
+		UE_LOG(LogAeyerji, Verbose,
 			TEXT("[MouseAttack] Server confirmed activation. Target=%s Serial=%u Phase=%d PrimaryStillActive=%s"),
 			*GetNameSafe(TargetActor),
 			CommandSerial,
@@ -4963,47 +5626,67 @@ void AAeyerjiPlayerController::Client_PrimaryAttackActivationResult_Implementati
 	// Re-arm this exact click so the normal update loop resumes chasing and retries.
 	MouseCommand.bAttackCommitted = false;
 	MouseCommand.IssuedMoveTarget.Reset();
-	UE_LOG(LogAeyerji, Log,
+	UE_LOG(LogAeyerji, Verbose,
 		TEXT("[MouseAttack] Server deferred activation; retaining click command. Target=%s Serial=%u InRangeNow=%s"),
 		*GetNameSafe(TargetActor),
 		CommandSerial,
 		BoolText(IsMouseCommandTargetInBasicAttackRange(TargetActor)));
 }
 
-void AAeyerjiPlayerController::Server_CancelPrimaryAttackForRetarget_Implementation(AActor* NewTarget)
+void AAeyerjiPlayerController::Server_PreparePrimaryAttackForRetarget_Implementation(
+	AActor* NewTarget,
+	const uint32 CommandSerial,
+	const bool bWasRetarget,
+	const bool bPreviousTargetWasInvalid)
 {
-	if (!IsAttackableActor(NewTarget))
+	if (!bWasRetarget || !IsNewerPrimaryCommandSerial(CommandSerial, LastServerPrimaryAttackCommandSerial))
 	{
-		UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server retarget cancellation ignored: new target not attackable. Target=%s"),
+		UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Server retarget handoff ignored: stale command. NewTarget=%s Serial=%u LastSerial=%u"),
+			*GetNameSafe(NewTarget),
+			CommandSerial,
+			LastServerPrimaryAttackCommandSerial);
+		return;
+	}
+
+	if (NewTarget && !IsAttackableActor(NewTarget))
+	{
+		UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Server retarget handoff ignored: new target not attackable. Target=%s"),
 			*GetNameSafe(NewTarget));
 		return;
 	}
 
+	LastServerPrimaryAttackCommandSerial = CommandSerial;
+	LastServerPrimaryAttackCommandTarget = NewTarget;
+	AActor* PreviousTarget = LastPrimaryAttackTarget.Get();
 	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
 	const FGameplayAbilitySpecHandle AbilityHandle = FindPrimaryAttackAbilityHandle(ASC);
 	const FGameplayAbilitySpec* ActiveSpec = ASC && AbilityHandle.IsValid()
 		? ASC->FindAbilitySpecFromHandle(AbilityHandle)
 		: nullptr;
-	if (!ActiveSpec || !ActiveSpec->IsActive())
+	if (ActiveSpec && ActiveSpec->IsActive())
 	{
-		LastPrimaryAttackTarget = NewTarget;
-		return;
+		if (UGA_PrimaryMeleeBasic* MeleeAbility = Cast<UGA_PrimaryMeleeBasic>(ActiveSpec->GetPrimaryInstance()))
+		{
+			MeleeAbility->NotifyExternalRetarget(NewTarget);
+		}
 	}
 
-	if (UGA_PrimaryMeleeBasic* MeleeAbility = Cast<UGA_PrimaryMeleeBasic>(ActiveSpec->GetPrimaryInstance()))
-	{
-		MeleeAbility->NotifyExternalRetarget(NewTarget);
-	}
-
-	ASC->CancelAbilityHandle(AbilityHandle);
-	const FGameplayAbilitySpec* UpdatedSpec = ASC->FindAbilitySpecFromHandle(AbilityHandle);
-	const bool bCancelled = UpdatedSpec && !UpdatedSpec->IsActive();
 	LastPrimaryAttackTarget = NewTarget;
+	if (bWasRetarget)
+	{
+		AAeyerjiCombatBalanceTestHarness::RecordTargetingEvent(
+			this,
+			PreviousTarget,
+			NewTarget,
+			EAeyerjiCombatTargetingTelemetryEvent::PlayerTargetHandoff,
+			bPreviousTargetWasInvalid ? TEXT("PreviousTargetInvalid") : TEXT("CursorRetarget"),
+			CommandSerial);
+	}
 
-	UE_LOG(LogAeyerji, Log, TEXT("[MouseAttack] Server retarget cancellation. NewTarget=%s Handle=%s Cancelled=%s"),
+	UE_LOG(LogAeyerji, Verbose, TEXT("[MouseAttack] Server retarget handoff queued without cancelling active strike. NewTarget=%s Serial=%u Handle=%s"),
 		*GetNameSafe(NewTarget),
-		*AbilityHandle.ToString(),
-		BoolText(bCancelled));
+		CommandSerial,
+		*AbilityHandle.ToString());
 }
 
 bool AAeyerjiPlayerController::BuildPrimaryAttackTagSearch(UAbilitySystemComponent* ASC, FGameplayTagContainer& OutTags) const
@@ -5345,7 +6028,9 @@ bool AAeyerjiPlayerController::IsAttackableActor(const AActor* Other) const
 
 	if (const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Other, /*LookForComponent=*/true))
 	{
-		if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+		if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead)
+			|| (TargetASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPAttribute())
+				&& TargetASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()) <= UE_KINDA_SMALL_NUMBER))
 		{
 			return false;
 		}
@@ -5354,6 +6039,17 @@ bool AAeyerjiPlayerController::IsAttackableActor(const AActor* Other) const
 	if (Other->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName()))
 	{
 		return false;
+	}
+
+	// Dormant pooled or revealing enemies are never valid click/attack targets. This single
+	// choke covers cursor attack, target snap, hover fallback, retargeting, and both server
+	// RPC validations, since they all route through here.
+	if (const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(Other))
+	{
+		if (!Enemy->IsEncounterCombatActive())
+		{
+			return false;
+		}
 	}
 
 	const IGenericTeamAgentInterface* Me = Cast<IGenericTeamAgentInterface>(GetPawn());
@@ -5369,6 +6065,7 @@ bool AAeyerjiPlayerController::IsAttackableActor(const AActor* Other) const
 void AAeyerjiPlayerController::ResetForClick()
 {
 	ClearMouseCommandData();
+	ClearPersistentGroundMoveIntent();
 	CancelFaceActor();
 	StopPendingTeleporter();
 	StopPendingInteraction();
@@ -5393,6 +6090,7 @@ void AAeyerjiPlayerController::ResetForClick()
 void AAeyerjiPlayerController::ResetForMoveOnly()
 {
 	ClearMouseCommandData();
+	ClearPersistentGroundMoveIntent();
 	CancelFaceActor();
 	StopPendingTeleporter();
 	StopPendingInteraction();
@@ -5869,8 +6567,54 @@ bool AAeyerjiPlayerController::TryGetLinkedTeleporterHit(FHitResult& OutHit, AAe
 	return true;
 }
 
+bool AAeyerjiPlayerController::TryGetExplicitLootHit(FHitResult& OutHit, AActor*& OutLoot) const
+{
+	OutLoot = nullptr;
+	FVector RayStart, RayDirection;
+	UWorld* World = GetWorld();
+	if (!World || !DeprojectMousePositionToWorld(RayStart, RayDirection)) { return false; }
+	const FVector RayEnd = RayStart + RayDirection * 100000.f;
+	float BestDistanceSq = TNumericLimits<float>::Max();
+	bool bBestIsLabel = false;
+	for (TActorIterator<AAeyerjiLootPickup> It(World); It; ++It)
+	{
+		AAeyerjiLootPickup* Loot = *It;
+		if (Loot->GetReservedPlayerState() && Loot->GetReservedPlayerState() != PlayerState) { continue; }
+		FVector Point;
+		bool bLabel = false;
+		if (!Loot->HitTestLootVisual(const_cast<AAeyerjiPlayerController*>(this), RayStart, RayEnd, Point, bLabel)) { continue; }
+		const float DistanceSq = FVector::DistSquared(RayStart, Point);
+		if (OutLoot && ((!bLabel && bBestIsLabel) || (bLabel == bBestIsLabel && DistanceSq >= BestDistanceSq))) { continue; }
+		// Ignore crowds and other drops, but never select loot through a wall.
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(ExplicitLootOcclusion), false, Loot);
+		Params.AddIgnoredActor(GetPawn());
+		bool bVisible = false;
+		for (int32 Pass = 0; Pass < 32; ++Pass)
+		{
+			FHitResult Blocker;
+			if (!World->LineTraceSingleByChannel(Blocker, RayStart, Point, ECC_Visibility, Params))
+			{
+				bVisible = true;
+				break;
+			}
+			AActor* Actor = Blocker.GetActor();
+			if (!Actor || (!Cast<APawn>(Actor) && !Cast<AAeyerjiLootPickup>(Actor)
+				&& !FindEnemyOwnerInCursorHit(Blocker))) { break; }
+			Params.AddIgnoredActor(Actor);
+		}
+		if (!bVisible) { continue; }
+		OutLoot = Loot;
+		BestDistanceSq = DistanceSq;
+		bBestIsLabel = bLabel;
+		OutHit = FHitResult(Loot, nullptr, Point, FVector::UpVector);
+		OutHit.bBlockingHit = true;
+	}
+	return OutLoot != nullptr;
+}
+
 bool AAeyerjiPlayerController::TryGetInteractableHit(FHitResult& OutHit, AActor*& OutInteractable) const
 {
+	if (TryGetExplicitLootHit(OutHit, OutInteractable)) { return true; }
 	OutInteractable = nullptr;
 
 	if (!TraceCursor(ECC_GameTraceChannel1, OutHit, /*bTraceComplex=*/false))
@@ -6062,6 +6806,13 @@ bool AAeyerjiPlayerController::HandleLinkedTeleporterUnderCursor(AAeyerjiLinkedT
 
 bool AAeyerjiPlayerController::HandleInteractableUnderCursor(AActor* InteractableActor, const FHitResult& InteractableHit)
 {
+	if (IsControlledPawnDead()) { return true; }
+	if (IsValid(InteractableActor) && Cast<AAeyerjiLootPickup>(InteractableActor))
+	{
+		StartPendingInteraction(InteractableActor);
+		ProcessPendingInteraction();
+		return true;
+	}
 	static_cast<void>(InteractableHit);
 
 	if (!IsValid(InteractableActor) || !InteractableActor->GetClass()->ImplementsInterface(UAeyerjiInteractable::StaticClass()))
@@ -6082,16 +6833,17 @@ bool AAeyerjiPlayerController::HandleInteractableUnderCursor(AActor* Interactabl
 	}
 
 	const FVector InteractionLocation = IAeyerjiInteractable::Execute_GetInteractionLocation(InteractableActor);
-	const float InteractionRadius = IAeyerjiInteractable::Execute_GetInteractionRadius(InteractableActor);
+	const float InteractionRadius = ResolveInteractionRadius(InteractableActor);
+	const float InteractionApproachRadius = ResolveInteractionApproachRadius(InteractionRadius);
 	const float Distance2D = FVector::Dist2D(ControlledPawn->GetActorLocation(), InteractionLocation);
-	if (InteractionRadius <= 0.f || Distance2D <= InteractionRadius)
+	if (Distance2D <= InteractionApproachRadius)
 	{
-		AJ_LOG(this, TEXT("[Interaction] Target in range; requesting server interaction Target=%s Pawn=%s Distance=%.1f Radius=%.1f Unlimited=%d"),
+		AJ_LOG(this, TEXT("[Interaction] Target in range; requesting server interaction Target=%s Pawn=%s Distance=%.1f ApproachRadius=%.1f ValidationRadius=%.1f"),
 			*GetNameSafe(InteractableActor),
 			*GetNameSafe(ControlledPawn),
 			Distance2D,
-			InteractionRadius,
-			InteractionRadius <= 0.f ? 1 : 0);
+			InteractionApproachRadius,
+			InteractionRadius);
 		AbortMovement_Both();
 		Server_RequestInteractableUse(InteractableActor);
 		return true;
@@ -6100,10 +6852,11 @@ bool AAeyerjiPlayerController::HandleInteractableUnderCursor(AActor* Interactabl
 	FVector Goal;
 	if (ComputeInteractionGoal(InteractableActor, Goal))
 	{
-		AJ_LOG(this, TEXT("[Interaction] Target out of range; moving toward interaction goal Target=%s Pawn=%s Distance=%.1f Radius=%.1f Goal=%s"),
+		AJ_LOG(this, TEXT("[Interaction] Target out of range; moving toward interaction goal Target=%s Pawn=%s Distance=%.1f ApproachRadius=%.1f ValidationRadius=%.1f Goal=%s"),
 			*GetNameSafe(InteractableActor),
 			*GetNameSafe(ControlledPawn),
 			Distance2D,
+			InteractionApproachRadius,
 			InteractionRadius,
 			*Goal.ToCompactString());
 		IssueMoveRPC(Goal);
@@ -6111,10 +6864,11 @@ bool AAeyerjiPlayerController::HandleInteractableUnderCursor(AActor* Interactabl
 	}
 	else
 	{
-		UE_LOG(LogAeyerji, Warning, TEXT("[Interaction] Cannot find navigable interaction goal Target=%s Pawn=%s Distance=%.1f Radius=%.1f"),
+		UE_LOG(LogAeyerji, Warning, TEXT("[Interaction] Cannot find navigable interaction goal Target=%s Pawn=%s Distance=%.1f ApproachRadius=%.1f ValidationRadius=%.1f"),
 			*GetNameSafe(InteractableActor),
 			*GetNameSafe(ControlledPawn),
 			Distance2D,
+			InteractionApproachRadius,
 			InteractionRadius);
 	}
 
@@ -6553,6 +7307,13 @@ void AAeyerjiPlayerController::PollHoverUnderCursor()
 		}
 	}
 
+	// Drop hover (including grace-period stickiness) for enemies that left combat, e.g.
+	// an enemy that returned to the pool while hovered.
+	if (NewEnemy && !NewEnemy->IsEncounterCombatActive())
+	{
+		NewEnemy = nullptr;
+	}
+
 	// Only present one contextual hover when volumes overlap. Attackable enemies are
 	// the primary left-click target; loot becomes selectable again as soon as the
 	// cursor no longer resolves an enemy.
@@ -6665,6 +7426,8 @@ void AAeyerjiPlayerController::IssueMoveRPC(AActor* Target)
 		UE_LOG(LogAeyerji, Warning, TEXT("[Move] IssueMoveRPC ignored: pawn dead."));
 		return;
 	}
+
+	ClearPersistentGroundMoveIntent();
 
 	if (HandleMovementBlockedByAbilities())
 	{
@@ -6780,6 +7543,8 @@ void AAeyerjiPlayerController::ServerMoveToActor_Implementation(AActor* Target, 
 		UE_LOG(LogAeyerji, Warning, TEXT("[Move] ServerMoveToActor ignored: pawn dead."));
 		return;
 	}
+
+	ClearPersistentGroundMoveIntent();
 
 	if (HandleMovementBlockedByAbilities())
 	{
@@ -6915,6 +7680,7 @@ void AAeyerjiPlayerController::Server_EndCursorFollow_Implementation(const FVect
 	bCursorFollowHasSmoothedGoal = false;
 	LastCursorFollowRepathTime = -1.0;
 	LastCursorFollowRepathGoal = FVector::ZeroVector;
+	SetPersistentGroundMoveIntent(FinalGoal);
 }
 
 void AAeyerjiPlayerController::Server_ResetCursorFollowTurnRate_Implementation(const uint32 UpdateId)
@@ -6932,6 +7698,7 @@ void AAeyerjiPlayerController::Server_ResetCursorFollowTurnRate_Implementation(c
 	LastCursorFollowRepathTime = -1.0;
 	LastCursorFollowRepathGoal = FVector::ZeroVector;
 	LastCursorFollowServerDiagTime = -1.0;
+	ClearPersistentGroundMoveIntent();
 }
 
 void AAeyerjiPlayerController::Server_ApplyCursorFollowTurnRate_Implementation(const FVector& Goal)
@@ -6945,6 +7712,7 @@ void AAeyerjiPlayerController::Server_ActivateAbilityAtLocation_Implementation(c
 	if (!P) { AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: no pawn")); return; }
 	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
 	if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityAtLocation: no ASC")); return; }
+	BindAbilityFailureFeedback();
 	FAeyerjiAbilitySlot AuthorizedSlot;
 	if (!ResolveAuthoritativeActionBarSlot(this, AbilitySlot, AuthorizedSlot))
 	{
@@ -6978,6 +7746,7 @@ void AAeyerjiPlayerController::Server_ActivateAbilityOnActor_Implementation(cons
 	if (!P) { AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: no pawn")); return; }
 	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
 	if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityOnActor: no ASC")); return; }
+	BindAbilityFailureFeedback();
 	FAeyerjiAbilitySlot AuthorizedSlot;
 	if (!ResolveAuthoritativeActionBarSlot(this, AbilitySlot, AuthorizedSlot))
 	{
@@ -7013,6 +7782,7 @@ void AAeyerjiPlayerController::Server_ActivateAbilityInstant_Implementation(cons
 	if (!P) { AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: no pawn")); return; }
 	UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(P);
 	if (!ASC) { AJ_LOG(this, TEXT("Server_ActivateAbilityInstant: no ASC")); return; }
+	BindAbilityFailureFeedback();
 	FAeyerjiAbilitySlot AuthorizedSlot;
 	if (!ResolveAuthoritativeActionBarSlot(this, AbilitySlot, AuthorizedSlot))
 	{
@@ -7627,6 +8397,507 @@ void AAeyerjiPlayerController::AJ_SetHP(const float HPValue)
 		FMath::Max(1.f, HPValue)));
 }
 
+void AAeyerjiPlayerController::AJ_Cheats()
+{
+#if !UE_BUILD_SHIPPING
+	if (!IsLocalController())
+	{
+		return;
+	}
+
+	if (CheatDrawerWidget && CheatDrawerWidget->IsInViewport())
+	{
+		CheatDrawerWidget->RemoveFromParent();
+		return;
+	}
+
+	if (!CheatDrawerWidget)
+	{
+		CheatDrawerWidget = CreateWidget<UW_AeyerjiCheatDrawer>(this, UW_AeyerjiCheatDrawer::StaticClass());
+		if (CheatDrawerWidget)
+		{
+			CheatDrawerWidget->InitializeForController(this);
+		}
+	}
+
+	if (CheatDrawerWidget)
+	{
+		CheatDrawerWidget->AddToViewport(10000);
+		bShowMouseCursor = true;
+	}
+#else
+	PrintDisplayDebugMessage(TEXT("AJ_Cheats is unavailable in shipping builds."));
+#endif
+}
+
+void AAeyerjiPlayerController::AJ_SetLevel(const int32 NewLevel)
+{
+	if (!AreCheatsAllowed()) return;
+	if (HasAuthority()) ApplyCheatLevel(NewLevel);
+	else ServerAJ_SetLevel(NewLevel);
+}
+
+void AAeyerjiPlayerController::AJ_SetMoveSpeedMultiplier(const float Multiplier)
+{
+	if (!AreCheatsAllowed()) return;
+	if (HasAuthority()) ApplyCheatMoveSpeedMultiplier(Multiplier);
+	else ServerAJ_SetMoveSpeedMultiplier(Multiplier);
+}
+
+void AAeyerjiPlayerController::AJ_FullHeal()
+{
+	if (!AreCheatsAllowed()) return;
+	if (HasAuthority()) ApplyCheatFullHeal();
+	else ServerAJ_FullHeal();
+}
+
+void AAeyerjiPlayerController::AJ_RestartRift()
+{
+	if (!AreCheatsAllowed()) return;
+	if (HasAuthority()) ApplyCheatRestartRift();
+	else ServerAJ_RestartRift();
+}
+
+void AAeyerjiPlayerController::AJ_SpawnItem(FString ItemDefinitionPath, const int32 ItemLevel)
+{
+	if (!AreCheatsAllowed() || ItemDefinitionPath.IsEmpty()) return;
+	if (HasAuthority()) ApplyCheatSpawnItem(ItemDefinitionPath, ItemLevel);
+	else ServerAJ_SpawnItem(ItemDefinitionPath, ItemLevel);
+}
+
+bool AAeyerjiPlayerController::AreCheatsAllowed() const
+{
+#if UE_BUILD_SHIPPING
+	return false;
+#else
+	return true;
+#endif
+}
+
+void AAeyerjiPlayerController::ApplyCheatLevel(const int32 NewLevel)
+{
+	if (!AreCheatsAllowed() || !HasAuthority())
+	{
+		return;
+	}
+
+	APawn* ControlledPawn = GetPawn();
+	UAeyerjiLevelingComponent* Leveling = ControlledPawn
+		? ControlledPawn->FindComponentByClass<UAeyerjiLevelingComponent>()
+		: nullptr;
+	if (!Leveling)
+	{
+		PrintDisplayDebugMessage(TEXT("AJ_SetLevel failed - leveling component unavailable."));
+		return;
+	}
+
+	const int32 ClampedLevel = UAeyerjiDifficultySettings::ClampGameplayLevel(NewLevel);
+	Leveling->SetLevel(ClampedLevel);
+	PrintDisplayDebugMessage(FString::Printf(TEXT("Applied character level %d."), ClampedLevel));
+}
+
+void AAeyerjiPlayerController::ApplyCheatMoveSpeedMultiplier(const float Multiplier)
+{
+	if (!AreCheatsAllowed() || !HasAuthority())
+	{
+		return;
+	}
+
+	UAbilitySystemComponent* ASC = GetCheatTargetAbilitySystemComponent();
+	if (!ASC)
+	{
+		PrintDisplayDebugMessage(TEXT("AJ_SetMoveSpeedMultiplier failed - AbilitySystemComponent unavailable."));
+		return;
+	}
+
+	const float ClampedMultiplier = FMath::Clamp(FMath::IsFinite(Multiplier) ? Multiplier : 1.f, 0.1f, 10.f);
+	if (!bHasCheatOriginalRunSpeedBase)
+	{
+		CheatOriginalRunSpeedBase = ASC->GetNumericAttributeBase(UAeyerjiAttributeSet::GetRunSpeedAttribute());
+		bHasCheatOriginalRunSpeedBase = CheatOriginalRunSpeedBase > KINDA_SMALL_NUMBER;
+	}
+
+	if (!bHasCheatOriginalRunSpeedBase)
+	{
+		PrintDisplayDebugMessage(TEXT("AJ_SetMoveSpeedMultiplier failed - RunSpeed base is unavailable."));
+		return;
+	}
+
+	ASC->SetNumericAttributeBase(
+		UAeyerjiAttributeSet::GetRunSpeedAttribute(),
+		CheatOriginalRunSpeedBase * ClampedMultiplier);
+	PrintDisplayDebugMessage(FString::Printf(TEXT("Applied movement speed multiplier x%.2f."), ClampedMultiplier));
+
+	if (FMath::IsNearlyEqual(ClampedMultiplier, 1.f))
+	{
+		bHasCheatOriginalRunSpeedBase = false;
+		CheatOriginalRunSpeedBase = 0.f;
+	}
+}
+
+void AAeyerjiPlayerController::ApplyCheatFullHeal()
+{
+	if (!AreCheatsAllowed() || !HasAuthority())
+	{
+		return;
+	}
+
+	UAbilitySystemComponent* ASC = GetCheatTargetAbilitySystemComponent();
+	if (!ASC)
+	{
+		PrintDisplayDebugMessage(TEXT("AJ_FullHeal failed - AbilitySystemComponent unavailable."));
+		return;
+	}
+
+	const float HPMax = FMath::Max(1.f, ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute()));
+	ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(), HPMax);
+	PrintDisplayDebugMessage(FString::Printf(TEXT("Restored HP to %.2f."), HPMax));
+}
+
+void AAeyerjiPlayerController::ApplyCheatRestartRift()
+{
+	if (!AreCheatsAllowed() || !HasAuthority())
+	{
+		return;
+	}
+
+	UGameInstance* GameInstance = GetGameInstance();
+	UAeyerjiStreamingSubsystem* Streaming = GameInstance
+		? GameInstance->GetSubsystem<UAeyerjiStreamingSubsystem>()
+		: nullptr;
+	if (!Streaming || !Streaming->RestartCurrentGameplaySession())
+	{
+		PrintDisplayDebugMessage(TEXT("AJ_RestartRift failed - current gameplay session could not be restarted."));
+	}
+}
+
+void AAeyerjiPlayerController::ApplyCheatSpawnItem(const FString& ItemDefinitionPath, const int32 ItemLevel)
+{
+	if (!AreCheatsAllowed() || !HasAuthority())
+	{
+		return;
+	}
+
+	APawn* ControlledPawn = GetPawn();
+	UItemDefinition* Definition = LoadObject<UItemDefinition>(nullptr, *ItemDefinitionPath);
+	if (!ControlledPawn || !Definition)
+	{
+		PrintDisplayDebugMessage(FString::Printf(
+			TEXT("AJ_SpawnItem failed - pawn or item definition unavailable: %s"),
+			*ItemDefinitionPath));
+		return;
+	}
+
+	const int32 ResolvedItemLevel = ItemLevel > 0
+		? UAeyerjiDifficultySettings::ClampGameplayLevel(ItemLevel)
+		: 0;
+	const FVector ItemSpawnLocation = ControlledPawn->GetActorLocation()
+		+ ControlledPawn->GetActorRightVector() * 140.f
+		+ FVector(0.f, 0.f, 40.f);
+	AAeyerjiLootPickup* Pickup = UAeyerjiInventoryBPFL::SpawnLootByDefinition(
+		this,
+		Definition,
+		ResolvedItemLevel,
+		EItemRarity::Common,
+		ItemSpawnLocation,
+		FRotator::ZeroRotator,
+		/*SeedOverride=*/0,
+		EItemDropDistributionMode::DropOnlyForInstigator,
+		ControlledPawn);
+	PrintDisplayDebugMessage(Pickup
+		? FString::Printf(TEXT("Spawned item pickup: %s"), *Definition->DisplayName.ToString())
+		: FString::Printf(TEXT("AJ_SpawnItem failed for %s. Check required/player/item levels."), *GetNameSafe(Definition)));
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestHelp()
+{
+	EnsureViewportConsole();
+	PrintDisplayDebugMessage(FString::Printf(
+		TEXT("Aeyerji combat-balance test commands\n")
+		TEXT("Presets: %s\n")
+		TEXT("AJ_CombatTestPreset <Preset> [EnemyLevel=1] [WorldTier=167] [Seed=1337] [AutoEngageDelay=3]\n")
+		TEXT("AJ_CombatTestCustom <Grunt|Bulwark|Archer|Support|Ranged|Mixed|MixedElite|Elite> <Count 1..48> [EnemyLevel] [WorldTier] [Seed] [MinRadius] [MaxRadius] [AutoEngageDelay] [SpawnInterval]\n")
+		TEXT("AJ_CombatTestEngage | AJ_CombatTestStatus | AJ_CombatTestMark <Label> | AJ_CombatTestStop | AJ_CombatTestHUD <0|1>\n")
+		TEXT("Use AutoEngageDelay=-1 to assemble and lock the pack, begin Rewind recording, then call AJ_CombatTestEngage. Reports write to Saved/CombatTests."),
+		*AAeyerjiCombatBalanceTestHarness::GetPresetList()));
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestPreset(
+	FString PresetName,
+	const int32 EnemyLevel,
+	const int32 WorldTier,
+	const int32 Seed,
+	const float AutoEngageDelay)
+{
+	EnsureViewportConsole();
+	if (HasAuthority())
+	{
+		ServerAJ_CombatTestPreset_Implementation(PresetName, EnemyLevel, WorldTier, Seed, AutoEngageDelay);
+	}
+	else
+	{
+		ServerAJ_CombatTestPreset(PresetName, EnemyLevel, WorldTier, Seed, AutoEngageDelay);
+		PrintDisplayDebugMessage(FString::Printf(
+			TEXT("Requested combat-test preset %s from authority."),
+			*PresetName));
+	}
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestCustom(
+	FString Composition,
+	const int32 Count,
+	const int32 EnemyLevel,
+	const int32 WorldTier,
+	const int32 Seed,
+	const float MinimumRadius,
+	const float MaximumRadius,
+	const float AutoEngageDelay,
+	const float SpawnInterval)
+{
+	EnsureViewportConsole();
+	if (HasAuthority())
+	{
+		ServerAJ_CombatTestCustom_Implementation(
+			Composition,
+			Count,
+			EnemyLevel,
+			WorldTier,
+			Seed,
+			MinimumRadius,
+			MaximumRadius,
+			AutoEngageDelay,
+			SpawnInterval);
+	}
+	else
+	{
+		ServerAJ_CombatTestCustom(
+			Composition,
+			Count,
+			EnemyLevel,
+			WorldTier,
+			Seed,
+			MinimumRadius,
+			MaximumRadius,
+			AutoEngageDelay,
+			SpawnInterval);
+		PrintDisplayDebugMessage(FString::Printf(
+			TEXT("Requested custom %s x%d combat test from authority."),
+			*Composition,
+			Count));
+	}
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestEngage()
+{
+	if (HasAuthority())
+	{
+		ServerAJ_CombatTestEngage_Implementation();
+	}
+	else
+	{
+		ServerAJ_CombatTestEngage();
+	}
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestStatus()
+{
+	EnsureViewportConsole();
+	if (const AAeyerjiCombatBalanceTestHarness* Harness =
+		AAeyerjiCombatBalanceTestHarness::FindForWorld(GetWorld()))
+	{
+		PrintDisplayDebugMessage(Harness->BuildLocalSummary(this));
+	}
+	else
+	{
+		PrintDisplayDebugMessage(TEXT("No combat-balance test harness exists in this world. Use AJ_CombatTestHelp."));
+	}
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestMark(FString Label)
+{
+	if (HasAuthority())
+	{
+		ServerAJ_CombatTestMark_Implementation(Label);
+	}
+	else
+	{
+		ServerAJ_CombatTestMark(Label);
+	}
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestStop()
+{
+	if (HasAuthority())
+	{
+		ServerAJ_CombatTestStop_Implementation();
+	}
+	else
+	{
+		ServerAJ_CombatTestStop();
+	}
+}
+
+void AAeyerjiPlayerController::AJ_CombatTestHUD(const int32 bEnabled)
+{
+	AAeyerjiCombatBalanceTestHarness::SetLocalHUDEnabled(bEnabled != 0);
+	PrintDisplayDebugMessage(FString::Printf(
+		TEXT("Combat-test HUD %s locally."),
+		AAeyerjiCombatBalanceTestHarness::IsLocalHUDEnabled() ? TEXT("enabled") : TEXT("disabled")));
+}
+
+void AAeyerjiPlayerController::AJ_BalanceRunStart(FString RunLabel)
+{
+	if (!AreCheatsAllowed()) return;
+	if (HasAuthority()) ServerAJ_BalanceRunStart_Implementation(RunLabel);
+	else ServerAJ_BalanceRunStart(RunLabel);
+}
+
+void AAeyerjiPlayerController::AJ_BalanceRunStatus()
+{
+	EnsureViewportConsole();
+	const AAeyerjiCombatBalanceTestHarness* Recorder = AAeyerjiCombatBalanceTestHarness::FindForWorld(GetWorld());
+	if (Recorder && Recorder->bObservingProductionRift)
+	{
+		PrintDisplayDebugMessage(Recorder->BuildLocalSummary(this));
+	}
+	else
+	{
+		PrintDisplayDebugMessage(TEXT("No production Rift balance run is recording. Use AJ_BalanceRunStart [Label]."));
+	}
+}
+
+void AAeyerjiPlayerController::AJ_BalanceRunStop()
+{
+	if (!AreCheatsAllowed()) return;
+	if (HasAuthority()) ServerAJ_BalanceRunStop_Implementation();
+	else ServerAJ_BalanceRunStop();
+}
+
+void AAeyerjiPlayerController::ServerAJ_CombatTestPreset_Implementation(
+	const FString& PresetName,
+	const int32 EnemyLevel,
+	const int32 WorldTier,
+	const int32 Seed,
+	const float AutoEngageDelay)
+{
+	FString Message;
+	AAeyerjiCombatBalanceTestHarness::StartPreset(
+		GetWorld(),
+		this,
+		PresetName,
+		EnemyLevel,
+		WorldTier,
+		Seed,
+		AutoEngageDelay,
+		Message);
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ServerAJ_CombatTestCustom_Implementation(
+	const FString& Composition,
+	const int32 Count,
+	const int32 EnemyLevel,
+	const int32 WorldTier,
+	const int32 Seed,
+	const float MinimumRadius,
+	const float MaximumRadius,
+	const float AutoEngageDelay,
+	const float SpawnInterval)
+{
+	FAeyerjiCombatTestRequest Request;
+	Request.ScenarioName = NAME_None;
+	Request.CompositionName = FName(*Composition);
+	Request.EnemyCount = Count;
+	Request.EnemyLevel = EnemyLevel;
+	Request.WorldTier = WorldTier;
+	Request.Seed = Seed;
+	Request.MinimumSpawnRadius = MinimumRadius;
+	Request.MaximumSpawnRadius = MaximumRadius;
+	Request.AutoEngageDelay = AutoEngageDelay;
+	Request.SpawnInterval = SpawnInterval;
+
+	FString Message;
+	AAeyerjiCombatBalanceTestHarness::StartCustom(GetWorld(), this, Request, Message);
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ServerAJ_CombatTestEngage_Implementation()
+{
+	FString Message;
+	if (AAeyerjiCombatBalanceTestHarness* Harness =
+		AAeyerjiCombatBalanceTestHarness::FindForWorld(GetWorld()))
+	{
+		Harness->Engage(Message);
+	}
+	else
+	{
+		Message = TEXT("No prepared combat test exists. Use AJ_CombatTestHelp.");
+	}
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ServerAJ_CombatTestMark_Implementation(const FString& Label)
+{
+	FString Message;
+	if (AAeyerjiCombatBalanceTestHarness* Harness =
+		AAeyerjiCombatBalanceTestHarness::FindForWorld(GetWorld()))
+	{
+		Harness->AddManualMarker(Label);
+		Message = FString::Printf(TEXT("Added combat-test marker '%s'."), *Label);
+	}
+	else
+	{
+		Message = TEXT("No combat test exists to mark.");
+	}
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ServerAJ_CombatTestStop_Implementation()
+{
+	FString Message;
+	if (AAeyerjiCombatBalanceTestHarness* Harness =
+		AAeyerjiCombatBalanceTestHarness::FindForWorld(GetWorld()))
+	{
+		Harness->StopTest(true);
+		Harness->Destroy();
+		Message = TEXT("Combat test exported and cleaned up. See Saved/CombatTests and LogAeyerjiCombatTest.");
+	}
+	else
+	{
+		Message = TEXT("No combat test exists to stop.");
+	}
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ServerAJ_BalanceRunStart_Implementation(const FString& RunLabel)
+{
+	FString Message;
+	AAeyerjiCombatBalanceTestHarness::StartProductionObservation(GetWorld(), this, RunLabel, Message);
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ServerAJ_BalanceRunStop_Implementation()
+{
+	FString Message;
+	if (AAeyerjiCombatBalanceTestHarness* Recorder = AAeyerjiCombatBalanceTestHarness::FindForWorld(GetWorld());
+		Recorder && Recorder->bObservingProductionRift)
+	{
+		Recorder->StopTest(true);
+		Recorder->Destroy();
+		Message = TEXT("Production Rift balance run saved. Normal enemies were left untouched. See Saved/CombatTests for AJBR reports.");
+	}
+	else
+	{
+		Message = TEXT("No production Rift balance run exists to stop.");
+	}
+	ClientAJ_CombatTestMessage(Message);
+}
+
+void AAeyerjiPlayerController::ClientAJ_CombatTestMessage_Implementation(const FString& Message)
+{
+	PrintDisplayDebugMessage(Message);
+}
+
 void AAeyerjiPlayerController::AJ_OpenConsole()
 {
 #if ALLOW_CONSOLE
@@ -7639,7 +8910,7 @@ void AAeyerjiPlayerController::AJ_OpenConsole()
 			if (ViewportClient->ViewportConsole)
 			{
 				ViewportClient->ViewportConsole->FakeGotoState(FName(TEXT("Typing")));
-				PrintDisplayDebugMessage(TEXT("Console opened. Try AJ_DisplayInfo, AJ_SetFPSLimit 60, AJ_SetFixedFPS 0, AJ_SetDamage 500, AJ_SetHP 5000, AJ_UseDesktopResolution, AJ_SetResolution 1920 1080 1, AJ_SetResolutionScale 100, or AJ_SetOverallQuality 3."));
+				PrintDisplayDebugMessage(TEXT("Console opened. Press F1 or use AJ_Cheats for the testing drawer. Other commands include AJ_CombatTestHelp, AJ_DisplayInfo, AJ_SetDamage 500, and AJ_SetHP 5000."));
 				return;
 			}
 		}
@@ -7663,6 +8934,31 @@ void AAeyerjiPlayerController::ServerAJ_SetHP_Implementation(const float HPValue
 #if !UE_BUILD_SHIPPING
 	ApplyCheatHP(HPValue);
 #endif
+}
+
+void AAeyerjiPlayerController::ServerAJ_SetLevel_Implementation(const int32 NewLevel)
+{
+	ApplyCheatLevel(NewLevel);
+}
+
+void AAeyerjiPlayerController::ServerAJ_SetMoveSpeedMultiplier_Implementation(const float Multiplier)
+{
+	ApplyCheatMoveSpeedMultiplier(Multiplier);
+}
+
+void AAeyerjiPlayerController::ServerAJ_FullHeal_Implementation()
+{
+	ApplyCheatFullHeal();
+}
+
+void AAeyerjiPlayerController::ServerAJ_RestartRift_Implementation()
+{
+	ApplyCheatRestartRift();
+}
+
+void AAeyerjiPlayerController::ServerAJ_SpawnItem_Implementation(const FString& ItemDefinitionPath, const int32 ItemLevel)
+{
+	ApplyCheatSpawnItem(ItemDefinitionPath, ItemLevel);
 }
 
 void AAeyerjiPlayerController::ServerRefreshLootScalingDebug_Implementation()
@@ -7721,11 +9017,185 @@ void AAeyerjiPlayerController::RefreshLootScalingDebug_Internal()
 void AAeyerjiPlayerController::ShowPopupMessage(const FText& Message, float Duration)
 {
 	AJ_LOG(this, TEXT("ShowPopupMessage: %s"), *Message.ToString());
+
+	TArray<UUserWidget*> StatusHUDWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(
+		this,
+		StatusHUDWidgets,
+		UW_PlayerStatusHUD::StaticClass(),
+		false);
+
+	UW_PlayerStatusHUD* FallbackHUD = nullptr;
+	for (UUserWidget* Candidate : StatusHUDWidgets)
+	{
+		UW_PlayerStatusHUD* StatusHUD = Cast<UW_PlayerStatusHUD>(Candidate);
+		if (!StatusHUD || StatusHUD->GetWorld() != GetWorld())
+		{
+			continue;
+		}
+
+		if (StatusHUD->GetOwningPlayer() == this)
+		{
+			StatusHUD->PresentPopupMessage(Message, Duration);
+			return;
+		}
+
+		FallbackHUD = StatusHUD;
+	}
+
+	if (FallbackHUD)
+	{
+		FallbackHUD->PresentPopupMessage(Message, Duration);
+		return;
+	}
+
+	// Retain the Blueprint extension point for screens that intentionally use a
+	// separate popup surface. Normal gameplay HUD feedback is routed natively.
 	BP_ShowPopupMessage(Message, Duration);
 }
 
+void AAeyerjiPlayerController::BindAbilityFailureFeedback()
+{
+	UAbilitySystemComponent* ASC = GetControlledAbilitySystem();
+	if (AbilityFailureFeedbackASC.Get() == ASC && AbilityFailureFeedbackHandle.IsValid())
+	{
+		return;
+	}
+
+	UnbindAbilityFailureFeedback();
+	if (!ASC)
+	{
+		return;
+	}
+
+	AbilityFailureFeedbackASC = ASC;
+	AbilityFailureFeedbackHandle = ASC->AbilityFailedCallbacks.AddUObject(
+		this, &AAeyerjiPlayerController::HandleAbilityActivationFailed);
+}
+
+void AAeyerjiPlayerController::UnbindAbilityFailureFeedback()
+{
+	if (UAbilitySystemComponent* ASC = AbilityFailureFeedbackASC.Get(); ASC && AbilityFailureFeedbackHandle.IsValid())
+	{
+		ASC->AbilityFailedCallbacks.Remove(AbilityFailureFeedbackHandle);
+	}
+	AbilityFailureFeedbackHandle.Reset();
+	AbilityFailureFeedbackASC.Reset();
+}
+
+void AAeyerjiPlayerController::HandleAbilityActivationFailed(
+	const UGameplayAbility* FailedAbility,
+	const FGameplayTagContainer& FailureTags)
+{
+	if (!GetWorld())
+	{
+		return;
+	}
+
+	static const FGameplayTag CooldownFailure = FGameplayTag::RequestGameplayTag(TEXT("Ability.ActivateFail.Cooldown"), false);
+	static const FGameplayTag CostFailure = FGameplayTag::RequestGameplayTag(TEXT("Ability.ActivateFail.Cost"), false);
+	static const FGameplayTag BlockedFailure = FGameplayTag::RequestGameplayTag(TEXT("Ability.ActivateFail.Blocked"), false);
+	static const FGameplayTag MissingFailure = FGameplayTag::RequestGameplayTag(TEXT("Ability.ActivateFail.Missing"), false);
+	static const FGameplayTag NetworkingFailure = FGameplayTag::RequestGameplayTag(TEXT("Ability.ActivateFail.Networking"), false);
+	static const FGameplayTag CooldownRoot = FGameplayTag::RequestGameplayTag(TEXT("Cooldown"), false);
+	static const FGameplayTag CastingState = FGameplayTag::RequestGameplayTag(TEXT("State.Ability.Casting"), false);
+
+	FName MessageKey = TEXT("Toast_AbilityUnavailable");
+	// Primary attacks retry automatically as part of held-click combat. Their
+	// normal recovery/casting gates are not actionable player warnings.
+	FGameplayTagContainer PrimaryTags;
+	const bool bPrimaryAttack = FailedAbility
+		&& BuildPrimaryAttackTagSearch(GetControlledAbilitySystem(), PrimaryTags)
+		&& FailedAbility->GetAssetTags().HasAll(PrimaryTags);
+	if (bPrimaryAttack && ((CooldownFailure.IsValid() && FailureTags.HasTagExact(CooldownFailure))
+		|| (CooldownRoot.IsValid() && FailureTags.HasTag(CooldownRoot))
+		|| (CastingState.IsValid() && FailureTags.HasTagExact(CastingState))
+		|| (BlockedFailure.IsValid() && FailureTags.HasTagExact(BlockedFailure))))
+	{
+		return;
+	}
+	// Re-evaluate the failed ability: GAS may stop at casting before checking recovery or cost.
+	bool bOnCooldown = false;
+	bool bCannotPayCost = false;
+	if (UAbilitySystemComponent* ASC = GetControlledAbilitySystem(); ASC && FailedAbility && ASC->AbilityActorInfo.IsValid())
+	{
+		FScopedAbilityListLock Lock(*ASC);
+		for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
+		{
+			if (Spec.Ability && Spec.Ability->GetClass() == FailedAbility->GetClass())
+			{
+				bOnCooldown = !FailedAbility->CheckCooldown(Spec.Handle, ASC->AbilityActorInfo.Get(), nullptr);
+				bCannotPayCost = !FailedAbility->CheckCost(Spec.Handle, ASC->AbilityActorInfo.Get(), nullptr);
+				break;
+			}
+		}
+	}
+	if (bOnCooldown || (CooldownFailure.IsValid() && FailureTags.HasTagExact(CooldownFailure))
+		|| (CooldownRoot.IsValid() && FailureTags.HasTag(CooldownRoot)))
+	{
+		MessageKey = TEXT("Toast_AbilityCooldown");
+	}
+	else if (bCannotPayCost || (CostFailure.IsValid() && FailureTags.HasTagExact(CostFailure)))
+	{
+		MessageKey = TEXT("Toast_AbilityCost");
+	}
+	else if (CastingState.IsValid() && FailureTags.HasTagExact(CastingState))
+	{
+		MessageKey = TEXT("Toast_AbilityCasting");
+	}
+	else if (BlockedFailure.IsValid() && FailureTags.HasTagExact(BlockedFailure))
+	{
+		MessageKey = TEXT("Toast_AbilityBlocked");
+	}
+	else if ((MissingFailure.IsValid() && FailureTags.HasTagExact(MissingFailure))
+		|| (NetworkingFailure.IsValid() && FailureTags.HasTagExact(NetworkingFailure)))
+	{
+		MessageKey = TEXT("Toast_AbilityUnavailable");
+	}
+
+	if (HasAuthority() && !IsLocalController())
+	{
+		Client_ShowAbilityFailureMessageKey(MessageKey);
+	}
+	else
+	{
+		PresentAbilityFailureMessage(MessageKey);
+	}
+
+	AJ_LOG(this, TEXT("[AbilityFeedback] Ability=%s Reason=%s Message=%s"),
+		*GetNameSafe(FailedAbility), *FailureTags.ToStringSimple(), *MessageKey.ToString());
+}
+
+void AAeyerjiPlayerController::Client_ShowAbilityFailureMessageKey_Implementation(const FName MessageKey)
+{
+	PresentAbilityFailureMessage(MessageKey);
+}
+
+void AAeyerjiPlayerController::PresentAbilityFailureMessage(const FName MessageKey)
+{
+	if (!IsLocalController() || !GetWorld() || MessageKey.IsNone())
+	{
+		return;
+	}
+
+	const double Now = GetWorld()->GetTimeSeconds();
+	LastAbilityFailureFeedbackKey = MessageKey;
+	LastAbilityFailureFeedbackTime = Now;
+	TArray<UUserWidget*> HUDs;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(this, HUDs, UW_PlayerStatusHUD::StaticClass(), false);
+	for (UUserWidget* Candidate : HUDs)
+	{
+		if (UW_PlayerStatusHUD* HUD = Cast<UW_PlayerStatusHUD>(Candidate);
+			HUD && HUD->GetWorld() == GetWorld() && HUD->GetOwningPlayer() == this)
+		{
+			HUD->PresentGameplayWarning(AeyerjiStringLibrary::GetGlobalStringTableText(MessageKey), 1.6f);
+			break;
+		}
+	}
+}
+
 // --- Short-range local avoidance ---
-bool AAeyerjiPlayerController::AdjustGoalForShortAvoidance(FVector& InOutGoal)
+bool AAeyerjiPlayerController::AdjustGoalForShortAvoidance(FVector& InOutGoal, const bool bAllowWhenStopped)
 {
     if (!bEnableShortAvoidance)
         return false;
@@ -7770,11 +9240,14 @@ bool AAeyerjiPlayerController::AdjustGoalForShortAvoidance(FVector& InOutGoal)
     }
 
     // Skip avoidance if moving too slowly
-    if (const UCharacterMovementComponent* CMC = Cast<UCharacterMovementComponent>(MyPawn->GetMovementComponent()))
+    if (!bAllowWhenStopped)
     {
-        if (CMC->Velocity.Size2D() < AvoidanceMinSpeedCmPerSec)
+		if (const UCharacterMovementComponent* CMC = Cast<UCharacterMovementComponent>(MyPawn->GetMovementComponent()))
         {
-            return false;
+			if (CMC->Velocity.Size2D() < AvoidanceMinSpeedCmPerSec)
+			{
+				return false;
+			}
         }
     }
 

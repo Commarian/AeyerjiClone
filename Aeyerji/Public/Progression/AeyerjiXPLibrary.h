@@ -6,6 +6,23 @@
 #include "AeyerjiXPLibrary.generated.h"
 
 class UAbilitySystemComponent;
+class APawn;
+
+/** Authoritative details for one player's XP grant caused by one enemy death. */
+struct AEYERJI_API FAeyerjiEnemyXPAward
+{
+    const AActor* EnemyActor = nullptr;
+    APawn* RecipientPawn = nullptr;
+    float BaseXP = 0.f;
+    float ScaledXPBeforeRoleMultiplier = 0.f;
+    float RoleMultiplier = 1.f;
+    float KillerMultiplier = 1.f;
+    float AwardedXP = 0.f;
+    int32 EnemyLevel = 1;
+    bool bRecipientWasKiller = false;
+};
+
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnAeyerjiEnemyXPAwarded, const FAeyerjiEnemyXPAward&);
 
 /**
  * XP helper functions: compute scaled rewards and query player level state.
@@ -16,6 +33,9 @@ class AEYERJI_API UAeyerjiXPLibrary : public UBlueprintFunctionLibrary
     GENERATED_BODY()
 
 public:
+    /** Native server-side observation hook used by combat telemetry; broadcasts after AddXP completes. */
+    static FOnAeyerjiEnemyXPAwarded& OnEnemyXPAwarded();
+
     /** Highest player Level present in the world. Returns 1 when unknown/none. */
     UFUNCTION(BlueprintPure, Category="Aeyerji|XP", meta=(WorldContext="WorldContextObject"))
     static int32 GetHighestPlayerLevel(const UObject* WorldContextObject);

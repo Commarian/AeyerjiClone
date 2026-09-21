@@ -17,6 +17,8 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOutOfHealthDelegate, AActor*, Victim, AActor*, Instigator, float, DamageTaken);
 /** Called server-side whenever this set consumes positive incoming damage. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FAeyerjiDamageTakenDelegate, AActor*, Victim, AActor*, Instigator, float, DamageTaken, FGameplayTag, DamageType);
+/** Called server-side whenever HP is actually restored, after maximum-health clamping. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FAeyerjiHealingReceivedDelegate, AActor*, Recipient, AActor*, Instigator, float, HealingReceived, FName, HealingSourceType, UObject*, SourceObject);
 
 /**
  *  Single source of truth for ALL gameplay stats.
@@ -29,6 +31,15 @@ class AEYERJI_API UAeyerjiAttributeSet : public UAttributeSet
 
 public:
     UAeyerjiAttributeSet();
+
+    /** Stable source categories used by authoritative healing telemetry. */
+    static const FName HealingSourcePotion;
+    static const FName HealingSourcePassiveRegen;
+    static const FName HealingSourceLifeSteal;
+    static const FName HealingSourceGameplayEffect;
+
+    /** Reports an already-applied server-authoritative heal from non-GE attribute paths. */
+    void NotifyHealingReceived(AActor* Instigator, float HealingReceived, FName HealingSourceType, UObject* SourceObject);
 
     /* ---------- Combat ---------- */
     UPROPERTY(BlueprintReadOnly, ReplicatedUsing = OnRep_Armor,            Category="Stats|Combat",   SaveGame) FGameplayAttributeData Armor;             AEYERJI_ATTR_ACCESSORS(UAeyerjiAttributeSet, Armor)
@@ -168,6 +179,7 @@ protected:
     /** Applies the combat dodge cap to direct base-value writes from items and gameplay effects. */
     virtual void PreAttributeBaseChange(const FGameplayAttribute& Attribute, float& NewValue) const override;
 
+    virtual bool PreGameplayEffectExecute(FGameplayEffectModCallbackData& Data) override;
     virtual void PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data) override;
 
     /** Applies a resolved hit, life steal, gameplay events, cues, and death handling. */
@@ -192,9 +204,14 @@ protected:
 public:
     FOutOfHealthDelegate OnOutOfHealth;
     FAeyerjiDamageTakenDelegate OnDamageTaken;
+    FAeyerjiHealingReceivedDelegate OnHealingReceived;
 private:
     /** Set after the delegate fires once. */
     UPROPERTY() uint8 bIsDead : 1;
+
+    /** HP immediately before the current direct HP gameplay-effect modifier executes. */
+    float HPBeforeGameplayEffectExecute = 0.f;
+    bool bTrackingHPGameplayEffectExecute = false;
 
     FTimerHandle PoiseRecoveryDelayHandle;
     FTimerHandle PoiseRecoveryTickHandle;

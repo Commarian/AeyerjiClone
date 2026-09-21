@@ -19,6 +19,43 @@ UGA_HealPotion::UGA_HealPotion()
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
 }
 
+namespace
+{
+	bool IsPotionHealWasted(const FGameplayAbilityActorInfo* ActorInfo)
+	{
+		const UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+		if (!ASC)
+		{
+			return true;
+		}
+		const float RawMaxHP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPMaxAttribute());
+		const float MaxHP = FMath::IsFinite(RawMaxHP) ? FMath::Max(0.f, RawMaxHP) : 0.f;
+		if (MaxHP <= KINDA_SMALL_NUMBER)
+		{
+			return true;
+		}
+		const float RawHP = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute());
+		// Readiness/UI queries can call CanActivate repeatedly. Keep this predicate silent
+		// and reject invalid or dead health before any cost or cooldown is committed.
+		return !FMath::IsFinite(RawHP) || RawHP <= 0.f
+			|| (MaxHP - RawHP) <= KINDA_SMALL_NUMBER;
+	}
+}
+
+bool UGA_HealPotion::CanActivateAbility(
+	const FGameplayAbilitySpecHandle Handle,
+	const FGameplayAbilityActorInfo* ActorInfo,
+	const FGameplayTagContainer* SourceTags,
+	const FGameplayTagContainer* TargetTags,
+	FGameplayTagContainer* OptionalRelevantTags) const
+{
+	if (!Super::CanActivateAbility(Handle, ActorInfo, SourceTags, TargetTags, OptionalRelevantTags))
+	{
+		return false;
+	}
+	return !IsPotionHealWasted(ActorInfo);
+}
+
 void UGA_HealPotion::ActivateAbility(
 	const FGameplayAbilitySpecHandle Handle,
 	const FGameplayAbilityActorInfo* ActorInfo,
@@ -34,6 +71,13 @@ void UGA_HealPotion::ActivateAbility(
 	}
 
 	if (IsOwnerDead(ActorInfo))
+	{
+		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+		return;
+	}
+
+	// Defense in depth: event-driven activation paths must also never consume a charge at full HP.
+	if (IsPotionHealWasted(ActorInfo))
 	{
 		EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
 		return;

@@ -10,6 +10,7 @@ class UButton;
 class USlider;
 class UTextBlock;
 class UWidget;
+class UWidgetAnimation;
 
 /**
  * Native end-of-run screen contract. Designers can subclass this in UMG and bind the optional widgets by name.
@@ -25,6 +26,7 @@ public:
 	void ApplyRunResults(const FAeyerjiRunResults& InResults);
 
 protected:
+	virtual void NativePreConstruct() override;
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 
@@ -39,6 +41,7 @@ protected:
 
 	void RefreshDisplayedValues();
 	void RefreshDifficultyControls();
+	void ApplyLivingTheme();
 
 protected:
 	UPROPERTY(meta=(BindWidgetOptional), BlueprintReadOnly)
@@ -127,6 +130,15 @@ protected:
 
 	UPROPERTY(meta=(BindWidgetOptional), BlueprintReadOnly)
 	UButton* ReturnToMenuButton = nullptr;
+
+	UPROPERTY(meta=(BindWidgetOptional), BlueprintReadOnly)
+	UTextBlock* RetryButtonLabel = nullptr;
+
+	UPROPERTY(meta=(BindWidgetOptional), BlueprintReadOnly)
+	UTextBlock* ReturnToMenuButtonLabel = nullptr;
+
+	UPROPERTY(Transient, meta=(BindWidgetAnimOptional), BlueprintReadOnly)
+	UWidgetAnimation* EndRunOpen = nullptr;
 
 private:
 	FAeyerjiRunResults CachedResults;

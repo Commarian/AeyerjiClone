@@ -154,6 +154,14 @@ void UAeyerjiStatEngineComponent::TickRegeneration()
         if (HPDelta > KINDA_SMALL_NUMBER)
         {
             ASC->ApplyModToAttributeUnsafe(UAeyerjiAttributeSet::GetHPAttribute(), EGameplayModOp::Additive, HPDelta);
+            if (UAeyerjiAttributeSet* Attributes = const_cast<UAeyerjiAttributeSet*>(ASC->GetSet<UAeyerjiAttributeSet>()))
+            {
+                Attributes->NotifyHealingReceived(
+                    GetOwner(),
+                    HPDelta,
+                    UAeyerjiAttributeSet::HealingSourcePassiveRegen,
+                    this);
+            }
         }
     }
 

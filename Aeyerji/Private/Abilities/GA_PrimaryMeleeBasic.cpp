@@ -11,6 +11,7 @@
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Combat/AeyerjiMeleeDeterministicStrike.h"
 #include "Combat/PrimaryMeleeComboProviderInterface.h"
+#include "GAS/GE_AeyerjiAbilityCooldown.h"
 #include "GAS/GE_DamagePhysical.h"
 #include "GameplayEffect.h"
 #include "GameplayEffectTypes.h"
@@ -42,6 +43,30 @@ DEFINE_LOG_CATEGORY_STATIC(LogPrimaryMeleeGA, Display, All);
 
 namespace
 {
+	bool HasExplicitEventTargetData(const FGameplayEventData* TriggerEventData)
+	{
+		if (!TriggerEventData)
+		{
+			return false;
+		}
+
+		if (TriggerEventData->Target.Get())
+		{
+			return true;
+		}
+
+		for (int32 Index = 0; Index < TriggerEventData->TargetData.Num(); ++Index)
+		{
+			const FGameplayAbilityTargetData* Data = TriggerEventData->TargetData.Get(Index);
+			if (Data && (Data->GetHitResult() || Data->GetActors().Num() > 0))
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	// Prevent extreme attack speed scaling from ever producing a zero-rate montage.
 	constexpr float kMinAttackSpeed = 0.01f;
 	constexpr float kPrimaryMeleeDebugDuration = 0.2f;
@@ -85,7 +110,9 @@ namespace
 			}
 			if (const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Candidate, true))
 			{
-				if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+				if (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead)
+					|| (TargetASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPAttribute())
+						&& TargetASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()) <= UE_KINDA_SMALL_NUMBER))
 				{
 					return false;
 				}
@@ -246,10 +273,15 @@ bool UGA_PrimaryMeleeBasic::ShouldAbilityRespondToEvent(
 
 	AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
 	AActor* ExplicitTarget = ResolveExplicitEventTarget(ActorInfo, Payload, bAllowFriendlyDamage);
-	if (!AvatarActor || !ExplicitTarget)
+	if (!AvatarActor)
 	{
-		// Non-targeted activation paths still perform their normal cone attack.
-		return true;
+		return false;
+	}
+	if (!ExplicitTarget)
+	{
+		// A rejected click target must not degrade into an untargeted cone swing. Only genuinely
+		// targetless activation paths retain the normal cone attack behavior.
+		return !HasExplicitEventTargetData(Payload);
 	}
 
 	float AttackRange = ConeTraceRangeFallback;
@@ -270,7 +302,7 @@ bool UGA_PrimaryMeleeBasic::ShouldAbilityRespondToEvent(
 	const bool bTargetInRange = TryBuildHitFromActor(AvatarActor, ExplicitTarget, AttackRange, TargetHit);
 	if (!bTargetInRange)
 	{
-		UE_LOG(LogPrimaryMeleeGA, Log,
+		UE_LOG(LogPrimaryMeleeGA, Verbose,
 			TEXT("[MouseAttack] Primary melee event deferred: explicit target moved outside strike range. Avatar=%s Target=%s Range=%.1f."),
 			*GetNameSafe(AvatarActor),
 			*GetNameSafe(ExplicitTarget),
@@ -425,7 +457,7 @@ void UGA_PrimaryMeleeBasic::ActivateAbility(const FGameplayAbilitySpecHandle Han
 
 void UGA_PrimaryMeleeBasic::NotifyExternalRetarget(AActor* NewTarget)
 {
-	if (!IsActive() || !IsValid(NewTarget))
+	if (!IsActive())
 	{
 		return;
 	}
@@ -445,7 +477,7 @@ void UGA_PrimaryMeleeBasic::NotifyExternalRetarget(AActor* NewTarget)
 	bComboInputBuffered = false;
 	bExternalRetargetBlocksCombo = true;
 
-	UE_LOG(LogPrimaryMeleeGA, Log,
+	UE_LOG(LogPrimaryMeleeGA, Verbose,
 		TEXT("[MouseAttack] External retarget suppresses stale combo follow-up. CapturedTarget=%s NewTarget=%s HadBufferedCombo=%s Stage=%d Phase=%d."),
 		*GetNameSafe(CapturedTarget),
 		*GetNameSafe(NewTarget),
@@ -554,6 +586,27 @@ void UGA_PrimaryMeleeBasic::ApplyCooldown(const FGameplayAbilitySpecHandle Handl
 										  const FGameplayAbilityActorInfo* ActorInfo,
 										  const FGameplayAbilityActivationInfo ActivationInfo) const
 {
+	// Per-archetype fixed cooldown (e.g. BuffRed): duration-only GE with a SetByCaller duration.
+	// The same resolved cooldown tags are granted, so activation blocking and CheckCooldown are unchanged.
+	// Applied raw (no CooldownReduction): this is an explicit per-archetype cadence knob.
+	const float CooldownOverrideSeconds = ResolvePrimaryAttackCooldownOverride(ActorInfo ? ActorInfo : GetCurrentActorInfo());
+	if (CooldownOverrideSeconds > 0.f)
+	{
+		FGameplayEffectSpecHandle OverrideSpecHandle =
+			MakeOutgoingGameplayEffectSpec(UGE_AeyerjiAbilityCooldown::StaticClass(), GetAbilityLevel(Handle, ActorInfo));
+		if (OverrideSpecHandle.IsValid() && OverrideSpecHandle.Data.IsValid()
+			&& AeyerjiTags::SBC_CooldownSeconds.GetTag().IsValid())
+		{
+			OverrideSpecHandle.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_CooldownSeconds, CooldownOverrideSeconds);
+			ApplyResolvedCooldownTagsToSpec(OverrideSpecHandle);
+			UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("ApplyCooldown: Applying archetype cooldown override %.3fs to owner."),
+				CooldownOverrideSeconds);
+			ApplyGameplayEffectSpecToOwner(Handle, ActorInfo, ActivationInfo, OverrideSpecHandle);
+			return;
+		}
+
+		UE_LOG(LogPrimaryMeleeGA, Warning, TEXT("ApplyCooldown: Failed to build cooldown-override spec; falling back to attribute cooldown."));
+	}
 	// Attribute-based: just apply the GE; the BP reads AttackCooldown from UAeyerjiAttributeSet.
 	if (!CooldownGameplayEffectClass)
 	{
@@ -646,7 +699,7 @@ bool UGA_PrimaryMeleeBasic::CheckCooldown(const FGameplayAbilitySpecHandle Handl
 	return true;
 }
 
-bool UGA_PrimaryMeleeBasic::StartMontage(float AttackSpeed, UAnimMontage* MontageToPlay)
+bool UGA_PrimaryMeleeBasic::StartMontage(float EffectivePlayRate, UAnimMontage* MontageToPlay)
 {
 	UAnimMontage* Montage = MontageToPlay;
 	if (!Montage)
@@ -671,11 +724,10 @@ bool UGA_PrimaryMeleeBasic::StartMontage(float AttackSpeed, UAnimMontage* Montag
 		return false;
 	}
 
-	const float Rate = CalculateMontagePlayRate(AttackSpeed);
-	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartMontage: Montage=%s AttackSpeed=%.3f Baseline=%.3f PlayRate=%.3f"),
+	// Single source of truth: the caller passes the fully resolved effective rate (AttackSpeed base x archetype multiplier).
+	const float Rate = FMath::IsFinite(EffectivePlayRate) ? FMath::Max(EffectivePlayRate, kMinAttackSpeed) : 1.f;
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartMontage: Montage=%s EffectivePlayRate=%.3f"),
 		*GetNameSafe(Montage),
-		AttackSpeed,
-		BaselineAttackSpeed,
 		Rate);
 
 	MontageTask = UAbilityTask_PlayMontageAndWait::CreatePlayMontageAndWaitProxy(this, NAME_None, Montage, Rate);
@@ -701,10 +753,38 @@ void UGA_PrimaryMeleeBasic::StopMontageTask()
 		return;
 	}
 
-	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StopMontageTask: Ending MontageTask %s."),
-		*GetNameSafe(MontageTask));
-	MontageTask->EndTask();
+	// Clear our member and callbacks before stopping the montage because CurrentMontageStop can
+	// synchronously dispatch the task's interrupted delegate back into this ability.
+	UAbilityTask_PlayMontageAndWait* TaskToEnd = MontageTask;
 	MontageTask = nullptr;
+	TaskToEnd->OnCompleted.RemoveAll(this);
+	TaskToEnd->OnBlendOut.RemoveAll(this);
+	TaskToEnd->OnInterrupted.RemoveAll(this);
+	TaskToEnd->OnCancelled.RemoveAll(this);
+
+	UAbilitySystemComponent* ASC = GetAeyerjiAbilitySystem(GetCurrentActorInfo());
+	const bool bOwnsCurrentMontage = ASC
+		&& ASC->GetAnimatingAbility() == this
+		&& ASC->GetCurrentMontage() != nullptr;
+	if (bOwnsCurrentMontage)
+	{
+		UE_LOG(LogPrimaryMeleeGA, Verbose,
+			TEXT("StopMontageTask: Stopping GAS-owned montage %s before ending task %s."),
+			*GetNameSafe(ASC->GetCurrentMontage()),
+			*GetNameSafe(TaskToEnd));
+		ASC->CurrentMontageStop();
+	}
+	else
+	{
+		UE_LOG(LogPrimaryMeleeGA, Verbose,
+			TEXT("StopMontageTask: Montage is no longer owned by this ability; ending task %s without stopping the current montage."),
+			*GetNameSafe(TaskToEnd));
+	}
+
+	if (!TaskToEnd->IsFinished())
+	{
+		TaskToEnd->EndTask();
+	}
 }
 
 void UGA_PrimaryMeleeBasic::ArmMontageFailsafe(UAnimMontage* Montage, float PlayRate)
@@ -975,7 +1055,9 @@ bool UGA_PrimaryMeleeBasic::IsDeadForDeterministicStrike(AActor* TargetActor) co
 		return true;
 	}
 	const UAbilitySystemComponent* TargetASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(TargetActor, true);
-	return (TargetASC && TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead))
+	return (TargetASC && (TargetASC->HasMatchingGameplayTag(AeyerjiTags::State_Dead)
+			|| (TargetASC->HasAttributeSetForAttribute(UAeyerjiAttributeSet::GetHPAttribute())
+				&& TargetASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()) <= UE_KINDA_SMALL_NUMBER)))
 		|| TargetActor->Tags.Contains(AeyerjiTags::State_Dead.GetTag().GetTagName());
 }
 
@@ -2672,6 +2754,31 @@ float UGA_PrimaryMeleeBasic::CalculateMontagePlayRate(float AttackSpeed) const
 	return FMath::Max(EffectiveAttackSpeed / EffectiveBaseline, kMinAttackSpeed);
 }
 
+float UGA_PrimaryMeleeBasic::ResolveEffectiveMontagePlayRate(float AttackSpeed, const FGameplayAbilityActorInfo* ActorInfo) const
+{
+	const float BasePlayRate = CalculateMontagePlayRate(AttackSpeed);
+	const UAeyerjiEnemyArchetypeComponent* ArchetypeComp = ResolveArchetypeComponent(ActorInfo);
+	const float AnimationMultiplier = ArchetypeComp ? ArchetypeComp->GetAttackAnimationPlayRateMultiplier() : 1.f;
+	return FAeyerjiMeleeDeterministicStrikePolicy::CalculateEffectiveMontagePlayRate(BasePlayRate, AnimationMultiplier);
+}
+
+float UGA_PrimaryMeleeBasic::ResolvePrimaryAttackCooldownOverride(const FGameplayAbilityActorInfo* ActorInfo) const
+{
+	const UAeyerjiEnemyArchetypeComponent* ArchetypeComp = ResolveArchetypeComponent(ActorInfo);
+	const float OverrideSeconds = ArchetypeComp ? ArchetypeComp->GetPrimaryAttackCooldownSeconds() : 0.f;
+	return FAeyerjiMeleeDeterministicStrikePolicy::SanitizePrimaryAttackCooldownOverride(OverrideSeconds);
+}
+
+const UAeyerjiEnemyArchetypeComponent* UGA_PrimaryMeleeBasic::ResolveArchetypeComponent(const FGameplayAbilityActorInfo* ActorInfo) const
+{
+	const AActor* AvatarActor = ActorInfo ? ActorInfo->AvatarActor.Get() : nullptr;
+	if (!IsValid(AvatarActor))
+	{
+		return nullptr;
+	}
+	return AvatarActor->FindComponentByClass<UAeyerjiEnemyArchetypeComponent>();
+}
+
 float UGA_PrimaryMeleeBasic::ResolveAttackSpeed(const FGameplayAbilityActorInfo* ActorInfo) const
 {
 	float AttackRate = BaselineAttackSpeed;
@@ -2732,7 +2839,7 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 	bComboInputBuffered = false;
 
 	const float FinalAttackSpeed = FMath::Max(AttackSpeed, kMinAttackSpeed);
-	CurrentMontagePlayRate = CalculateMontagePlayRate(FinalAttackSpeed);
+	CurrentMontagePlayRate = ResolveEffectiveMontagePlayRate(FinalAttackSpeed, ActorInfo);
 
 	ClearCancelWindowTimer();
 	ResetDeterministicStrikeState();
@@ -2740,13 +2847,14 @@ bool UGA_PrimaryMeleeBasic::StartComboStage(int32 ComboIndex, const FGameplayAbi
 	SetMovementLock(false);
 	SetCanBeCanceled(true);
 
-	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartComboStage: Stage=%d/%d AttackSpeed=%.3f Montage=%s"),
+	UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("StartComboStage: Stage=%d/%d AttackSpeed=%.3f PlayRate=%.3f Montage=%s"),
 		ClampedIndex,
 		ComboCount,
 		FinalAttackSpeed,
+		CurrentMontagePlayRate,
 		*GetNameSafe(MontageToPlay));
 
-	if (!StartMontage(FinalAttackSpeed, MontageToPlay))
+	if (!StartMontage(CurrentMontagePlayRate, MontageToPlay))
 	{
 		UE_LOG(LogPrimaryMeleeGA, Verbose, TEXT("[BossPrimaryAttack] MeleeGA StartComboStage: StartMontage failed for combo index %d."), ClampedIndex);
 		CurrentComboIndex = INDEX_NONE;
@@ -2787,7 +2895,7 @@ bool UGA_PrimaryMeleeBasic::TryLaunchBufferedCombo()
 	{
 		if (bComboInputBuffered)
 		{
-			UE_LOG(LogPrimaryMeleeGA, Log,
+			UE_LOG(LogPrimaryMeleeGA, Verbose,
 				TEXT("[MouseAttack] Ignoring buffered combo because the controller selected a different target."));
 		}
 		bComboInputBuffered = false;

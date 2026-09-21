@@ -61,6 +61,25 @@ pace so RunSpeed cannot leak into attacks or recovery.
 The StateTree graph remains the high-level decision owner. Native cadence owns
 only the pace inside an active approach move.
 
+## Target death lifecycle
+
+Perception acquires targets, but it is not the authoritative death notification.
+Whenever the controller assigns a target with an Ability System Component, it
+binds to `State.Dead` and clears that target synchronously when the tag is added.
+Target replacement, unpossession, and pooled reuse remove the old binding.
+
+Dead-target cleanup stops movement, clears gameplay and movement focus, discards
+the dead actor's last-known location and damage threat, cancels the target-owned
+primary attack, and sends `Event.TargetLost` to the StateTree. A valid survival
+objective takes priority as replacement; otherwise the nearest live perceived
+hostile is selected. With no replacement, the controller remains targetless.
+
+The Has Target, attack-range, Move To Attack Range, and Activate Primary Attack
+nodes all revalidate the controller target. A dead or missing target cannot start
+a move or primary attack even if a perception update or StateTree transition is
+late. A strike already committed before death may resolve its invalid-target
+guard, but it cannot damage the dead actor.
+
 ## Crowd-facing stability
 
 Detour Crowd remains responsible for navigation and collision avoidance, but
@@ -179,6 +198,9 @@ At level 1, Normal difficulty, without items:
    client, and confirm its floating status bar disappears immediately.
 9. Reuse a pooled enemy and confirm it receives a clean initial cadence and
    death-facing state with a restored full-health status bar.
+10. Kill the current player target while enemies are moving and attacking.
+    Confirm target/focus clear in the same authority frame, no new targetless
+    primary begins, and another live perceived player is selected when present.
 
 ## Remaining enemy creation
 

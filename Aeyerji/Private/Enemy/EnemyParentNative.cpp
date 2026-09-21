@@ -16,6 +16,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "CollisionQueryParams.h"
 #include "CollisionShape.h"
 #include "Components/ActorComponent.h"
+#include "Components/AeyerjiNavSafetyComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/OutlineHighlightComponent.h"
 #include "Components/PrimitiveComponent.h"
@@ -401,7 +402,8 @@ void AEnemyParentNative::PrepareForPooledActivation()
 	EncounterPresentationState.RevealDurationSeconds = 0.f;
 	EncounterPresentationState.Revision++;
 	ApplyEncounterGameplayLock(false);
-	BP_OnPooledEnemyActivated();
+	// NOTE: BP_OnPooledEnemyActivated fires from ExitPooledInactive, so every checkout path
+	// (pooled reuse, fresh pooled spawn, rejects) fires it exactly once per activation.
 	LogMovementActivationState(TEXT("PooledReuse"));
 }
 
@@ -416,7 +418,22 @@ void AEnemyParentNative::PrepareForPooledDeactivation()
 	LastAlertBroadcastTime = -1.0;
 	HoverHighlightRefCount = 0;
 	SetEnemyHighlighted(false);
+	// Entering the pool is idempotent: a pawn that is already dormant (e.g. an off-nav
+	// checkout rejection that never left the pool) must not replay shutdown hooks.
+	if (EncounterPresentationState.Phase == EAeyerjiEnemyEncounterPhase::PooledInactive)
+	{
+		return;
+	}
 	SetPooledEncounterInactive();
+	// End delayed bombardments before this pawn can be checked out for another encounter.
+	if (AbilitySystemAeyerji)
+	{
+		FGameplayTagContainer BombardmentTags(AeyerjiTags::Ability_Primary_Ranged_Bombardment);
+		AbilitySystemAeyerji->CancelAbilities(&BombardmentTags);
+	}
+	// Clear lingering damage-over-time and channeled effects at park time so nothing can
+	// tick damage (or death) while the pawn is dormant. Checkout clears again defensively.
+	ClearTransientGameplayEffectsForPooledReuse();
 	BP_OnPooledEnemyDeactivated();
 }
 
@@ -494,6 +511,183 @@ void AEnemyParentNative::SetPooledEncounterInactive()
 	ForceNetUpdate();
 }
 
+void AEnemyParentNative::EnterPooledInactive(const FVector& ParkingLocation)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	// Phase, gameplay lock, transient-effect cleanup, and the Blueprint hook run first so
+	// authored shutdown logic still observes the pre-teleport world transform.
+	PrepareForPooledDeactivation();
+	// Broadcast presentation BEFORE dormancy: a multicast queued after the channel goes
+	// dormant may not deliver until the next checkout wake, leaving clients with a stale
+	// visible transform. Replicated phase (OnRep lock) converges them independently.
+	MulticastPooledDormantPresentation(ParkingLocation);
+	ApplyPooledDormantPresentation(ParkingLocation);
+
+	SetNetDormancy(DORM_DormantAll);
+	ForceNetUpdate();
+}
+
+void AEnemyParentNative::ExitPooledInactive(const FTransform& SpawnTransform)
+{
+	if (!HasAuthority() || !SpawnTransform.IsValid())
+	{
+		return;
+	}
+
+	// Wake replication BEFORE modifying any replicated property: a dormant actor that is
+	// modified and woken afterward can lose the update on clients.
+	FlushNetDormancy();
+	SetNetDormancy(DORM_Awake);
+
+	// Teleport, unhide, and restore physical and nav-safety state before AI observes it.
+	ApplyPooledAwakePresentation(SpawnTransform);
+
+	if (AEnemyAIController* EnemyController = Cast<AEnemyAIController>(GetController()))
+	{
+		EnemyController->ResetForPooledReuse(SpawnTransform.GetLocation());
+	}
+
+	// Publishes Phase=Active, unlocks gameplay, and fires the Blueprint hook last so
+	// presentation observes the fully restored pawn.
+	PrepareForPooledActivation();
+	BP_OnPooledEnemyActivated();
+	ForceNetUpdate();
+}
+
+void AEnemyParentNative::ApplyPooledDormantPresentation(const FVector& ParkingLocation)
+{
+	if (ParkingLocation.ContainsNaN())
+	{
+		return;
+	}
+
+	// Suspend nav safety BEFORE the jail teleport: the pool jail is intentionally off-nav,
+	// and the recoverability gate stays a pure backup for a missed suspend call.
+	if (UAeyerjiNavSafetyComponent* NavSafety = GetNavSafetyComponent())
+	{
+		NavSafety->SuspendForPooledReuse();
+	}
+
+	SetActorHiddenInGame(true);
+	SetActorTickEnabled(false);
+	SetActorEnableCollision(false);
+	// Floating status bars tick independently of the actor; hide them and stop their tick.
+	// Idempotent with the death/cleanup paths, and covers non-death pooling (prewarm).
+	SetFloatingWidgetsPresentationVisible(false);
+	SetActorLocation(ParkingLocation, false, nullptr, ETeleportType::TeleportPhysics);
+
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Capsule->SetGenerateOverlapEvents(false);
+	}
+
+	if (USkeletalMeshComponent* MeshComponent = GetMesh())
+	{
+		MeshComponent->SetVisibility(false, true);
+		MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		MeshComponent->SetComponentTickEnabled(false);
+	}
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+		Movement->SetComponentTickEnabled(false);
+	}
+
+	// AIController only exists on the server; clients skip this block naturally.
+	if (AAIController* AIController = Cast<AAIController>(GetController()))
+	{
+		AIController->StopMovement();
+		AIController->ClearFocus(EAIFocusPriority::Gameplay);
+		if (AEnemyAIController* EnemyController = Cast<AEnemyAIController>(AIController))
+		{
+			EnemyController->SetTargetActor(nullptr);
+			EnemyController->ClearLastKnownTarget();
+			// Parked enemies must not occupy Detour Crowd's limited agent slots.
+			EnemyController->SetPathFollowingGameplayEnabled(false, TEXT("PooledInactive"));
+		}
+		if (UBrainComponent* Brain = AIController->GetBrainComponent())
+		{
+			Brain->StopLogic(TEXT("PooledInactive"));
+		}
+		if (UAIPerceptionComponent* Perception = AIController->GetPerceptionComponent())
+		{
+			Perception->SetComponentTickEnabled(false);
+		}
+	}
+}
+
+void AEnemyParentNative::MulticastPooledDormantPresentation_Implementation(const FVector& ParkingLocation)
+{
+	if (HasAuthority())
+	{
+		return;
+	}
+
+	ApplyPooledDormantPresentation(ParkingLocation);
+}
+
+void AEnemyParentNative::ApplyPooledAwakePresentation(const FTransform& SpawnTransform)
+{
+	if (!SpawnTransform.IsValid())
+	{
+		return;
+	}
+
+	SetActorTransform(SpawnTransform, false, nullptr, ETeleportType::TeleportPhysics);
+	SetActorHiddenInGame(false);
+	SetActorEnableCollision(true);
+	SetActorTickEnabled(true);
+	// Restore retained floating status bars (idempotent with ResetDeathStateForReuse).
+	SetFloatingWidgetsPresentationVisible(true);
+
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionProfileName(UCollisionProfile::Pawn_ProfileName);
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Capsule->SetGenerateOverlapEvents(true);
+	}
+
+	if (USkeletalMeshComponent* MeshComponent = GetMesh())
+	{
+		// View-distance culling uses HiddenInGame while pooling uses visibility. Clear
+		// both independently so a cached local cull state cannot keep a checkout invisible.
+		MeshComponent->SetHiddenInGame(false, true);
+		MeshComponent->SetVisibility(true, true);
+		MeshComponent->SetComponentTickEnabled(true);
+	}
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		// A pooled Blueprint may deactivate CharacterMovement while parked. Restore the
+		// complete updated-component relationship before controller path-following resumes.
+		Movement->Activate(true);
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent();
+			Capsule && Movement->UpdatedComponent.Get() != Capsule)
+		{
+			Movement->SetUpdatedComponent(Capsule);
+		}
+		Movement->SetComponentTickEnabled(true);
+		Movement->SetMovementMode(MOVE_Walking);
+		Movement->StopMovementImmediately();
+	}
+
+	// Reseed at the spawn point only after the teleport so recovery never observes the
+	// jail transform and never drags a live enemy back to a stale safe location.
+	if (UAeyerjiNavSafetyComponent* NavSafety = GetNavSafetyComponent())
+	{
+		NavSafety->ResumeAfterPooledCheckout(
+			SpawnTransform.GetLocation(),
+			SpawnTransform.GetRotation().Rotator());
+	}
+}
+
 void AEnemyParentNative::ApplyEncounterGameplayLock(const bool bLocked)
 {
 	if (bLocked && !bEncounterGameplayLocked)
@@ -507,6 +701,13 @@ void AEnemyParentNative::ApplyEncounterGameplayLock(const bool bLocked)
 	}
 	SetCanBeDamaged(bLocked ? false : bCanBeDamagedBeforeEncounterLock);
 	SetActorEnableCollision(!bLocked);
+	// The replicated phase must converge visibility in both directions. Spawner and enemy
+	// RPCs use different actor channels, so an old inactive update may arrive after the
+	// checkout RPC; the later Active/Revealing phase must be able to unhide the pawn again.
+	const bool bPooledInactive =
+		EncounterPresentationState.Phase == EAeyerjiEnemyEncounterPhase::PooledInactive;
+	SetActorHiddenInGame(bPooledInactive);
+	SetActorTickEnabled(!bPooledInactive);
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
@@ -518,9 +719,10 @@ void AEnemyParentNative::ApplyEncounterGameplayLock(const bool bLocked)
 	if (USkeletalMeshComponent* MeshComponent = GetMesh())
 	{
 		// Revealing enemies remain visible and animated while gameplay collision is locked.
-		MeshComponent->SetVisibility(EncounterPresentationState.Phase != EAeyerjiEnemyEncounterPhase::PooledInactive, true);
+		MeshComponent->SetHiddenInGame(bPooledInactive, true);
+		MeshComponent->SetVisibility(!bPooledInactive, true);
 		MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		MeshComponent->SetComponentTickEnabled(EncounterPresentationState.Phase != EAeyerjiEnemyEncounterPhase::PooledInactive);
+		MeshComponent->SetComponentTickEnabled(!bPooledInactive);
 	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
@@ -1116,6 +1318,12 @@ void AEnemyParentNative::NotifyNearbyAlliesOfTarget(AActor* Target)
 	}
 
 	const FGameplayTag DeadTag = EnemyParentDeadStateTag();
+	// Dormant enemies never broadcast ally alerts.
+	if (!IsEncounterCombatActive())
+	{
+		return;
+	}
+
 	if (!DeadTag.IsValid() || !IsAlive(DeadTag) || !IsAliveAndHostile(Target, DeadTag))
 	{
 		return;
@@ -1175,7 +1383,8 @@ void AEnemyParentNative::NotifyNearbyAlliesOfTarget(AActor* Target)
 		}
 		ProcessedEnemies.Add(NearbyEnemy);
 
-		if (NearbyEnemy->GetGenericTeamId() != MyTeamId || !NearbyEnemy->IsAlive(DeadTag))
+		if (NearbyEnemy->GetGenericTeamId() != MyTeamId || !NearbyEnemy->IsAlive(DeadTag)
+			|| !NearbyEnemy->IsEncounterCombatActive())
 		{
 			continue;
 		}
@@ -1206,6 +1415,12 @@ void AEnemyParentNative::ReceiveAllyAlert(AActor* Target, const AEnemyParentNati
 	}
 
 	const FGameplayTag DeadTag = EnemyParentDeadStateTag();
+	// Dormant enemies never act on ally alerts.
+	if (!IsEncounterCombatActive())
+	{
+		return;
+	}
+
 	if (!DeadTag.IsValid() || !IsAlive(DeadTag))
 	{
 		return;
@@ -1233,6 +1448,12 @@ void AEnemyParentNative::HandleEnemyDamageTaken(AActor* VictimActor, AActor* Ins
 		|| !IsValid(InstigatorActor)
 		|| InstigatorActor == this
 		|| IsActorBeingDestroyed())
+	{
+		return;
+	}
+	// Dormant enemies reject damage at the AttributeSet boundary; this stays a backstop so a
+	// leaked notification can never arm threat state or ally alerts for a parked pawn.
+	if (!IsEncounterCombatActive())
 	{
 		return;
 	}

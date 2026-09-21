@@ -73,6 +73,7 @@ public:
 
 protected:
     virtual void NativeConstruct() override;
+    virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
     virtual void NativeDestruct() override;
 
     /** Optional designer widgets; the code will create fallbacks if they are missing. */
@@ -89,19 +90,19 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview")
     float LabelMinDesiredWidth = 120.f;
 
-    /** Optional fonts for generated labels/values (leave unset to use designer defaults). */
+    /** Optional fonts for generated labels/values. Leave unset for the living-theme Exo 2 fallback. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview|Style")
     FSlateFontInfo LabelFont;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview|Style")
     FSlateFontInfo ValueFont;
 
-    /** Optional tint overrides for generated labels/values (leave unset to inherit defaults). */
+    /** Tint overrides for generated labels/values. Lavender defaults match the living menu theme. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview|Style")
-    FSlateColor LabelColor = FSlateColor(FLinearColor::White);
+    FSlateColor LabelColor = FSlateColor(FLinearColor(0.78f, 0.70f, 0.95f, 1.f));
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview|Style")
-    FSlateColor ValueColor = FSlateColor(FLinearColor::White);
+    FSlateColor ValueColor = FSlateColor(FLinearColor(0.92f, 0.88f, 1.f, 1.f));
 
     /** Rows to render; defaults are seeded from UAeyerjiAttributeSet. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Aeyerji|StatsPreview")

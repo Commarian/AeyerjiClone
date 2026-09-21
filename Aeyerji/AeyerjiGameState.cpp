@@ -24,6 +24,7 @@
 #include "Systems/AeyerjiRiftRules.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/AeyerjiWorldStateSubsystem.h"
+#include "Testing/AeyerjiCombatTestIsolation.h"
 #include "Frontend/AeyerjiSessionSubsystem.h"
 #include "Frontend/AeyerjiFrontendRules.h"
 #include "Blueprint/WidgetLayoutLibrary.h"
@@ -1054,6 +1055,19 @@ void AAeyerjiGameState::PrepareWorldFlowLoadingRequirements()
 		return;
 	}
 
+	// Combat-balance isolation deliberately skips production population pre-spawn. Mark the
+	// loading requirement prepared so streamed-zone activation cannot wait on enemies that
+	// this process was explicitly told not to create.
+	if (AeyerjiCombatTestIsolation::IsWorldSpawningSuppressed())
+	{
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("AAeyerjiGameState: Fixed-world loading gate suppressed for combat-test isolation (Zone=%s TransitionId=%d)."),
+			*ActiveZoneId.ToString(),
+			TransitionId);
+		LastPreparedWorldFlowLoadingTransitionId = TransitionId;
+		return;
+	}
+
 	AAeyerjiEncounterDirector* EncounterDirector = LevelDirector->GetEncounterDirector();
 	if (!IsValid(EncounterDirector))
 	{
@@ -1481,6 +1495,20 @@ bool AAeyerjiGameState::Server_StartRun()
 	{
 		return false;
 	}
+
+	// Isolated combat tests need the streamed gameplay zone and player pawn, but not the
+	// production Rift plan. Preparing that plan would enqueue an exact population prewarm
+	// whose EncounterDirector tick is deliberately disabled by isolation.
+	if (AeyerjiCombatTestIsolation::IsWorldSpawningSuppressed())
+	{
+		bRiftRunPreparationPending = false;
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("[RiftRun][Start] Production run start suppressed for combat-test isolation Zone=%s TransitionId=%d."),
+			*ActiveZoneId.ToString(),
+			TransitionId);
+		return true;
+	}
+
 	if (RunState == EAeyerjiRunState::InRun && RiftRunState.RunSerial > 0 && StartedRunSerial == RiftRunState.RunSerial)
 	{
 		UE_LOG(LogAeyerjiWorldFlow, Display,
@@ -3092,6 +3120,20 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		return false;
 	}
 
+	const bool bCombatTestIsolation = AeyerjiCombatTestIsolation::IsWorldSpawningSuppressed();
+	if (bCombatTestIsolation && bZoneSpawnPolicyAppliedForTransition)
+	{
+		// Recover safely if isolation becomes active after a production prewarm blocker was
+		// armed. The next policy pass will continue with normal player spawning below.
+		ClearWorldFlowLoadingRequirements();
+		bRiftRunPreparationPending = false;
+		bZoneSpawnPolicyAppliedForTransition = false;
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("[CombatTest] Cleared production run loading blockers for isolated Zone=%s TransitionId=%d."),
+			*ActiveZoneId.ToString(),
+			TransitionId);
+	}
+
 	if (bZoneSpawnPolicyAppliedForTransition)
 	{
 		SetPendingWorldFlowLoaderCount(0);
@@ -3335,7 +3377,24 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 		SetRunState(EAeyerjiRunState::PreRun);
 	}
 
-	const bool bShouldAutoStartRun = ZoneDef.bSpawnPlayerAfterReady && ZoneDef.bAutoStartRun;
+	const bool bShouldAutoStartRun = ZoneDef.bSpawnPlayerAfterReady
+		&& ZoneDef.bAutoStartRun
+		&& !bCombatTestIsolation;
+	if (bCombatTestIsolation && ZoneDef.bAutoStartRun)
+	{
+		FAeyerjiPendingRunLaunchRequest LaunchRequest;
+		if (StreamingSubsystem->GetPendingFrontendRunLaunch(LaunchRequest)
+			&& !StreamingSubsystem->ConsumePendingFrontendRunLaunch(LaunchRequest.RequestId))
+		{
+			UE_LOG(LogAeyerjiWorldFlow, Warning,
+				TEXT("[CombatTest] Failed to consume isolated frontend launch request RequestId=%d."),
+				LaunchRequest.RequestId);
+		}
+		UE_LOG(LogAeyerjiWorldFlow, Display,
+			TEXT("[CombatTest] Production auto-start/prewarm suppressed for isolated Zone=%s TransitionId=%d."),
+			*ActiveZoneId.ToString(),
+			TransitionId);
+	}
 	if (bShouldAutoStartRun
 		&& CachedLevelDirector.IsValid()
 		&& CachedLevelDirector->SpawnMode == EAeyerjiLevelSpawnMode::ProximityEncounterRegions)
@@ -3396,10 +3455,11 @@ bool AAeyerjiGameState::ApplyZoneSpawnPolicy()
 	}
 	else
 	{
-		UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Auto-start run skipped for Zone=%s (SpawnAfterReady=%d AutoStart=%d)"),
+		UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Auto-start run skipped for Zone=%s (SpawnAfterReady=%d AutoStart=%d Isolation=%d)"),
 			*ActiveZoneId.ToString(),
 			ZoneDef.bSpawnPlayerAfterReady ? 1 : 0,
-			ZoneDef.bAutoStartRun ? 1 : 0);
+			ZoneDef.bAutoStartRun ? 1 : 0,
+			bCombatTestIsolation ? 1 : 0);
 	}
 
 	UE_LOG(LogAeyerjiWorldFlow, Display, TEXT("AAeyerjiGameState: Transition completed for gameplay zone %s"), *ActiveZoneId.ToString());

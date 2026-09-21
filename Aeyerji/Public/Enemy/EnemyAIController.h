@@ -11,6 +11,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 class UAIPerceptionComponent;
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
+class UAbilitySystemComponent;
 struct FPropertyChangedEvent;
 struct FGameplayTag;
 
@@ -71,9 +72,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="AI|Movement|Facing", meta=(EditCondition="bStabilizeCrowdFacing", ClampMin="0.0", Units="deg/s"))
 	float StableFacingRotationRate = 540.0f;
 
-	/** Remember the spawn or "home base" location for patrolling. */
+	/** Remember the spawn or "home base" location for patrolling and leash returns. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "AI")
 	FVector HomeLocation;
+
+	/** True once HomeLocation was assigned from a real checkout; guards leash logic against unset homes. */
+	bool bHomeLocationSet = false;
 
 	/** The current target actor that this AI is engaged with (if any). */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadWrite, Category = "AI")
@@ -114,13 +118,20 @@ public:
 	const FAeyerjiDefenseTargetingSettings& GetDefenseTargetingSettings() const { return DefenseTargetingSettings; }
 	// Accessor for home location
 	FVector GetHomeLocation() const { return HomeLocation; }
+	/** True when HomeLocation holds a checkout-assigned value instead of its default. */
+	bool HasHomeLocation() const { return bHomeLocationSet; }
 	AActor* GetLastKnownTargetActor() const { return LastKnownTargetActor.Get(); }
 	const FVector& GetLastKnownTargetLocation() const { return LastKnownTargetLocation; }
 	double GetLastKnownTargetTime() const { return LastKnownTargetTime; }
 	bool HasLastKnownTarget() const { return bHasLastKnownTarget; }
 	bool IsPermanentRiftPursuit() const { return bPermanentRiftPursuit; }
+	/** Clears a dead/invalid current target immediately and returns whether a live replacement is available. */
+	bool EnsureCurrentTargetIsLive();
 
 	void ClearLastKnownTarget();
+
+	/** Drops the current target without movement or event side effects (leash returns, scripted resets). */
+	void DropCurrentTarget();
 
 	/** Clears transient target/perception state before a pooled enemy is checked out again. */
 	void ResetForPooledReuse(const FVector& NewHomeLocation);
@@ -192,6 +203,9 @@ public:
 	void EndChaseSprintCadenceForAutomation(double CurrentTimeSeconds);
 	bool IsChaseSprintingForAutomation() const { return bChaseSprintActive; }
 	double GetChaseSprintRecoveryEndTimeForAutomation() const { return ChaseSprintRecoveryEndTime; }
+	void SetCurrentTargetForAutomation(AActor* NewTarget);
+	void RunUnPossessCleanupForAutomation();
+	bool IsCurrentTargetDeathStateBoundForAutomation(const AActor* Target) const;
 #endif
 
 protected:
@@ -215,9 +229,15 @@ private:
 	/** Stops, assigns, and starts the configured tree in a lifecycle-safe order. */
 	void RestartConfiguredStateTree(const TCHAR* StopReason);
 	bool IsTargetValidForAcquisition(AActor* Candidate) const;
+	AActor* FindNearestLivePerceivedHostile() const;
 	AActor* FindBestDefenseThreatTarget() const;
 	bool IsRecentDamageThreatValid() const;
 	void AssignCurrentTarget(AActor* NewTarget, EAeyerjiEnemyTargetSource NewSource, bool bSendTargetAcquiredEvent, bool bStopCurrentMovement);
+	void BindCurrentTargetDeathState(AActor* NewTarget);
+	void UnbindCurrentTargetDeathState();
+	void HandleCurrentTargetDeathTagChanged(const FGameplayTag Tag, int32 NewCount);
+	void HandleCurrentTargetLostToDeath(AActor* DeadTarget);
+	void CancelTargetDependentPrimaryAbility();
 	void RememberTargetLocation(AActor* Target);
 	/** Applies the controller-facing policy after possession so Blueprint pawn defaults cannot reintroduce crowd-yaw jitter. */
 	void ApplyStableCrowdFacingPolicy();
@@ -283,6 +303,10 @@ private:
 	/** Short-lived attacker override used so defense enemies can peel to players that directly damage them. */
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> RecentDamageThreat;
+
+	/** ASC whose State.Dead event owns the current target lifecycle callback. */
+	TWeakObjectPtr<UAbilitySystemComponent> CurrentTargetAbilitySystem;
+	FDelegateHandle CurrentTargetDeadTagHandle;
 
 	/** Runtime-only pursuit mode; target loss never falls back to patrol while a valid participant remains. */
 	bool bPermanentRiftPursuit = false;

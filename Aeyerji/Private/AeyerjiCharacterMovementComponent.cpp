@@ -25,11 +25,24 @@ UAeyerjiCharacterMovementComponent::UAeyerjiCharacterMovementComponent()
 	NetworkSmoothingMode = ENetworkSmoothingMode::Linear;
 	NetworkMaxSmoothUpdateDistance = 120.f;  // Maximum distance over which clients smooth server corrections.
     NetworkNoSmoothUpdateDistance  = 250.f;  // snap if farther than this
+
+	// Gameplay capsules stay grounded. Abilities may animate vertical displacement on the mesh,
+	// but navigation and collision never use jumping as a traversal mode.
+	JumpZVelocity = 0.f;
+	AirControl = 0.f;
+	bCanWalkOffLedges = false;
+	NavAgentProps.bCanJump = false;
 }
 
 void UAeyerjiCharacterMovementComponent::BeginPlay()
 {
     Super::BeginPlay();
+
+	// Blueprint defaults must not re-enable physical jumping for a derived player or enemy type.
+	JumpZVelocity = 0.f;
+	AirControl = 0.f;
+	bCanWalkOffLedges = false;
+	NavAgentProps.bCanJump = false;
 
     // Optional RVO avoidance can be enabled per-BP via UPROPERTY toggles (set in header)
     if (bEnableRVOAvoidance)
@@ -131,8 +144,78 @@ FVector UAeyerjiCharacterMovementComponent::ConsumeInputVector()
 	return Super::ConsumeInputVector();
 }
 
+bool UAeyerjiCharacterMovementComponent::CanAttemptJump() const
+{
+	return MovementMode == MOVE_None ? Super::CanAttemptJump() : false;
+}
+
+bool UAeyerjiCharacterMovementComponent::DoJump(const bool bReplayingMoves, const float DeltaTime)
+{
+	return MovementMode == MOVE_None ? Super::DoJump(bReplayingMoves, DeltaTime) : false;
+}
+
+bool UAeyerjiCharacterMovementComponent::HandlePendingLaunch()
+{
+	if (MovementMode == MOVE_None || !IsActive())
+	{
+		return Super::HandlePendingLaunch();
+	}
+
+	if (PendingLaunchVelocity.IsZero() || !HasValidData())
+	{
+		return false;
+	}
+
+	// Preserve horizontal knockback while stripping its gravity-axis component. Calling the parent
+	// would force MOVE_Falling even for a purely horizontal launch.
+	Velocity = ProjectToGravityFloor(PendingLaunchVelocity);
+	PendingLaunchVelocity = FVector::ZeroVector;
+	bForceNextFloorCheck = true;
+	return true;
+}
+
+bool UAeyerjiCharacterMovementComponent::IsWalkable(const FHitResult& Hit) const
+{
+	const APawn* HitPawn = Cast<APawn>(Hit.GetActor());
+	if (HitPawn && HitPawn != GetPawnOwner())
+	{
+		return false;
+	}
+
+	return Super::IsWalkable(Hit);
+}
+
+bool UAeyerjiCharacterMovementComponent::ResolvePenetrationImpl(
+	const FVector& Adjustment,
+	const FHitResult& Hit,
+	const FQuat& NewRotation)
+{
+	const APawn* HitPawn = Cast<APawn>(Hit.GetActor());
+	if (HitPawn && HitPawn != GetPawnOwner()
+		&& (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking))
+	{
+		const FVector GroundAdjustment = ProjectToGravityFloor(Adjustment);
+		if (GroundAdjustment.IsNearlyZero())
+		{
+			return false;
+		}
+
+		return Super::ResolvePenetrationImpl(GroundAdjustment, Hit, NewRotation);
+	}
+
+	return Super::ResolvePenetrationImpl(Adjustment, Hit, NewRotation);
+}
+
 void UAeyerjiCharacterMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	if (MovementMode == MOVE_Walking || MovementMode == MOVE_NavWalking)
+	{
+		// Direct velocity writes from legacy Blueprint or knockback paths must obey the same grounded
+		// contract as LaunchCharacter before CharacterMovement integrates this frame.
+		Velocity = ProjectToGravityFloor(Velocity);
+		PendingLaunchVelocity = ProjectToGravityFloor(PendingLaunchVelocity);
+	}
+
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	// Clear velocity after the parent tick if rooted (double ensure no movement)

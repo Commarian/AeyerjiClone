@@ -8,9 +8,12 @@
 #include "Blueprint/WidgetTree.h"
 #include "Brushes/SlateRoundedBoxBrush.h"
 #include "Components/SizeBox.h"
+#include "Director/AeyerjiLevelDirector.h"
 #include "Enemy/EnemyParentNative.h"
 #include "Engine/Texture2D.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "EngineUtils.h"
+#include "GUI/AeyerjiMinimapMapSubsystem.h"
 #include "Player/PlayerParentNative.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/CoreStyle.h"
@@ -145,7 +148,26 @@ void UW_AeyerjiMinimap::NativeTick(const FGeometry& MyGeometry, const float InDe
 		SecondsUntilMarkerRefresh = FMath::Max(0.05f, MarkerRefreshInterval);
 	}
 
+	if (UAeyerjiMinimapMapSubsystem* MapSubsystem = GetMapSubsystem())
+	{
+		if (const AActor* PlayerActor = GetOwningPlayerPawn())
+		{
+			MapSubsystem->UpdateActiveFloor(PlayerActor->GetActorLocation().Z);
+		}
+	}
+
 	Invalidate(EInvalidateWidgetReason::Paint);
+}
+
+void UW_AeyerjiMinimap::SetMapWorldRadius(const float NewWorldRadius)
+{
+	MapWorldRadius = FMath::Max(100.f, NewWorldRadius);
+	Invalidate(EInvalidateWidgetReason::Paint);
+}
+
+UAeyerjiMinimapMapSubsystem* UW_AeyerjiMinimap::GetMapSubsystem() const
+{
+	return UAeyerjiMinimapMapSubsystem::GetMinimapMapSubsystem(this);
 }
 
 void UW_AeyerjiMinimap::RefreshMarkers()
@@ -161,6 +183,18 @@ void UW_AeyerjiMinimap::RefreshMarkers()
 
 	TSet<AActor*> AddedActors;
 	AddedActors.Add(PlayerActor);
+	TSet<AActor*> ActiveDefenseObjectives;
+	for (TActorIterator<AAeyerjiLevelDirector> It(World); It; ++It)
+	{
+		AAeyerjiLevelDirector* LevelDirector = *It;
+		if (IsValid(LevelDirector) && LevelDirector->IsSurvivalDefenseObjectiveEnabled())
+		{
+			if (AActor* ActiveObjective = LevelDirector->GetSurvivalDefenseObjectiveActor())
+			{
+				ActiveDefenseObjectives.Add(ActiveObjective);
+			}
+		}
+	}
 
 	auto AddMarker = [this, &AddedActors](
 		AActor* Actor,
@@ -223,7 +257,9 @@ void UW_AeyerjiMinimap::RefreshMarkers()
 			continue;
 		}
 
-		if (bAutoDiscoverObjectives && Actor->IsA<AAeyerjiSurvivalDefenseObjectiveActor>())
+		if (bAutoDiscoverObjectives
+			&& Actor->IsA<AAeyerjiSurvivalDefenseObjectiveActor>()
+			&& ActiveDefenseObjectives.Contains(Actor))
 		{
 			AddMarker(Actor, EAeyerjiMinimapMarkerType::Objective, true, nullptr);
 		}
@@ -311,6 +347,11 @@ float UW_AeyerjiMinimap::ResolveMarkerSize(const FAeyerjiTrackedMinimapMarker& M
 		return Marker.MarkerSize;
 	}
 
+	if (Marker.MarkerType == EAeyerjiMinimapMarkerType::Friendly)
+	{
+		return FriendlyPlayerMarkerSize;
+	}
+
 	return Marker.MarkerType == EAeyerjiMinimapMarkerType::Objective
 		? ObjectiveMarkerSize
 		: DefaultMarkerSize;
@@ -338,19 +379,7 @@ bool UW_AeyerjiMinimap::ProjectMarkerToMap(
 	if (Distance > UE_KINDA_SMALL_NUMBER)
 	{
 		const FVector2f NormalizedWorldOffset = WorldOffset / Distance;
-		if (bRotateWithPlayer)
-		{
-			const float InverseYawRadians = FMath::DegreesToRadians(-PlayerActor.GetActorRotation().Yaw);
-			const float CosYaw = FMath::Cos(InverseYawRadians);
-			const float SinYaw = FMath::Sin(InverseYawRadians);
-			const float LocalForward = CosYaw * NormalizedWorldOffset.X - SinYaw * NormalizedWorldOffset.Y;
-			const float LocalRight = SinYaw * NormalizedWorldOffset.X + CosYaw * NormalizedWorldOffset.Y;
-			MapDirection = FVector2f(LocalRight, -LocalForward);
-		}
-		else
-		{
-			MapDirection = FVector2f(NormalizedWorldOffset.Y, -NormalizedWorldOffset.X);
-		}
+		MapDirection = FVector2f(NormalizedWorldOffset.Y, -NormalizedWorldOffset.X);
 	}
 	else
 	{
@@ -397,6 +426,18 @@ int32 UW_AeyerjiMinimap::NativePaint(
 	const FLinearColor StyledGridColor = GridColor * WidgetTint;
 	const FLinearColor StyledFrameColor = FrameColor * WidgetTint;
 	const FLinearColor StyledPlayerColor = PlayerColor * WidgetTint;
+	const FLinearColor StyledShadowColor = ShadowColor * WidgetTint;
+
+	const FSlateRoundedBoxBrush ShadowBrush(StyledShadowColor, PanelSize);
+	FSlateDrawElement::MakeBox(
+		OutDrawElements,
+		++DrawLayer,
+		AllottedGeometry.ToPaintGeometry(
+			PanelSize,
+			FSlateLayoutTransform(PanelPosition + AeyerjiMinimapPrivate::ToVector2f(ShadowOffset))),
+		&ShadowBrush,
+		ESlateDrawEffect::None,
+		FLinearColor::White);
 
 	const FSlateRoundedBoxBrush PanelBrush(BackgroundColor, FrameColor, LineThickness, PanelSize);
 	FSlateDrawElement::MakeBox(
@@ -407,39 +448,75 @@ int32 UW_AeyerjiMinimap::NativePaint(
 		ESlateDrawEffect::None,
 		WidgetTint);
 
-	// Procedural grid chords stay within the circular frame and provide useful scale without authored map art.
-	for (const float OffsetFraction : { -0.5f, 0.f, 0.5f })
+	const AActor* PlayerActor = GetOwningPlayerPawn();
+	UAeyerjiMinimapMapSubsystem* MapSubsystem = GetMapSubsystem();
+	UTextureRenderTarget2D* MapTexture = MapSubsystem ? MapSubsystem->GetActiveMapTexture() : nullptr;
+	FVector2D MapMin;
+	FVector2D MapMax;
+	if (bShowMapDetail
+		&& IsValid(PlayerActor)
+		&& MapTexture
+		&& MapTexture->GetResource()
+		&& MapSubsystem->GetMapWorldBounds(MapMin, MapMax))
 	{
-		const float Offset = DrawRadius * OffsetFraction;
-		const float HalfChord = FMath::Sqrt(FMath::Max(0.f, FMath::Square(DrawRadius) - FMath::Square(Offset)));
-		AeyerjiMinimapPrivate::DrawLine(
+		const double MapSide = FMath::Max(MapMax.X - MapMin.X, 1.0);
+		const FVector PlayerLocation = PlayerActor->GetActorLocation();
+		const FVector2D CenterUV = UAeyerjiMinimapMapSubsystem::WorldToMapUV(
+			FVector2D(PlayerLocation.X, PlayerLocation.Y),
+			MapMin,
+			static_cast<float>(MapSide));
+		const float HalfUV = FMath::Max(100.f, MapWorldRadius) / static_cast<float>(MapSide);
+
+		FSlateRoundedBoxBrush MapDetailBrush(MapDetailTint, PanelSize);
+		MapDetailBrush.ImageType = ESlateBrushImageType::FullColor;
+		MapDetailBrush.SetResourceObject(MapTexture);
+		MapDetailBrush.SetUVRegion(FBox2f(
+			FVector2f(static_cast<float>(CenterUV.X - HalfUV), static_cast<float>(CenterUV.Y - HalfUV)),
+			FVector2f(static_cast<float>(CenterUV.X + HalfUV), static_cast<float>(CenterUV.Y + HalfUV))));
+		FSlateDrawElement::MakeBox(
 			OutDrawElements,
-			AllottedGeometry,
-			DrawLayer,
-			Center + FVector2f(-HalfChord, Offset),
-			Center + FVector2f(HalfChord, Offset),
-			StyledGridColor,
-			LineThickness * 0.65f);
-		AeyerjiMinimapPrivate::DrawLine(
-			OutDrawElements,
-			AllottedGeometry,
-			DrawLayer,
-			Center + FVector2f(Offset, -HalfChord),
-			Center + FVector2f(Offset, HalfChord),
-			StyledGridColor,
-			LineThickness * 0.65f);
+			++DrawLayer,
+			AllottedGeometry.ToPaintGeometry(PanelSize, FSlateLayoutTransform(PanelPosition)),
+			&MapDetailBrush,
+			ESlateDrawEffect::None,
+			WidgetTint);
 	}
 
-	AeyerjiMinimapPrivate::DrawCircle(
-		OutDrawElements,
-		AllottedGeometry,
-		DrawLayer,
-		Center,
-		DrawRadius * 0.5f,
-		StyledGridColor,
-		LineThickness * 0.75f);
+	// Procedural grid chords stay within the circular frame and provide useful scale without authored map art.
+	if (bShowGridOverlay)
+	{
+		for (const float OffsetFraction : { -0.5f, 0.f, 0.5f })
+		{
+			const float Offset = DrawRadius * OffsetFraction;
+			const float HalfChord = FMath::Sqrt(FMath::Max(0.f, FMath::Square(DrawRadius) - FMath::Square(Offset)));
+			AeyerjiMinimapPrivate::DrawLine(
+				OutDrawElements,
+				AllottedGeometry,
+				DrawLayer,
+				Center + FVector2f(-HalfChord, Offset),
+				Center + FVector2f(HalfChord, Offset),
+				StyledGridColor,
+				LineThickness * 0.65f);
+			AeyerjiMinimapPrivate::DrawLine(
+				OutDrawElements,
+				AllottedGeometry,
+				DrawLayer,
+				Center + FVector2f(Offset, -HalfChord),
+				Center + FVector2f(Offset, HalfChord),
+				StyledGridColor,
+				LineThickness * 0.65f);
+		}
 
-	const AActor* PlayerActor = GetOwningPlayerPawn();
+		AeyerjiMinimapPrivate::DrawCircle(
+			OutDrawElements,
+			AllottedGeometry,
+			DrawLayer,
+			Center,
+			DrawRadius * 0.5f,
+			StyledGridColor,
+			LineThickness * 0.75f);
+	}
+
 	const FSlateBrush* WhiteBrush = FCoreStyle::Get().GetBrush(TEXT("WhiteBrush"));
 	if (IsValid(PlayerActor))
 	{
@@ -447,6 +524,16 @@ int32 UW_AeyerjiMinimap::NativePaint(
 		{
 			AActor* MarkerActor = Marker.Actor.Get();
 			if (!IsValid(MarkerActor) || !IsMarkerActorVisible(Marker))
+			{
+				continue;
+			}
+
+			const int32 MarkerFloorRelation = MapSubsystem && MapSubsystem->IsMapReady()
+				? MapSubsystem->GetFloorRelationForHeight(MarkerActor->GetActorLocation().Z)
+				: 0;
+			if (MarkerFloorRelation != 0
+				&& (Marker.MarkerType == EAeyerjiMinimapMarkerType::Enemy
+					|| Marker.MarkerType == EAeyerjiMinimapMarkerType::PointOfInterest))
 			{
 				continue;
 			}
@@ -521,11 +608,7 @@ int32 UW_AeyerjiMinimap::NativePaint(
 
 			if (Marker.bRotateWithOwner)
 			{
-				float RelativeYaw = MarkerActor->GetActorRotation().Yaw;
-				if (bRotateWithPlayer)
-				{
-					RelativeYaw -= PlayerActor->GetActorRotation().Yaw;
-				}
+				const float RelativeYaw = MarkerActor->GetActorRotation().Yaw;
 				const float HeadingRadians = FMath::DegreesToRadians(RelativeYaw);
 				const FVector2f Heading(FMath::Sin(HeadingRadians), -FMath::Cos(HeadingRadians));
 				AeyerjiMinimapPrivate::DrawLine(
@@ -537,9 +620,28 @@ int32 UW_AeyerjiMinimap::NativePaint(
 					MarkerColor,
 					LineThickness);
 			}
+
+			if (Marker.MarkerType == EAeyerjiMinimapMarkerType::Objective && MarkerFloorRelation != 0)
+			{
+				const float VerticalSign = MarkerFloorRelation > 0 ? -1.f : 1.f;
+				const FVector2f BadgeCenter = MarkerPosition + FVector2f(MarkerSize * 0.75f, VerticalSign * MarkerSize);
+				const FVector2f BadgeDirection(0.f, VerticalSign);
+				const FVector2f BadgeRight(1.f, 0.f);
+				AeyerjiMinimapPrivate::DrawClosedShape(
+					OutDrawElements,
+					AllottedGeometry,
+					++DrawLayer,
+					{
+						BadgeCenter + BadgeDirection * (MarkerSize * 0.38f),
+						BadgeCenter - BadgeDirection * (MarkerSize * 0.22f) + BadgeRight * (MarkerSize * 0.30f),
+						BadgeCenter - BadgeDirection * (MarkerSize * 0.22f) - BadgeRight * (MarkerSize * 0.30f)
+					},
+					MarkerColor,
+					FMath::Max(1.25f, LineThickness));
+			}
 		}
 
-		const float PlayerYaw = bRotateWithPlayer ? 0.f : PlayerActor->GetActorRotation().Yaw;
+		const float PlayerYaw = PlayerActor->GetActorRotation().Yaw;
 		const float PlayerYawRadians = FMath::DegreesToRadians(PlayerYaw);
 		const FVector2f PlayerForward(FMath::Sin(PlayerYawRadians), -FMath::Cos(PlayerYawRadians));
 		const FVector2f PlayerRight(-PlayerForward.Y, PlayerForward.X);

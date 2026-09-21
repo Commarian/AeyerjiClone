@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "destination": "/Game/Systems/Rifts/Pacing",
+  "director_template": "/Game/Systems/EncounterDirectorDefinition",
+  "group_template": "/Game/Levels/FirstMap/Map1SpawnGroupDef",
+  "archetypes": {
+    "Grunt": "/Game/Enemy/Map_1_Creeps/M_Grunt/M_Grunt",
+    "Bulwark": "/Game/Enemy/Map_1_Creeps/M_Bulwark/M_Bulwark",
+    "Archer": "/Game/Enemy/Map_1_Creeps/R_Archer/R_Archer",
+    "Support": "/Game/Enemy/Map_1_Creeps/R_Support/R_Support",
+    "GruntElite": "/Game/Enemy/Map_1_Creeps/M_Grunt/M_GruntElite"
+  },
+  "standard_zone_settings": {
+    "standard_rift_enemy_budget": 120,
+    "standard_rift_progress_target_points": 100,
+    "standard_rift_activation_distance": 2500.0
+  },
+  "profiles": [
+    {
+      "name": "Normal_L1_Intro",
+      "ordinary_weights": {"Grunt": 7, "Bulwark": 1, "Archer": 1, "Support": 1},
+      "elite_pool": [],
+      "elite_chance": 0.0,
+      "director_settings": {
+        "rift_ambient_enemy_fraction": 0.25,
+        "rift_reveal_batch_size": 2,
+        "rift_reveal_batch_interval": 0.6,
+        "rift_reveal_duration_seconds": 1.25,
+        "rift_minimum_active_enemy_pressure": 4,
+        "rift_pressure_evaluation_interval": 3.0,
+        "rift_maximum_awake_enemies": 32
+      }
+    },
+    {
+      "name": "Normal_L1_Core",
+      "ordinary_weights": {"Grunt": 6, "Bulwark": 2, "Archer": 1, "Support": 1},
+      "elite_pool": ["GruntElite"],
+      "elite_chance": 0.04,
+      "director_settings": {
+        "rift_ambient_enemy_fraction": 0.25,
+        "rift_reveal_batch_size": 2,
+        "rift_reveal_batch_interval": 0.45,
+        "rift_reveal_duration_seconds": 1.25,
+        "rift_minimum_active_enemy_pressure": 6,
+        "rift_pressure_evaluation_interval": 3.0,
+        "rift_maximum_awake_enemies": 40
+      }
+    },
+    {
+      "name": "Normal_Crowd_Comparison",
+      "ordinary_weights": {"Grunt": 6, "Bulwark": 2, "Archer": 1, "Support": 1},
+      "elite_pool": ["GruntElite"],
+      "elite_chance": 0.04,
+      "director_settings": {
+        "rift_ambient_enemy_fraction": 0.25,
+        "rift_reveal_batch_size": 2,
+        "rift_reveal_batch_interval": 0.45,
+        "rift_reveal_duration_seconds": 1.25,
+        "rift_minimum_active_enemy_pressure": 6,
+        "rift_pressure_evaluation_interval": 3.0,
+        "rift_maximum_awake_enemies": 48
+      }
+    }
+  ]
+}

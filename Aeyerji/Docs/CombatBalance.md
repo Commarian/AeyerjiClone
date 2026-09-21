@@ -16,6 +16,10 @@ The shared chase cadence, StateTree ownership, movement-speed contract, and
 death-facing flow are documented in
 [Enemy Combat Behavior](EnemyCombatBehavior.md).
 
+The deterministic population ladder, server-authoritative spawn commands,
+metric exports, and UE 5.8 Rewind/StateTree workflow are documented in
+[Combat Balance Testing](CombatBalanceTesting.md).
+
 ## Canonical benchmark
 
 - Player: level 1 Astral Guardian with 500 HP, 25 basic-attack damage, 1 armor,
@@ -137,6 +141,10 @@ documentation.
 ## Playtest acceptance
 
 Test level 1 Normal without items on a dedicated server with separate clients:
+
+- Use the canonical `Sanity1`, `Floor8`, `Region12`, `Dense24`, `Elite24`,
+  `Overwhelmed36`, and `Cap48` harness presets with a fixed seed before changing
+  the roster or encounter pacing.
 
 - Fodder dies in one or two successful basic attacks.
 - Grunts, Archers, and other Standard enemies take two.

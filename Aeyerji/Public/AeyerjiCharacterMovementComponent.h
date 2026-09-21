@@ -52,6 +52,19 @@ public:
 	/** Override to prevent input vector consumption when rooted */
 	virtual FVector ConsumeInputVector() override;
 
+	/** Living Aeyerji characters never perform physical jumps; vertical presentation belongs on the mesh. */
+	virtual bool CanAttemptJump() const override;
+	virtual bool DoJump(bool bReplayingMoves, float DeltaTime) override;
+
+	/** Applies launch knockback only along the ground plane without entering falling movement. */
+	virtual bool HandlePendingLaunch() override;
+
+	/** Other pawns are blockers, never walkable floors that can stack characters vertically. */
+	virtual bool IsWalkable(const FHitResult& Hit) const override;
+
+	/** Resolves living pawn overlaps laterally so dense crowds cannot depenetrate a capsule upward. */
+	virtual bool ResolvePenetrationImpl(const FVector& Adjustment, const FHitResult& Hit, const FQuat& NewRotation) override;
+
     /** Override to clear velocity when rooted */
     virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 

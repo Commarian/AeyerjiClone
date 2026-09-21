@@ -10,6 +10,8 @@ namespace AeyerjiTags
     UE_DEFINE_GAMEPLAY_TAG(Ability_Primary, "Ability.Primary");
     UE_DEFINE_GAMEPLAY_TAG(Ability_Primary_Melee_Basic,  "Ability.Primary.Melee.Basic");
     UE_DEFINE_GAMEPLAY_TAG(Ability_Primary_Ranged_Basic, "Ability.Primary.Ranged.Basic");
+    UE_DEFINE_GAMEPLAY_TAG(Ability_Primary_Ranged_Bombardment, "Ability.Primary.Ranged.Bombardment");
+    UE_DEFINE_GAMEPLAY_TAG(Enemy_Role_Mob_Ranged_Bombardier, "Enemy.Role.Mob.Ranged.Bombardier");
     UE_DEFINE_GAMEPLAY_TAG(Ability_Potion_Heal, "Ability.Potion.Heal");
     UE_DEFINE_GAMEPLAY_TAG(DamageType_Physical, "Damage.Type.Physical");
     UE_DEFINE_GAMEPLAY_TAG(DamageRule_UseVariance, "Damage.Rule.UseVariance");

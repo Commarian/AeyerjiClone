@@ -2,6 +2,7 @@
 
 #include "World/ItemPickup.h"
 
+#include "Inventory/AeyerjiPickupCollisionPolicy.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Items/InventoryComponent.h"
@@ -26,6 +27,20 @@ AItemPickup::AItemPickup()
 	MeshComponent = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Mesh"));
 	MeshComponent->SetupAttachment(RootComponent);
 	MeshComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	MeshComponent->SetCanEverAffectNavigation(false);
+	SphereComponent->SetCanEverAffectNavigation(false);
+}
+
+void AItemPickup::BeginPlay()
+{
+	Super::BeginPlay();
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(*this, SphereComponent);
+}
+
+void AItemPickup::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(*this, SphereComponent);
 }
 
 void AItemPickup::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

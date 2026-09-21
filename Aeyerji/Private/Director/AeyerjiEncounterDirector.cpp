@@ -35,6 +35,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Stats/Stats.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "Systems/AeyerjiRiftRules.h"
+#include "Testing/AeyerjiCombatTestIsolation.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 
@@ -267,6 +268,17 @@ void AAeyerjiEncounterDirector::BeginPlay()
 	// spawn its own non-replicated enemies, causing invalid NetGUID references.
 	if (GetNetMode() == NM_Client)
 	{
+		SetActorTickEnabled(false);
+		return;
+	}
+
+	// The balance harness spawns through its own explicit path. Disabling this production
+	// director prevents fixed, Rift-region, and dynamic encounters without altering the map.
+	if (AeyerjiCombatTestIsolation::IsWorldSpawningSuppressed())
+	{
+		UE_LOG(LogEncounterDirector, Display,
+			TEXT("Encounter spawning suppressed by combat-test isolation on %s."),
+			*GetNameSafe(this));
 		SetActorTickEnabled(false);
 		return;
 	}
@@ -2238,6 +2250,16 @@ bool AAeyerjiEncounterDirector::StartFixedWorldPopulation(UAeyerjiWorldSpawnProf
 {
 	if (!HasAuthority())
 	{
+		return false;
+	}
+
+	// This can be called directly by the world-flow loading gate before LevelDirector::StartRun.
+	// Rejecting here guarantees isolation even if a caller bypasses normal director ticking.
+	if (AeyerjiCombatTestIsolation::IsWorldSpawningSuppressed())
+	{
+		UE_LOG(LogEncounterDirector, Display,
+			TEXT("Fixed population start suppressed by combat-test isolation on %s."),
+			*GetNameSafe(this));
 		return false;
 	}
 

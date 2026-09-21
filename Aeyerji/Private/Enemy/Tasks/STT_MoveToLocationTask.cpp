@@ -56,7 +56,7 @@ EStateTreeRunStatus USTT_MoveToLocationTask::EnterState(FStateTreeExecutionConte
 
 	if (!MoveRequestId.IsValid())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("MoveTo task: Move request failed to start."));
+		UE_LOG(LogTemp, Verbose, TEXT("MoveTo task: Move request failed to start."));
 		return EStateTreeRunStatus::Failed;
 	}
 

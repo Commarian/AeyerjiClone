@@ -294,6 +294,37 @@ bool UAeyerjiStreamingSubsystem::IsLevelLoaded(const FName LevelName) const
 	return IsLevelReady(NormalizedQuery, false);
 }
 
+bool UAeyerjiStreamingSubsystem::IsCurrentZoneReady() const
+{
+	if (CurrentZoneId.IsNone() || bCurrentZoneReadyPending || !PendingLoads.IsEmpty() || !PendingUnloads.IsEmpty())
+	{
+		return false;
+	}
+
+	FZoneDef ZoneDefinition;
+	if (!GetZoneDefinition(CurrentZoneId, ZoneDefinition))
+	{
+		return false;
+	}
+
+	for (const FName LevelName : ZoneDefinition.LevelsToKeep)
+	{
+		if (!IsLevelReady(LevelName, ZoneDefinition.bMakeVisibleAfterLoad))
+		{
+			return false;
+		}
+	}
+	for (const FName LevelName : ZoneDefinition.LevelsToLoad)
+	{
+		if (!IsLevelReady(LevelName, ZoneDefinition.bMakeVisibleAfterLoad))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 bool UAeyerjiStreamingSubsystem::StartGameplaySession(const bool bCampaignMode)
 {
 	// Legacy direct-menu entry point. New frontend assembly must use the validated lobby request path.

@@ -1,6 +1,7 @@
 ﻿#include "Enemy/EnemyAIController.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
+#include "AeyerjiGameplayTags.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Enemy/EnemyParentNative.h"
 #include "AeyerjiCharacterMovementComponent.h"
@@ -10,9 +11,11 @@
 #include "Logging/AeyerjiLog.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
+#include "Perception/AISense_Hearing.h"
 #include "GameFramework/PlayerController.h"
 #include "StateTree.h"
 #include "GameplayTagContainer.h"
+#include "Testing/AeyerjiCombatBalanceTestHarness.h"
 
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISenseConfig_Hearing.h"
@@ -328,6 +331,7 @@ void AEnemyAIController::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 
 void AEnemyAIController::OnPossess(APawn* InPawn)
 {
+	UnbindCurrentTargetDeathState();
     Super::OnPossess(InPawn);
 	ResetChaseSprintCadence();
 	ApplyStableCrowdFacingPolicy();
@@ -422,6 +426,7 @@ void AEnemyAIController::ApplyStableCrowdFacingPolicy()
 
 void AEnemyAIController::OnUnPossess()
 {
+	UnbindCurrentTargetDeathState();
 	ResetChaseSprintCadence();
 	if (StateTreeComponent && StateTreeComponent->IsRunning())
 	{
@@ -470,6 +475,11 @@ void AEnemyAIController::OnTargetPerception(AActor* Actor, FAIStimulus Stimulus)
     }
 	else if (Actor == CurrentTarget && (!bSensed || bIsDead))        // ← added tests
 	{
+		if (bIsDead)
+		{
+			HandleCurrentTargetLostToDeath(Actor);
+			return;
+		}
 		if (!bIsDead && IsActorStillPerceivedByAnySense(Perception, Actor))
 		{
 			// One sense was lost, but another still owns perception of this target.
@@ -500,7 +510,7 @@ void AEnemyAIController::OnTargetPerception(AActor* Actor, FAIStimulus Stimulus)
 		}
 
 		AssignCurrentTarget(nullptr, EAeyerjiEnemyTargetSource::None, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
-		if (StateTreeComponent)
+		if (StateTreeComponent && StateTreeComponent->IsRunning())
 		{
 			StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetLostTag()));
 		}
@@ -520,19 +530,7 @@ void AEnemyAIController::OnPerceptionUpdated(const TArray<AActor*>& UpdatedActor
 	{
 		if (UpdatedActor && UpdatedActor == CurrentTarget && HasDeadStateTag(UpdatedActor))
 		{
-			ClearLastKnownTarget();
-			if (IsValid(DefenseObjectiveTarget.Get()) && !HasDeadStateTag(DefenseObjectiveTarget.Get()))
-			{
-				RefreshDefenseObjectiveTarget();
-				break;
-			}
-
-			AssignCurrentTarget(nullptr, EAeyerjiEnemyTargetSource::None, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
-			UE_LOG(LogTemp, Verbose, TEXT("Target lost after perception update."));
-			if (StateTreeComponent)
-			{
-				StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetLostTag()));
-			}
+			HandleCurrentTargetLostToDeath(UpdatedActor);
 			break;
 		}
 	}
@@ -554,7 +552,7 @@ bool AEnemyAIController::TryAcquireTarget(AActor* NewTarget, const bool bBroadca
 
 	AssignCurrentTarget(NewTarget, EAeyerjiEnemyTargetSource::HostileActor, /*bSendTargetAcquiredEvent=*/true, /*bStopCurrentMovement=*/true);
 
-	UE_LOG(LogTemp, Log, TEXT("Target acquired: %s"), *GetNameSafe(NewTarget));
+	UE_LOG(LogTemp, Verbose, TEXT("Target acquired: %s"), *GetNameSafe(NewTarget));
 
 	if (bBroadcastAllyAlert)
 	{
@@ -565,6 +563,94 @@ bool AEnemyAIController::TryAcquireTarget(AActor* NewTarget, const bool bBroadca
 	}
 
 	return true;
+}
+
+bool AEnemyAIController::EnsureCurrentTargetIsLive()
+{
+	if (!HasAuthority() || !CurrentTarget)
+	{
+		return false;
+	}
+
+	AActor* Target = CurrentTarget.Get();
+	if (IsValid(Target) && !HasDeadStateTag(Target))
+	{
+		return true;
+	}
+
+	HandleCurrentTargetLostToDeath(Target);
+	return IsValid(CurrentTarget.Get()) && !HasDeadStateTag(CurrentTarget.Get());
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void AEnemyAIController::SetCurrentTargetForAutomation(AActor* NewTarget)
+{
+	AssignCurrentTarget(
+		NewTarget,
+		IsValid(NewTarget) ? EAeyerjiEnemyTargetSource::HostileActor : EAeyerjiEnemyTargetSource::None,
+		/*bSendTargetAcquiredEvent=*/false,
+		/*bStopCurrentMovement=*/false);
+}
+
+void AEnemyAIController::RunUnPossessCleanupForAutomation()
+{
+	OnUnPossess();
+}
+
+bool AEnemyAIController::IsCurrentTargetDeathStateBoundForAutomation(const AActor* Target) const
+{
+	const UAbilitySystemComponent* TargetASC = Target
+		? UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(Target, /*LookForComponent=*/true)
+		: nullptr;
+	return CurrentTargetDeadTagHandle.IsValid() && CurrentTargetAbilitySystem.Get() == TargetASC;
+}
+#endif
+
+AActor* AEnemyAIController::FindNearestLivePerceivedHostile() const
+{
+	const APawn* ControlledPawn = GetPawn();
+	if (!HasAuthority() || !Perception || !IsValid(ControlledPawn))
+	{
+		return nullptr;
+	}
+
+	TArray<AActor*> PerceivedActors;
+	TArray<AActor*> HearingActors;
+	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), PerceivedActors);
+	Perception->GetCurrentlyPerceivedActors(UAISense_Hearing::StaticClass(), HearingActors);
+	PerceivedActors.Append(HearingActors);
+
+	AActor* BestTarget = nullptr;
+	float BestDistanceSq = TNumericLimits<float>::Max();
+	FString BestName;
+	TSet<TWeakObjectPtr<AActor>> VisitedActors;
+	for (AActor* Candidate : PerceivedActors)
+	{
+		if (!Candidate || VisitedActors.Contains(Candidate))
+		{
+			continue;
+		}
+		VisitedActors.Add(Candidate);
+		if (!IsTargetValidForAcquisition(Candidate))
+		{
+			continue;
+		}
+
+		const float DistanceSq = FVector::DistSquared2D(
+			ControlledPawn->GetActorLocation(),
+			Candidate->GetActorLocation());
+		const FString CandidateName = Candidate->GetName();
+		if (!BestTarget || DistanceSq < BestDistanceSq
+			|| (FMath::IsNearlyEqual(DistanceSq, BestDistanceSq)
+				&& CandidateName.Compare(BestName, ESearchCase::CaseSensitive) < 0))
+		{
+			BestTarget = Candidate;
+			BestDistanceSq = DistanceSq;
+			BestName = CandidateName;
+		}
+	}
+
+	return BestTarget;
 }
 
 void AEnemyAIController::SetTargetActor(AActor* NewTarget)
@@ -774,6 +860,15 @@ void AEnemyAIController::NotifyDamagedBy(AActor* DamageInstigator)
 		return;
 	}
 
+	// Dormant enemies never arm threat state; damage should not reach them at all.
+	if (const AEnemyParentNative* SelfEnemy = Cast<AEnemyParentNative>(ControlledPawn))
+	{
+		if (!SelfEnemy->IsEncounterCombatActive())
+		{
+			return;
+		}
+	}
+
 	RecentDamageThreat = ThreatActor;
 	RecentDamageThreatExpiryTime = World->GetTimeSeconds() + DefenseDamageThreatMemorySeconds;
 	RememberTargetLocation(ThreatActor);
@@ -790,7 +885,7 @@ void AEnemyAIController::NotifyDamagedBy(AActor* DamageInstigator)
 
 void AEnemyAIController::SendAICrowdControlEvent(const FGameplayTag& EventTag)
 {
-	if (!HasAuthority() || !EventTag.IsValid() || !StateTreeComponent)
+	if (!HasAuthority() || !EventTag.IsValid() || !StateTreeComponent || !StateTreeComponent->IsRunning())
 	{
 		return;
 	}
@@ -814,6 +909,15 @@ bool AEnemyAIController::IsTargetValidForAcquisition(AActor* Candidate) const
 	if (HasDeadStateTag(Candidate))
 	{
 		return false;
+	}
+
+	// A dormant pooled or revealing enemy never holds a combat target of its own.
+	if (const AEnemyParentNative* SelfEnemy = Cast<AEnemyParentNative>(ControlledPawn))
+	{
+		if (!SelfEnemy->IsEncounterCombatActive())
+		{
+			return false;
+		}
 	}
 
 	return GetTeamAttitudeTowards(*Candidate) == ETeamAttitude::Hostile
@@ -895,8 +999,16 @@ void AEnemyAIController::AssignCurrentTarget(
 	const bool bSendTargetAcquiredEvent,
 	const bool bStopCurrentMovement)
 {
+	if (CurrentTarget.Get() != NewTarget)
+	{
+		UnbindCurrentTargetDeathState();
+	}
 	CurrentTarget = NewTarget;
 	CurrentTargetSource = IsValid(NewTarget) ? NewSource : EAeyerjiEnemyTargetSource::None;
+	if (IsValid(NewTarget) && !CurrentTargetDeadTagHandle.IsValid())
+	{
+		BindCurrentTargetDeathState(NewTarget);
+	}
 
 	if (IsValid(NewTarget))
 	{
@@ -917,9 +1029,116 @@ void AEnemyAIController::AssignCurrentTarget(
 		StopMovement();
 	}
 
-	if (bSendTargetAcquiredEvent && StateTreeComponent)
+	if (bSendTargetAcquiredEvent && StateTreeComponent && StateTreeComponent->IsRunning())
 	{
 		StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetAcquiredTag()));
+	}
+}
+
+void AEnemyAIController::BindCurrentTargetDeathState(AActor* NewTarget)
+{
+	UnbindCurrentTargetDeathState();
+	if (!HasAuthority() || !IsValid(NewTarget))
+	{
+		return;
+	}
+
+	UAbilitySystemComponent* ASC =
+		UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(NewTarget, /*LookForComponent=*/true);
+	if (!ASC)
+	{
+		return;
+	}
+
+	CurrentTargetAbilitySystem = ASC;
+	CurrentTargetDeadTagHandle = ASC->RegisterGameplayTagEvent(
+		AeyerjiTags::State_Dead,
+		EGameplayTagEventType::NewOrRemoved).AddUObject(
+			this,
+			&AEnemyAIController::HandleCurrentTargetDeathTagChanged);
+}
+
+void AEnemyAIController::UnbindCurrentTargetDeathState()
+{
+	if (UAbilitySystemComponent* ASC = CurrentTargetAbilitySystem.Get();
+		ASC && CurrentTargetDeadTagHandle.IsValid())
+	{
+		ASC->RegisterGameplayTagEvent(
+			AeyerjiTags::State_Dead,
+			EGameplayTagEventType::NewOrRemoved).Remove(CurrentTargetDeadTagHandle);
+	}
+	CurrentTargetDeadTagHandle.Reset();
+	CurrentTargetAbilitySystem.Reset();
+}
+
+void AEnemyAIController::HandleCurrentTargetDeathTagChanged(const FGameplayTag, const int32 NewCount)
+{
+	if (HasAuthority() && NewCount > 0 && CurrentTarget)
+	{
+		HandleCurrentTargetLostToDeath(CurrentTarget.Get());
+	}
+}
+
+void AEnemyAIController::CancelTargetDependentPrimaryAbility()
+{
+	APawn* ControlledPawn = GetPawn();
+	UAbilitySystemComponent* ASC = ControlledPawn
+		? UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(ControlledPawn, /*LookForComponent=*/true)
+		: nullptr;
+	if (!ASC)
+	{
+		return;
+	}
+
+	FGameplayTagContainer PrimaryTags;
+	PrimaryTags.AddTag(AeyerjiTags::Ability_Primary);
+	ASC->CancelAbilities(&PrimaryTags);
+}
+
+void AEnemyAIController::HandleCurrentTargetLostToDeath(AActor* DeadTarget)
+{
+	if (!HasAuthority() || CurrentTarget.Get() != DeadTarget)
+	{
+		return;
+	}
+
+	AAeyerjiCombatBalanceTestHarness::RecordTargetingEvent(
+		this,
+		DeadTarget,
+		nullptr,
+		EAeyerjiCombatTargetingTelemetryEvent::EnemyDeadTargetCleared,
+		HasDeadStateTag(DeadTarget) ? TEXT("StateDead") : TEXT("InvalidTarget"));
+
+	if (RecentDamageThreat.Get() == DeadTarget)
+	{
+		RecentDamageThreat.Reset();
+		RecentDamageThreatExpiryTime = -1.0;
+	}
+
+	ClearLastKnownTarget();
+	CancelTargetDependentPrimaryAbility();
+	AssignCurrentTarget(
+		nullptr,
+		EAeyerjiEnemyTargetSource::None,
+		/*bSendTargetAcquiredEvent=*/false,
+		/*bStopCurrentMovement=*/true);
+	ClearFocus(EAIFocusPriority::Move);
+	EndChaseSprintCadence();
+
+	if (StateTreeComponent && StateTreeComponent->IsRunning())
+	{
+		StateTreeComponent->SendStateTreeEvent(FStateTreeEvent(TargetLostTag()));
+	}
+
+	if (IsValid(DefenseObjectiveTarget.Get()) && !HasDeadStateTag(DefenseObjectiveTarget.Get())
+		&& RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/true, /*bStopCurrentMovement=*/true))
+	{
+		return;
+	}
+
+	if (AActor* Replacement = FindNearestLivePerceivedHostile())
+	{
+		TryAcquireTarget(Replacement, /*bBroadcastAllyAlert=*/false);
 	}
 }
 
@@ -931,6 +1150,11 @@ void AEnemyAIController::ClearLastKnownTarget()
 	bHasLastKnownTarget = false;
 }
 
+void AEnemyAIController::DropCurrentTarget()
+{
+	AssignCurrentTarget(nullptr, EAeyerjiEnemyTargetSource::None, /*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
+}
+
 void AEnemyAIController::ResetForPooledReuse(const FVector& NewHomeLocation)
 {
 	if (!HasAuthority())
@@ -939,6 +1163,7 @@ void AEnemyAIController::ResetForPooledReuse(const FVector& NewHomeLocation)
 	}
 
 	ResetChaseSprintCadence();
+	UnbindCurrentTargetDeathState();
 	StopMovement();
 	SetPathFollowingGameplayEnabled(true, TEXT("PooledReuse"));
 	ClearFocus(EAIFocusPriority::Gameplay);
@@ -953,6 +1178,7 @@ void AEnemyAIController::ResetForPooledReuse(const FVector& NewHomeLocation)
 	HomeLocation = !NewHomeLocation.ContainsNaN()
 		? NewHomeLocation
 		: (ControlledPawn ? ControlledPawn->GetActorLocation() : FVector::ZeroVector);
+	bHomeLocationSet = true;
 	ClearLastKnownTarget();
 
 	if (Perception)

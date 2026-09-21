@@ -17,9 +17,11 @@
 #include "Engine/GameInstance.h"
 #include "GameplayEffect.h"
 #include "Aeyerji/AeyerjiPlayerState.h"
+#include "Aeyerji/AeyerjiGameState.h"
 #include "Logging/AeyerjiLog.h"
 #include "GameFramework/Pawn.h"
 #include "HAL/IConsoleManager.h"
+#include "TimerManager.h"
 
 namespace
 {
@@ -226,6 +228,12 @@ void UW_ActionBar::HandleSwapBlocked(FText Reason, TSubclassOf<UGameplayAbility>
 void UW_ActionBar::NativeConstruct()
 {
 	Super::NativeConstruct();
+	UpdateTransitionVisibility();
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(VisibilityTimerHandle, this,
+			&UW_ActionBar::UpdateTransitionVisibility, 0.1f, true);
+	}
 
 
 	ResetCachedAbilitySystem();
@@ -236,6 +244,10 @@ void UW_ActionBar::NativeConstruct()
 
 void UW_ActionBar::NativeDestruct()
 {
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(VisibilityTimerHandle);
+	}
 	if (PickerInstance)
 	{
 		PickerInstance->OnAbilityPicked.RemoveDynamic(this, &UW_ActionBar::HandleAbilityPicked);
@@ -246,6 +258,33 @@ void UW_ActionBar::NativeDestruct()
 
 	UnbindCooldownEffectDelegates();
 	Super::NativeDestruct();
+}
+
+void UW_ActionBar::UpdateTransitionVisibility()
+{
+	const AAeyerjiPlayerController* PC = GetOwningPlayer<AAeyerjiPlayerController>();
+	const bool bLoading = !PC || !PC->IsActionBarAccessible();
+	if (bLoading && !bBarHiddenForTransition)
+	{
+		bBarHiddenForTransition = true;
+		SavedBarVisibility = GetVisibility();
+		// Widgets constructed under a loading screen may already start collapsed.
+		if (SavedBarVisibility == ESlateVisibility::Collapsed || SavedBarVisibility == ESlateVisibility::Hidden)
+		{
+			SavedBarVisibility = ESlateVisibility::SelfHitTestInvisible;
+		}
+		HideAbilityTooltip(nullptr);
+		if (PickerInstance)
+		{
+			PickerInstance->Close();
+		}
+		SetVisibility(ESlateVisibility::Collapsed);
+	}
+	else if (!bLoading && bBarHiddenForTransition)
+	{
+		bBarHiddenForTransition = false;
+		SetVisibility(SavedBarVisibility);
+	}
 }
 
 void UW_ActionBar::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -276,6 +315,11 @@ void UW_ActionBar::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 }/* -------------------- Context-menu & Ability Picker ---------------------- */
 void UW_ActionBar::HandleSlotRightClicked(int32 Index)
 {
+	const AAeyerjiPlayerController* Owner = GetOwningPlayer<AAeyerjiPlayerController>();
+	if (!Owner || !Owner->IsActionBarAccessible())
+	{
+		return;
+	}
 	if (!PickerClass)
 	{
 		AJ_LOG(this, "PickerClass not set!");
@@ -287,6 +331,20 @@ void UW_ActionBar::HandleSlotRightClicked(int32 Index)
 	{
 		AJ_LOG(this, "HandleSlotRightClicked – GetOwningPlayer() == nullptr");
 		return;
+	}
+
+	// Assignment is only meaningful during live gameplay. The bar stays visible
+	// through world transitions, so ignore picker requests from menu/loading phases.
+	if (const UWorld* World = GetWorld())
+	{
+		if (const AAeyerjiGameState* GS = World->GetGameState<AAeyerjiGameState>())
+		{
+			if (GS->GetWorldFlowPhase() != EAeyerjiWorldFlowPhase::Gameplay)
+			{
+				AJ_LOG(this, "HandleSlotRightClicked ignored during world-flow phase %d", static_cast<int32>(GS->GetWorldFlowPhase()));
+				return;
+			}
+		}
 	}
 
 	if (!PickerInstance)
@@ -482,6 +540,11 @@ void UW_ActionBar::HandleSlotLeftClicked(UW_ActionSlotNative *MySlot)
 
 bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 {
+	const AAeyerjiPlayerController* Owner = GetOwningPlayer<AAeyerjiPlayerController>();
+	if (!Owner || !Owner->IsActionBarAccessible())
+	{
+		return false;
+	}
 	if (!CachedPS)
 	{
 		AJ_LOG(this, TEXT("ExecuteAbilitySlot() invalid PS"));
@@ -678,17 +741,18 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 
 		bool bActivated = false;
 
-		if (EffectiveSlotData.Tag.IsValid())
-		{
-			bActivated = ASC->TryActivateAbilitiesByTag(EffectiveSlotData.Tag, /*bAllowRemoteActivation=*/true);
-		}
-
-		if (!bActivated && EffectiveSlotData.Class)
+		// Match the server path: a slot names one class, even if legacy grants share
+		// its tag. Never fall back to those grants when this class rejects activation.
+		if (EffectiveSlotData.Class)
 		{
 			bActivated = ASC->TryActivateAbilityByClass(EffectiveSlotData.Class, /*bAllowRemoteActivation=*/true);
 			AJ_LOG(this, TEXT("ExecuteAbilitySlot() TryActivateAbilityByClass %s (Class=%s)"),
 				bActivated ? TEXT("succeeded") : TEXT("failed"),
 				*GetNameSafe(EffectiveSlotData.Class));
+		}
+		else if (EffectiveSlotData.Tag.IsValid())
+		{
+			bActivated = ASC->TryActivateAbilitiesByTag(EffectiveSlotData.Tag, /*bAllowRemoteActivation=*/true);
 		}
 
 		if (bActivated)
@@ -698,7 +762,8 @@ bool UW_ActionBar::ExecuteAbilitySlot(const FAeyerjiAbilitySlot &SlotData)
 
 		CooldownTickAccumulator = CooldownTickInterval;
 		UpdateCooldowns();
-		AJ_LOG(this, TEXT("ExecuteAbilitySlot() TryActivateAbilitiesByTag %s (Tag=%s)"), bActivated ? TEXT("succeeded") : TEXT("failed"), *TagString);
+		AJ_LOG(this, TEXT("ExecuteAbilitySlot() activation %s (Tag=%s Class=%s)"),
+			bActivated ? TEXT("succeeded") : TEXT("failed"), *TagString, *GetNameSafe(EffectiveSlotData.Class));
 		return bActivated;
 	}
 
@@ -791,7 +856,7 @@ void UW_ActionBar::UpdateCooldowns()
 		{
 			if (!AbilitySystem)
 			{
-				AJ_LOG(this, TEXT("UpdateCooldowns slot %d no ASC - clearing display"), Idx);
+				//AJ_LOG(this, TEXT("UpdateCooldowns slot %d no ASC - clearing display"), Idx);
 				SlotWidget->ClearCooldownDisplay();
 				continue;
 			}

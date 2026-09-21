@@ -70,6 +70,10 @@ public:
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Streaming")
 	FName GetCurrentZoneId() const { return CurrentZoneId; }
 
+	/** True once every authored level for the current zone is loaded and visible as requested. */
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Streaming")
+	bool IsCurrentZoneReady() const;
+
 	/** Chooses the next gameplay map (random or campaign sequential) and travels to it. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Flow", meta=(DeprecatedFunction, DeprecationMessage="Legacy direct-map launch. Use the authoritative frontend lobby launch request."))
 	bool StartGameplaySession(bool bCampaignMode);

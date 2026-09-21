@@ -190,6 +190,17 @@ protected:
     virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
     virtual void NativeDestruct() override;
 
+    /**
+     * Level-advanced presentation hook. OnLevelChanged() calls this when the replicated
+     * Level attribute converts to a higher gameplay level than before, so clients react to
+     * the same replicated data the level label uses instead of the authority-only
+     * UAeyerjiLevelingComponent::OnLevelUp delegate. The base implementation is empty so
+     * floating bars and other subclasses keep their current behavior; the player HUD
+     * overrides it for toast/banner presentation. Never move progression or ability-point
+     * logic in here; this is presentation only.
+     */
+    virtual void HandleLevelAdvanced(int32 OldLevel, int32 NewLevel);
+
 private:
     // Cached ASC + attrs
     UPROPERTY(Transient) TWeakObjectPtr<UAbilitySystemComponent> ASC;

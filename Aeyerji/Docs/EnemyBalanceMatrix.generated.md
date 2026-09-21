@@ -7,7 +7,7 @@ This matrix is generated from [EnemyBalanceTargets.json](../Data/EnemyBalanceTar
 ## Benchmark
 
 - Level 1, Normal world tier 167, no items.
-- Player baseline: 500 HP, 25 physical basic-attack damage, 1 armor, 12.5% damage variance.
+- Player baseline: 750 HP, 25 physical basic-attack damage, 1 armor, 12.5% damage variance.
 - Elite package: 4x health, 1.35x damage, 1.5x range.
 - Hits are shown as best / nominal / worst. Best and worst use the positive and negative ends of player damage variance.
 - Chase cadence: up to 1.5s at RunSpeed, then 5s at WalkSpeed; sprint eligibility starts 250 cm outside engagement range.
@@ -16,29 +16,29 @@ This matrix is generated from [EnemyBalanceTargets.json](../Data/EnemyBalanceTar
 
 | Enemy | Status | Role | Source HP | Applied HP | Armor | Effective HP | Hits | Damage / hit | Player HP / hit | APS |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Assassin | Live | Specialist | 38 | 38 | 6 | 38.2 | 2 / 2 / 2 | 22 | 4.4% | 1.2 |
-| Berserker | Live | Specialist | 55 | 55 | 7 | 55.4 | 2 / 3 / 3 | 28 | 5.6% | 1.12 |
-| Brawler | Live | Durable | 70 | 70 | 18 | 71.3 | 3 / 3 / 4 | 18 | 3.6% | 0.82 |
-| Brute | Live | Durable | 80 | 80 | 30 | 82.4 | 3 / 4 / 4 | 35 | 7% | 0.51 |
-| Bulwark | Live | Durable | 85 | 85 | 6 | 85.5 | 4 / 4 / 4 | 20 | 4% | 0.43 |
-| Cleaver | Live | Specialist | 60 | 60 | 27 | 61.6 | 3 / 3 / 3 | 30 | 6% | 0.47 |
-| Duelist | Live | Specialist | 50 | 50 | 11 | 50.5 | 2 / 3 / 3 | 17 | 3.4% | 1.07 |
-| Enforcer | Live | Durable | 70 | 70 | 30 | 72.1 | 3 / 3 / 4 | 20 | 4% | 0.73 |
-| Grunt | Live | Standard | 44 | 44 | 6 | 44.3 | 2 / 2 / 3 | 30 | 6% | 0.51 |
-| Grunt Elite | Live | BalancedElite | 60 | 240 | 7 | 241.7 | 9 / 10 / 12 | 47.2 | 9.4% | 0.51 |
-| Guardian | Live | Durable | 85 | 85 | 30 | 87.5 | 4 / 4 / 5 | 16 | 3.2% | 0.6 |
-| Pack Hunter | Live | Fodder | 30 | 30 | 6 | 30.2 | 2 / 2 / 2 | 8 | 1.6% | 1.37 |
-| Reaver | Live | Specialist | 55 | 55 | 14 | 55.8 | 2 / 3 / 3 | 24 | 4.8% | 0.9 |
-| Skirmisher | Live | Standard | 40 | 40 | 6 | 40.2 | 2 / 2 / 2 | 9 | 1.8% | 0.94 |
-| Tank | Live | Durable | 80 | 80 | 30 | 82.4 | 3 / 4 / 4 | 15 | 3% | 0.43 |
-| Vanguard | Live | Specialist | 55 | 55 | 22 | 56.2 | 2 / 3 / 3 | 19 | 3.8% | 0.86 |
-| Archer | Live | Standard | 44 | 44 | 6 | 44.3 | 2 / 2 / 3 | 30 | 6% | 0.28 |
-| Archer Elite | Live | GlassElite | 44 | 176 | 6 | 177.1 | 7 / 8 / 9 | 60.8 | 12.1% | 0.28 |
-| Bombardier | Live | Specialist | 50 | 50 | 11 | 50.5 | 2 / 3 / 3 | 30 | 6% | 0.44 |
-| Caster | Live | Standard | 40 | 40 | 6 | 40.2 | 2 / 2 / 2 | 20 | 4% | 0.56 |
-| Ranged | AuthoredOnly | Standard | 44 | 44 | 7 | 44.3 | 2 / 2 / 3 | 14 | 2.8% | 0.72 |
-| Sniper | Live | Specialist | 35 | 35 | 6 | 35.2 | 2 / 2 / 2 | 32 | 6.4% | 0.4 |
-| Support | Live | Fodder | 30 | 30 | 18 | 30.5 | 2 / 2 / 2 | 10 | 2% | 0.64 |
+| Assassin | Live | Specialist | 38 | 38 | 6 | 38.2 | 2 / 2 / 2 | 22 | 2.9% | 1.2 |
+| Berserker | Live | Specialist | 55 | 55 | 7 | 55.4 | 2 / 3 / 3 | 28 | 3.7% | 1.12 |
+| Brawler | Live | Durable | 70 | 70 | 18 | 71.3 | 3 / 3 / 4 | 18 | 2.4% | 0.82 |
+| Brute | Live | Durable | 80 | 80 | 30 | 82.4 | 3 / 4 / 4 | 35 | 4.7% | 0.51 |
+| Bulwark | Live | Durable | 85 | 85 | 6 | 85.5 | 4 / 4 / 4 | 20 | 2.7% | 0.43 |
+| Cleaver | Live | Specialist | 60 | 60 | 27 | 61.6 | 3 / 3 / 3 | 30 | 4% | 0.47 |
+| Duelist | Live | Specialist | 50 | 50 | 11 | 50.5 | 2 / 3 / 3 | 17 | 2.3% | 1.07 |
+| Enforcer | Live | Durable | 70 | 70 | 30 | 72.1 | 3 / 3 / 4 | 20 | 2.7% | 0.73 |
+| Grunt | Live | Standard | 44 | 44 | 6 | 44.3 | 2 / 2 / 3 | 30 | 4% | 0.51 |
+| Grunt Elite | Live | BalancedElite | 60 | 240 | 7 | 241.7 | 9 / 10 / 12 | 47.2 | 6.3% | 0.51 |
+| Guardian | Live | Durable | 85 | 85 | 30 | 87.5 | 4 / 4 / 5 | 16 | 2.1% | 0.6 |
+| Pack Hunter | Live | Fodder | 30 | 30 | 6 | 30.2 | 2 / 2 / 2 | 8 | 1.1% | 1.37 |
+| Reaver | Live | Specialist | 55 | 55 | 14 | 55.8 | 2 / 3 / 3 | 24 | 3.2% | 0.9 |
+| Skirmisher | Live | Standard | 40 | 40 | 6 | 40.2 | 2 / 2 / 2 | 9 | 1.2% | 0.94 |
+| Tank | Live | Durable | 80 | 80 | 30 | 82.4 | 3 / 4 / 4 | 15 | 2% | 0.43 |
+| Vanguard | Live | Specialist | 55 | 55 | 22 | 56.2 | 2 / 3 / 3 | 19 | 2.5% | 0.86 |
+| Archer | Live | Standard | 44 | 44 | 6 | 44.3 | 2 / 2 / 3 | 30 | 4% | 0.28 |
+| Archer Elite | Live | GlassElite | 44 | 176 | 6 | 177.1 | 7 / 8 / 9 | 60.8 | 8.1% | 0.28 |
+| Bombardier | Live | Specialist | 50 | 50 | 11 | 50.5 | 2 / 3 / 3 | 30 | 4% | 0.44 |
+| Caster | Live | Standard | 40 | 40 | 6 | 40.2 | 2 / 2 / 2 | 20 | 2.7% | 0.56 |
+| Ranged | AuthoredOnly | Standard | 44 | 44 | 7 | 44.3 | 2 / 2 / 3 | 14 | 1.9% | 0.72 |
+| Sniper | Live | Specialist | 35 | 35 | 6 | 35.2 | 2 / 2 / 2 | 32 | 4.3% | 0.4 |
+| Support | Live | Fodder | 30 | 30 | 18 | 30.5 | 2 / 2 / 2 | 10 | 1.3% | 0.64 |
 
 Damage-pressure bands are review guidance, not hard validation. Actual pressure also depends on movement, attack windows, abilities, pack composition, and player avoidance.
 
@@ -126,7 +126,7 @@ These are enemy-stat projections, not high-level hit-to-kill promises. Player da
 | Vanguard | [EnemyAttributes/M_VanguardAttrs.JSON](../Data/EnemyAttributes/M_VanguardAttrs.JSON) | `/Game/Enemy/Attributes/M_VanguardAttrs.M_VanguardAttrs` | - | Aggressive spearhead that closes distance and starts engagements. |
 | Archer | [EnemyAttributes/R_Archer.JSON](../Data/EnemyAttributes/R_Archer.JSON) | `/Game/Enemy/Attributes/R_ArcherAttrs.R_ArcherAttrs` | `Enemy.Role.Mob.Ranged.Archer` | Baseline ranged pack unit and the reference point for ranged trash. |
 | Archer Elite | [EnemyAttributes/R_ArcherElite.JSON](../Data/EnemyAttributes/R_ArcherElite.JSON) | `/Game/Enemy/Attributes/R_ArcherEliteAttrs.R_ArcherEliteAttrs` | `Enemy.Role.Elite.Ranged.Archer` | High-damage glass elite whose base table is promoted once by the elite package. |
-| Bombardier | [EnemyAttributes/R_BombardierAttrs.JSON](../Data/EnemyAttributes/R_BombardierAttrs.JSON) | `/Game/Enemy/Attributes/R_BombardierAttrs.R_BombardierAttrs` | - | Ranged artillery specialist that controls space and punishes clustering. |
+| Bombardier | [EnemyAttributes/R_BombardierAttrs.JSON](../Data/EnemyAttributes/R_BombardierAttrs.JSON) | `/Game/Enemy/Attributes/R_BombardierAttrs.R_BombardierAttrs` | `Enemy.Role.Mob.Ranged.Bombardier` | Ranged artillery specialist that controls space and punishes clustering. |
 | Caster | [EnemyAttributes/R_CasterAttrs.JSON](../Data/EnemyAttributes/R_CasterAttrs.JSON) | `/Game/Enemy/Attributes/R_CasterAttrs.R_CasterAttrs` | - | Fragile ranged backliner whose abilities provide most of its threat. |
 | Ranged | [EnemyAttributes/R_RangedAttrs.JSON](../Data/EnemyAttributes/R_RangedAttrs.JSON) | _Not created_ | - | Generic ranged template retained in source until a matching live DataTable is created. |
 | Sniper | [EnemyAttributes/R_SniperAttrs.JSON](../Data/EnemyAttributes/R_SniperAttrs.JSON) | `/Game/Enemy/Attributes/R_SniperAttrs.R_SniperAttrs` | - | Long-range specialist with high damage and intentionally low durability. |

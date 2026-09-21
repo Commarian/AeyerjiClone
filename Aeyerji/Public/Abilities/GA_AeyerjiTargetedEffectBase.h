@@ -38,6 +38,16 @@ protected:
 		const TArray<AActor*>& Targets,
 		FVector TargetLocation) const;
 
+	/**
+	 * Native hook invoked on the server after target validation, before the delayed impact resolves.
+	 * Lets abilities spawn telegraphed visuals (for example a falling meteor) that land when damage applies.
+	 */
+	virtual void OnTargetedAbilityCastStartedNative(
+		const FGameplayAbilityActorInfo& ActorInfo,
+		const FAeyerjiAbilityResolvedConfig& Config,
+		FVector TargetLocation,
+		float ImpactDelaySeconds) const;
+
 private:
 	void ExecuteTargetedImpact(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, const FAeyerjiAbilityResolvedConfig& Config, const TArray<AActor*>& Targets, FVector TargetLocation);
 	bool ResolveTargetLocation(const FGameplayAbilityActorInfo& ActorInfo, const FGameplayEventData* TriggerEventData, FVector& OutLocation) const;

@@ -17,6 +17,7 @@
 #include "AeyerjiPlayerController.generated.h"
 class APawn;
 class UAbilitySystemComponent;
+class UGameplayAbility;
 class UStaticMeshComponent;
 class UNiagaraSystem;
 class AAeyerjiEncounterDirector;
@@ -26,6 +27,8 @@ class AAeyerjiPlayerState;
 class UW_EndRunScreen;
 class UW_AeyerjiMissionHUD;
 class UW_AeyerjiMinimap;
+class UW_AeyerjiCheatDrawer;
+class UItemDefinition;
 class UUserWidget;
 class UAeyerjiCameraOcclusionFadeComponent;
 class UAeyerjiViewDistanceCullComponent;
@@ -99,8 +102,12 @@ class AEYERJI_API AAeyerjiPlayerController : public APlayerController
     GENERATED_BODY()
 
 public:
-    AAeyerjiPlayerController();
+	/** Shared HUD/input gate while loading, in menus, dead, or waiting for the player profile. */
+	bool IsActionBarAccessible() const;
+	AAeyerjiPlayerController();
 	virtual void Tick(float DeltaSeconds) override;
+	/** Applies the local pawn camera policy immediately before UE calculates the frame's final camera POV. */
+	virtual void UpdateCameraManager(float DeltaSeconds) override;
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
 	/** Prevents engine restart callbacks from replacing the explicit player-pawn camera target. */
@@ -161,6 +168,12 @@ public:
 	/** Chooses a reachable point near a generic interactable actor. */
 	bool ComputeInteractionGoal(AActor* InteractableActor, FVector& OutGoal) const;
 
+	/** Normalizes Blueprint interaction ranges so client approach and server validation use the same finite distance. */
+	float ResolveInteractionRadius(AActor* InteractableActor) const;
+
+	/** Keeps remote clients slightly inside the authoritative range before stopping movement and requesting use. */
+	float ResolveInteractionApproachRadius(float InteractionRadius) const;
+
     // Optional: Apply an avoidance profile (map-specific tuning)
     UFUNCTION(BlueprintCallable, Category="Aeyerji|Movement|Avoidance")
     void ApplyAvoidanceProfile(const UAeyerjiAvoidanceProfile* Profile);
@@ -173,7 +186,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input") TObjectPtr<UInputAction> IA_Interact = nullptr;
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input")
 	FKey AttackClickPhysicalKey = EKeys::LeftMouseButton;
-	/** Cached physical key for IA_Interact, resolved from IMC_Default so same-key mouse binds can de-duplicate. */
+	/** Cached physical key for IA_Interact, resolved from IMC_Default so a shared left-click mapping is bound only once. */
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input")
 	FKey InteractClickPhysicalKey = EKeys::Invalid;
 	UPROPERTY(EditDefaultsOnly, Category="Aeyerji|Input")
@@ -203,6 +216,9 @@ public:
 
 	/** Requests server-authoritative use of a generic interactable actor. */
 	UFUNCTION(Server, Reliable) void Server_RequestInteractableUse(AActor* InteractableActor);
+	// Loot arrival uses an acknowledgement so prediction cannot discard an out-of-range request.
+	UFUNCTION(Server, Reliable) void Server_RequestPendingLootUse(AActor* Loot, uint32 RequestSerial);
+	UFUNCTION(Client, Reliable) void Client_PendingLootUseResult(uint32 RequestSerial, bool bRetryApproach);
 
 	/** Requests a server-validated gold repair for the active survival defense objective. */
 	UFUNCTION(Server, Reliable, BlueprintCallable, Category="Aeyerji|Survival|Defense")
@@ -235,6 +251,10 @@ public:
 
 	UFUNCTION(BlueprintImplementableEvent, Category="Aeyerji|HUD")
 	void BP_ShowPopupMessage(const FText& Message, float Duration);
+
+	/** Carries authoritative GAS activation rejection feedback to the owning client. */
+	UFUNCTION(Client, Reliable)
+	void Client_ShowAbilityFailureMessageKey(FName MessageKey);
 
 	/** Optional native end-of-run widget class used for results, retry, and menu return. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|HUD")
@@ -364,6 +384,11 @@ public:
 
 	TWeakObjectPtr<AAeyerjiLinkedTeleporter> PendingTeleporter;
 	TWeakObjectPtr<AActor> PendingInteractable;
+	// Pending loot survives cast locks and waits for its matching server reply.
+	uint32 PendingLootRequestSerial = 0;
+	bool bPendingLootRequestInFlight = false;
+	bool bPendingLootNeedsApproach = false;
+	double NextPendingLootUpdateTime = 0.0;
 	uint8 PendingTeleporterEndpointIndex = 0;
 	
 	// Debug
@@ -410,6 +435,91 @@ public:
 	UFUNCTION(Exec)
 	void AJ_OpenConsole();
 
+	/** Opens or closes the local development cheat drawer. */
+	UFUNCTION(Exec)
+	void AJ_Cheats();
+
+	/** Sets the controlled character level through the authoritative leveling component. */
+	UFUNCTION(Exec)
+	void AJ_SetLevel(int32 NewLevel);
+
+	/** Applies a multiplier to the controlled pawn's original RunSpeed base value; 1 restores it. */
+	UFUNCTION(Exec)
+	void AJ_SetMoveSpeedMultiplier(float Multiplier = 2.f);
+
+	/** Restores current HP to HPMax without changing the maximum. */
+	UFUNCTION(Exec)
+	void AJ_FullHeal();
+
+	/** Restarts the current gameplay map and preserves its current entry zone. */
+	UFUNCTION(Exec)
+	void AJ_RestartRift();
+
+	/** Spawns an instigator-only loot pickup from an item-definition object path. */
+	UFUNCTION(Exec)
+	void AJ_SpawnItem(FString ItemDefinitionPath, int32 ItemLevel = 0);
+
+	/** Prints canonical combat-test presets, compositions, arguments, and the Rewind-friendly workflow. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestHelp();
+
+	/**
+	 * Builds one canonical crowd preset around this player on authority.
+	 * AutoEngageDelay=-1 leaves the assembled pack locked until AJ_CombatTestEngage.
+	 */
+	UFUNCTION(Exec)
+	void AJ_CombatTestPreset(
+		FString PresetName = TEXT("Dense24"),
+		int32 EnemyLevel = 1,
+		int32 WorldTier = 167,
+		int32 Seed = 1337,
+		float AutoEngageDelay = 3.f);
+
+	/** Builds a custom deterministic roster using a supported composition and population up to 48. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestCustom(
+		FString Composition = TEXT("Mixed"),
+		int32 Count = 24,
+		int32 EnemyLevel = 1,
+		int32 WorldTier = 167,
+		int32 Seed = 1337,
+		float MinimumRadius = 1200.f,
+		float MaximumRadius = 2600.f,
+		float AutoEngageDelay = 3.f,
+		float SpawnInterval = 0.05f);
+
+	/** Releases a prepared pack immediately and begins authoritative metric collection. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestEngage();
+
+	/** Prints authoritative replicated metrics plus this client's viewport-visible count. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestStatus();
+
+	/** Adds a named trace bookmark and row to the combat-test marker report. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestMark(FString Label = TEXT("Manual"));
+
+	/** Exports reports, destroys only harness-owned enemies, and removes the transient harness. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestStop();
+
+	/** Toggles the replicated metric overlay and deterministic spawn-annulus debug circles locally. */
+	UFUNCTION(Exec)
+	void AJ_CombatTestHUD(int32 bEnabled = 1);
+
+	/** Starts measurement-only telemetry over the normal production Rift and its existing enemies. */
+	UFUNCTION(Exec)
+	void AJ_BalanceRunStart(FString RunLabel = TEXT("L1_Naked_Baseline"));
+
+	/** Prints the current normal-Rift balance recorder snapshot. */
+	UFUNCTION(Exec)
+	void AJ_BalanceRunStatus();
+
+	/** Stops normal-Rift recording and saves its reports without deleting production enemies. */
+	UFUNCTION(Exec)
+	void AJ_BalanceRunStop();
+
 	UFUNCTION(Server, Reliable)
 	void ServerRefreshLootScalingDebug();
 
@@ -418,6 +528,47 @@ public:
 
 	UFUNCTION(Server, Reliable)
 	void ServerAJ_SetHP(float HPValue);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_SetLevel(int32 NewLevel);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_SetMoveSpeedMultiplier(float Multiplier);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_FullHeal();
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_RestartRift();
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_SpawnItem(const FString& ItemDefinitionPath, int32 ItemLevel);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_CombatTestPreset(const FString& PresetName, int32 EnemyLevel, int32 WorldTier, int32 Seed, float AutoEngageDelay);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_CombatTestCustom(const FString& Composition, int32 Count, int32 EnemyLevel, int32 WorldTier, int32 Seed,
+		float MinimumRadius, float MaximumRadius, float AutoEngageDelay, float SpawnInterval);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_CombatTestEngage();
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_CombatTestMark(const FString& Label);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_CombatTestStop();
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_BalanceRunStart(const FString& RunLabel);
+
+	UFUNCTION(Server, Reliable)
+	void ServerAJ_BalanceRunStop();
+
+	/** Returns authority-side setup errors and confirmations to the requesting client console/HUD. */
+	UFUNCTION(Client, Reliable)
+	void ClientAJ_CombatTestMessage(const FString& Message);
 	
 	/** Attempts to activate the primary attack ability, optionally with an explicit mouse-selected target. */
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Attack")
@@ -571,24 +722,24 @@ protected:
 	void ReleaseMouseCommand(EAeyerjiMouseButton Button);
 	void UpdateMouseCommand(float DeltaSeconds);
 	void TransitionMouseIntent(EAeyerjiMouseIntent NewIntent, AActor* NewTarget, const FVector& NewGroundGoal, bool bSpawnMoveFx);
-	void CancelMouseOwnedMovement();
+	void CancelMouseOwnedMovement(bool bCommitFinalGroundGoal = false);
 	void CancelMouseOwnedCombat();
 	void CancelMouseOwnedInteraction();
 	void ClearMouseCommandData();
 	void CancelMouseCommandCompletely();
 	bool IsMouseButtonPhysicallyDown(EAeyerjiMouseButton Button) const;
 	bool TryResolveDirectHostileUnderCursor(FHitResult& OutHit, AActor*& OutTarget) const;
+	/** Finds a nearby living replacement after a held attack target dies without enabling global auto-aim. */
+	bool TryResolveHeldAttackReplacement(FHitResult& OutHit, AActor*& OutTarget) const;
+	static bool IsHeldAttackReplacementWithinRadii(float ScreenDistanceSq, float WorldDistanceSq, float ScreenRadiusPx, float WorldRadiusCm);
+	static bool IsHeldAttackReplacementBetter(float ScreenDistanceSq, float WorldDistanceSq, const FString& ActorName, float BestScreenDistanceSq, float BestWorldDistanceSq, const FString& BestActorName, bool bHasBestActor);
 	AActor* ResolveAttackableActorFromCursorHit(const FHitResult& Hit) const;
 	bool IsMouseCommandTargetInBasicAttackRange(AActor* TargetActor) const;
 	void EnsureMouseActorChase(AActor* TargetActor);
 	void StartMouseGroundMove(const FVector& Goal, bool bSpawnCursorFX);
 	void UpdateMouseGroundMove(const FVector& Goal);
-	/**
-	 * Stops the currently active primary attack when a new hostile is explicitly selected.
-	 * GAS still decides whether the current phase is cancellable, so committed hit windows
-	 * cannot be interrupted by a late retarget.
-	 */
-	void CancelPrimaryAttackForRetarget(AActor* NewTarget);
+	/** Queues a new hostile for the next primary attack without cancelling the strike already in wind-up. */
+	void PreparePrimaryAttackForRetarget(AActor* PreviousTarget, AActor* NewTarget, bool bWasRetarget, bool bPreviousTargetWasInvalid);
 	bool TriggerPrimaryAttackAbility(UAbilitySystemComponent* ASC, AActor* ExplicitTarget);
 	FGameplayAbilitySpecHandle FindPrimaryAttackAbilityHandle(UAbilitySystemComponent* ASC) const;
 	void OnDropItemPressed(const FInputActionValue& Val);
@@ -596,17 +747,21 @@ protected:
 	bool IsAbilityCastInputLocked() const;
 	void BindMouseCommandRecoveryDelegates();
 	void UnbindMouseCommandRecoveryDelegates();
+	/** Routes local GAS activation failures into the existing HUD toast without changing activation rules. */
+	void BindAbilityFailureFeedback();
+	void UnbindAbilityFailureFeedback();
+	void HandleAbilityActivationFailed(const UGameplayAbility* FailedAbility, const FGameplayTagContainer& FailureTags);
+	void PresentAbilityFailureMessage(FName MessageKey);
 	void HandleObservedAbilityEnded(const FAbilityEndedData& EndedData);
 	void HandleCastingTagChanged(const FGameplayTag Tag, int32 NewCount);
+	bool IsPrimaryAttackTemporarilyBlocked() const;
+	static bool ShouldRearmHeldPrimaryCommand(bool bMatchingPrimaryAttack, EAeyerjiMouseButton Owner, EAeyerjiMousePhase Phase, EAeyerjiMouseIntent Intent, bool bLeftMousePhysicallyDown);
+	static bool IsNewerPrimaryCommandSerial(uint32 CandidateSerial, uint32 BaselineSerial);
 	void ScheduleMouseCommandRecovery();
 	void RecoverMouseCommandAfterAbility();
 	void CancelMouseCommandRecovery(bool bSuppressCurrentCommandUntilRelease);
 	/** Returns true when IA_Interact and IA_Attack_Click resolve to the same physical key. */
 	bool IsInteractClickMappedToAttackClick() const;
-	/** Returns true for the short duplicate window after one same-key interaction path handled the click. */
-	bool WasSameKeyInteractionHandledRecently() const;
-	/** Marks the current click as handled so the paired same-key input action does not run twice. */
-	void MarkSameKeyInteractionHandled();
 
 	// Build the tag search container for the primary ability (leaf + parents).
 	bool BuildPrimaryAttackTagSearch(UAbilitySystemComponent* ASC, FGameplayTagContainer& OutTags) const;
@@ -647,9 +802,9 @@ protected:
 	/** Confirms whether authority accepted the one-click attack request before its command is consumed. */
 	UFUNCTION(Client, Reliable)
 	void Client_PrimaryAttackActivationResult(AActor* TargetActor, uint32 CommandSerial, bool bActivated);
-	/** Mirrors a local primary-attack retarget cancellation on the authority. */
+	/** Mirrors the local queued retarget handoff on the authority without cancelling the active strike. */
 	UFUNCTION(Server, Reliable)
-	void Server_CancelPrimaryAttackForRetarget(AActor* NewTarget);
+	void Server_PreparePrimaryAttackForRetarget(AActor* NewTarget, uint32 CommandSerial, bool bWasRetarget, bool bPreviousTargetWasInvalid);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
 	void ServerMoveToLocation(const FVector& Goal);
 	UFUNCTION(Server, Reliable, BlueprintCallable)
@@ -678,13 +833,30 @@ protected:
 	UAbilitySystemComponent* GetCheatTargetAbilitySystemComponent() const;
 	void ApplyCheatAttackDamage(float DamageValue);
 	void ApplyCheatHP(float HPValue);
+	void ApplyCheatLevel(int32 NewLevel);
+	void ApplyCheatMoveSpeedMultiplier(float Multiplier);
+	void ApplyCheatFullHeal();
+	void ApplyCheatRestartRift();
+	void ApplyCheatSpawnItem(const FString& ItemDefinitionPath, int32 ItemLevel);
 	bool AreCheatsAllowed() const;
+
+	/** Local-only native drawer; it is created on demand and never replicated. */
+	UPROPERTY(Transient)
+	TObjectPtr<UW_AeyerjiCheatDrawer> CheatDrawerWidget = nullptr;
+
+	/** Authority-side RunSpeed base captured before the first speed cheat so reset is exact. */
+	float CheatOriginalRunSpeedBase = 0.f;
+	bool bHasCheatOriginalRunSpeedBase = false;
 
 	// Cached targeting
 	UPROPERTY() FVector CachedGoal = FVector::ZeroVector;
 	TWeakObjectPtr<AActor> CachedTarget;
 	/** Last hostile selected for a primary attack; prevents a same-target click from cancelling combo input. */
 	TWeakObjectPtr<AActor> LastPrimaryAttackTarget;
+	/** Highest contextual primary command accepted on the authority; rejects delayed retarget and activation RPCs. */
+	uint32 LastServerPrimaryAttackCommandSerial = 0;
+	/** Explicit target associated with the highest authority command serial. */
+	TWeakObjectPtr<AActor> LastServerPrimaryAttackCommandTarget;
 
 	// Pending move state for client prediction
 	FVector PendingMoveGoal = FVector::ZeroVector;
@@ -716,6 +888,12 @@ protected:
 	FVector CursorFollowHoldStartGoal = FVector::ZeroVector;
 	bool bCursorFollowHoldPrimed = false;
 	bool bCursorFollowHoldActive = false;
+	/** Retains a released ground-click destination so a transient pawn blockage cannot consume the command. */
+	bool bHasPersistentGroundMoveIntent = false;
+	FVector PersistentGroundMoveGoal = FVector::ZeroVector;
+	FVector PersistentGroundMoveProgressLocation = FVector::ZeroVector;
+	double PersistentGroundMoveProgressTime = -1.0;
+	double LastPersistentGroundMoveRetryTime = -1.0;
 
 	// Attack/move input state.
 	bool bMoveClickHeld = false;
@@ -729,8 +907,11 @@ protected:
 		TWeakObjectPtr<AActor> TargetActor;
 		TWeakObjectPtr<AActor> IssuedMoveTarget;
 		FVector GroundGoal = FVector::ZeroVector;
+		FVector LastValidAttackTargetLocation = FVector::ZeroVector;
 		bool bAttackCommitted = false;
 		bool bAwaitingServerAttackResult = false;
+		bool bHasLastValidAttackTargetLocation = false;
+		bool bSkipMeleeGraceForRetarget = false;
 		uint32 CommandSerial = 0;
 		double LastAttackAttemptTime = -1.0;
 	};
@@ -743,12 +924,15 @@ protected:
 	TWeakObjectPtr<UAbilitySystemComponent> MouseCommandRecoveryASC;
 	FDelegateHandle ObservedAbilityEndedHandle;
 	FDelegateHandle CastingTagChangedHandle;
+	TWeakObjectPtr<UAbilitySystemComponent> AbilityFailureFeedbackASC;
+	FDelegateHandle AbilityFailureFeedbackHandle;
+	FName LastAbilityFailureFeedbackKey = NAME_None;
+	double LastAbilityFailureFeedbackTime = -1.0;
 	FTimerHandle MouseCommandRecoveryTimerHandle;
 	uint32 RecoveryBlockedCommandSerial = 0;
 	bool bMouseCommandRecoveryPending = false;
 	double LastMouseAttackChaseLogTime = -1.0;
 	double LastMouseAttackRangeLogTime = -1.0;
-	double LastSameKeyInteractionHandledTime = -1.0;
 
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Input|MouseCommand", meta=(ClampMin="0.0"))
 	float BasicAttackRetryInterval = 0.08f;
@@ -829,6 +1013,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.0", Units="cm"))
 	float TargetSnapWorldRadiusCm = 300.f;
 
+	/** Maximum cursor distance for automatic replacement after a held attack target dies. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.0"))
+	float HeldAttackRetargetScreenRadiusPx = 120.f;
+
+	/** Maximum 2D distance from the previous target for a held-attack death handoff. */
+	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.0", Units="cm"))
+	float HeldAttackRetargetWorldRadiusCm = 600.f;
+
 	/** Scale snap radius based on camera distance; clamped between min/max. */
 	UPROPERTY(EditAnywhere, Category="Aeyerji|Targeting", meta=(ClampMin="0.1"))
 	float TargetSnapZoomScaleMin = 0.75f;
@@ -895,6 +1087,7 @@ protected:
 	bool TryGetPawnHit(FHitResult& OutHit) const;
 	bool TryGetLinkedTeleporterHit(FHitResult& OutHit, AAeyerjiLinkedTeleporter*& OutTeleporter, uint8& OutEndpointIndex) const;
 	bool TryGetInteractableHit(FHitResult& OutHit, AActor*& OutInteractable) const;
+	bool TryGetExplicitLootHit(FHitResult& OutHit, AActor*& OutLoot) const;
 	bool TryDropItemUnderCursor();
 
 	// Flow helpers
@@ -1060,11 +1253,36 @@ public:
     float AvoidanceMaxGoalDistanceFactor = 1.15f;
 
 private:
+	friend class FAeyerjiCombatResponsivenessPolicyTest;
     /**
      * Keeps the player view controller-owned when Blueprint defaults are loaded or a pawn is
      * replaced. The respawn flow explicitly selects the newly possessed pawn as the view target.
      */
     void DisableAutomaticCameraTargetManagement();
+
+    /**
+     * Repairs the engine's controller fallback only while this local controller still possesses a
+     * player pawn. Other valid view targets are preserved for cinematics and future camera rigs.
+     */
+    void RecoverLocalPlayerCameraFromControllerFallback();
+
+    /** Intercepts camera-manager target changes so a valid possessed player cannot be replaced by the controller fallback. */
+    void HandleCameraViewTargetChanged(APlayerController* ChangedController, AActor* OldViewTarget, AActor* NewViewTarget);
+
+    /** Handle for the engine-wide camera target notification; bound only for the local controller. */
+    FDelegateHandle CameraViewTargetChangedHandle;
+
+    /** The engine intentionally selects the controller while the old pawn is being unpossessed. */
+    bool bAllowControllerViewTargetDuringUnpossess = false;
+
+    /** Prevents nested camera-target notifications while restoring the possessed pawn. */
+    bool bRepairingCameraViewTarget = false;
+
+    /** Limits the expensive native call-stack diagnostic to the first fallback for each possessed pawn. */
+    TWeakObjectPtr<APawn> CameraFallbackStackLoggedPawn;
+
+    /** Prevents the polling safety net from flooding the log if a target change bypasses engine notifications. */
+    double LastCameraFallbackDiagnosticTime = -1.0;
 
     bool HasShowLootMapping(const UInputMappingContext* Context) const;
     void EnsureShowLootBinding();
@@ -1099,7 +1317,13 @@ private:
 	double LastAvoidanceTriggerTime = 0.0;
 
 	/** Adjusts the move goal in-place if a pawn immediately blocks our path. */
-	bool AdjustGoalForShortAvoidance(FVector& InOutGoal);
+	bool AdjustGoalForShortAvoidance(FVector& InOutGoal, bool bAllowWhenStopped = false);
+	/** Starts or replaces the destination retained after a ground click is released. */
+	void SetPersistentGroundMoveIntent(const FVector& Goal);
+	/** Stops retrying the retained destination after completion or an explicit command cancellation. */
+	void ClearPersistentGroundMoveIntent();
+	/** Re-paths a retained destination after an idle path or a short no-progress window. */
+	void UpdatePersistentGroundMoveIntent();
 
 	/** Ensures path following isn't ticking on an invalid or dead pawn. */
 	void UpdatePathFollowingForPawnState();

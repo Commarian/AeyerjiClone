@@ -149,6 +149,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Combat")
 	TSoftObjectPtr<UAnimMontage> AttackMontage;
 
+	// Multiplier applied to the AttackSpeed-derived primary melee montage play rate. 1.0 keeps existing animation timing; higher values play the same montage faster without changing combat cadence.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Combat", meta=(ClampMin="0.01"))
+	float AttackAnimationPlayRateMultiplier = 1.0f;
+
+	// Optional fixed primary-attack cooldown in seconds. Values <= 0 preserve the existing AttackSpeed-derived cooldown behavior.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Combat", meta=(ClampMin="0.0", Units="s"))
+	float PrimaryAttackCooldownSeconds = 0.0f;
+
 	// Ability level used when granting archetype abilities.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="GAS", meta=(ClampMin="1"))
 	int32 AbilityLevel = 1;

@@ -8,6 +8,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AbilitySystemGlobals.h"
 #include "GameFramework/MovementComponent.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PawnMovementComponent.h"
 #include "StateTreeExecutionContext.h"
 
 namespace

@@ -1,6 +1,7 @@
 #include "Director/AeyerjiSpawnerGroup.h"
 
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "Misc/AutomationTest.h"
 
@@ -81,6 +82,22 @@ bool FAeyerjiEnemyExactPoolPrewarmAutomationTest::RunTest(const FString& Paramet
 		Spawner->GetInactivePooledEnemyCount(), 3);
 	TestEqual(TEXT("Every planned actor was constructed during prewarm."),
 		Spawner->GetPrewarmConstructionCount(), 3);
+
+	int32 OwnedPrewarmedPawnCount = 0;
+	for (TActorIterator<APawn> It(World); It; ++It)
+	{
+		APawn* PooledPawn = *It;
+		if (!PooledPawn || PooledPawn->GetOwner() != Spawner)
+		{
+			continue;
+		}
+
+		OwnedPrewarmedPawnCount++;
+		TestTrue(TEXT("A prewarmed pawn is excluded from local distance culling before pool parking."),
+			PooledPawn->ActorHasTag(FName(TEXT("ViewCull.Ignore"))));
+	}
+	TestEqual(TEXT("Every exact-prewarm pawn remains owned by the spawner."),
+		OwnedPrewarmedPawnCount, 3);
 
 	Spawner->FinalizeExactPoolPrewarm();
 	Spawner->ReleaseEnemyPool(true);

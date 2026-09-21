@@ -153,9 +153,14 @@ bool USTC_CheckAttackRangeCondition::TestCondition(FStateTreeExecutionContext& C
 
 	// Get current target actor from our AI controller
 	AActor* Target = nullptr;
-	if (AI->IsA<AEnemyAIController>())
+	if (AEnemyAIController* EnemyAI = Cast<AEnemyAIController>(AI))
 	{
-		Target = Cast<AEnemyAIController>(AI)->GetTargetActor();
+		if (!EnemyAI->EnsureCurrentTargetIsLive())
+		{
+			LogDecision(false, TEXT("NoLiveTarget"), EnemyAI->GetTargetActor(), -1.f, -1.f);
+			return false;
+		}
+		Target = EnemyAI->GetTargetActor();
 	}
 	if (!Target)
 	{

@@ -3,12 +3,14 @@
 #include "GUI/W_InventoryBag_Native.h"
 
 #include "Components/GridPanel.h"
+#include "Components/RichTextBlock.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/GridSlot.h"
 #include "Components/SizeBox.h"
 #include "Components/Widget.h"
 #include "GUI/W_ItemTile.h"
 #include "GUI/W_EquipmentSlot.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 #include "GUI/ItemTooltipData.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Logging/AeyerjiLog.h"
@@ -30,6 +32,12 @@ UW_InventoryBag_Native::UW_InventoryBag_Native(const FObjectInitializer& ObjectI
 void UW_InventoryBag_Native::NativeConstruct()
 {
 	Super::NativeConstruct();
+	HideItemTooltip(nullptr);
+
+	UAeyerjiUIStyleLibrary::StyleInventoryLaneHeading(OffenseHeading);
+	UAeyerjiUIStyleLibrary::StyleInventoryLaneHeading(MagicHeading);
+	UAeyerjiUIStyleLibrary::StyleInventoryLaneHeading(DefenseHeading);
+	UAeyerjiUIStyleLibrary::StyleInventoryLaneHeading(CorruptionHeading);
 
 	DiscoverEquipmentSlots();
 	RefreshCorruptionLaneVisibility(Inventory.IsValid() && Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption) > 0);
@@ -50,6 +58,7 @@ void UW_InventoryBag_Native::NativeConstruct()
 
 void UW_InventoryBag_Native::NativeDestruct()
 {
+	HideItemTooltip(nullptr);
 	if (Inventory.IsValid())
 	{
 		Inventory->OnInventoryChanged.RemoveAll(this);
@@ -59,6 +68,7 @@ void UW_InventoryBag_Native::NativeDestruct()
 	}
 
 	ClearEquipmentSlotBindings();
+	bHasGridRenderSignature = false;
 
 	if (BoundPlayer.IsValid())
 	{
@@ -103,20 +113,28 @@ void UW_InventoryBag_Native::BindToInventoryComponent(UAeyerjiInventoryComponent
 void UW_InventoryBag_Native::SetCellSize(FVector2D NewCellSize)
 {
 	const float MinSize = 1.f;
-	CellSize.X = FMath::Max(MinSize, NewCellSize.X);
-	CellSize.Y = FMath::Max(MinSize, NewCellSize.Y);
-	DispatchRebuild();
+	const FVector2D ClampedSize(FMath::Max(MinSize, NewCellSize.X), FMath::Max(MinSize, NewCellSize.Y));
+	if (CellSize.Equals(ClampedSize))
+	{
+		return;
+	}
+	CellSize = ClampedSize;
+	DispatchRebuild(/*bForce=*/true);
 }
 
 void UW_InventoryBag_Native::SetCellPadding(FMargin NewPadding)
 {
+	if (CellPadding == NewPadding)
+	{
+		return;
+	}
 	CellPadding = NewPadding;
-	DispatchRebuild();
+	DispatchRebuild(/*bForce=*/true);
 }
 
 void UW_InventoryBag_Native::RefreshInventory()
 {
-	DispatchRebuild();
+	DispatchRebuild(/*bForce=*/true);
 }
 
 bool UW_InventoryBag_Native::DropItemUnderCursor(float ForwardOffset)
@@ -307,9 +325,27 @@ void UW_InventoryBag_Native::UnregisterEquipmentSlot(UW_EquipmentSlot* SlotWidge
 
 void UW_InventoryBag_Native::ShowItemTooltip(UAeyerjiItemInstance* Item, FVector2D ScreenPosition, UWidget* SourceWidget, EItemTooltipSource Source)
 {
+	if (!IsValid(Item) || !IsValid(SourceWidget))
+	{
+		HideItemTooltip(SourceWidget);
+		return;
+	}
 	LastTooltipData = FAeyerjiItemTooltipData::FromItem(Item, Source);
 	SetActiveTooltipSource(SourceWidget);
 	BP_ShowItemTooltip(LastTooltipData, ScreenPosition, SourceWidget);
+	if (WidgetTree)
+	{
+		if (UWidget* Tooltip = WidgetTree->FindWidget(TEXT("ItemTooltipWidget")))
+			Tooltip->SetVisibility(ESlateVisibility::HitTestInvisible);
+	}
+}
+
+void UW_InventoryBag_Native::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+	// Inventory can be hidden/reopened without destruction or a mouse-leave event.
+	if (ActiveTooltipSource.IsValid() && !ActiveTooltipSource->IsHovered())
+		HideItemTooltip(nullptr);
 }
 
 void UW_InventoryBag_Native::HideItemTooltip(UWidget* SourceWidget)
@@ -321,6 +357,11 @@ void UW_InventoryBag_Native::HideItemTooltip(UWidget* SourceWidget)
 	}
 
 	BP_HideItemTooltip(LastTooltipData, SourceWidget);
+	if (WidgetTree)
+	{
+		if (UWidget* Tooltip = WidgetTree->FindWidget(TEXT("ItemTooltipWidget")))
+			Tooltip->SetVisibility(ESlateVisibility::Hidden);
+	}
 	ActiveTooltipSource.Reset();
 	LastTooltipData = FAeyerjiItemTooltipData();
 }
@@ -362,6 +403,7 @@ void UW_InventoryBag_Native::AttachToInventory(UAeyerjiInventoryComponent* Inv)
 	}
 
 	Inventory = Inv;
+	bHasGridRenderSignature = false;
 	AJ_LOG(this, TEXT("[InventoryUI] Bound inventory widget. Widget=%s Inventory=%s Owner=%s Items=%d Equipped=%d Grid=%d"),
 		*GetNameSafe(this),
 		*GetNameSafe(Inv),
@@ -421,7 +463,7 @@ void UW_InventoryBag_Native::RefreshCorruptionLaneVisibility(bool bCorruptionUnl
 
 	if (!CorruptionBorder)
 	{
-		AJ_LOG(this, TEXT("[ItemBorder][CorruptionLane] Refresh skipped: CorruptionBorder binding missing Widget=%s Inventory=%s Unlocked=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder][CorruptionLane] Refresh skipped: CorruptionBorder binding missing Widget=%s Inventory=%s Unlocked=%s"),
 			*GetNameSafe(this),
 			*GetNameSafe(Inventory.Get()),
 			bCorruptionUnlocked ? TEXT("true") : TEXT("false"));
@@ -430,7 +472,7 @@ void UW_InventoryBag_Native::RefreshCorruptionLaneVisibility(bool bCorruptionUnl
 
 	const int32 PlayerLevel = Inventory.IsValid() ? Inventory->GetOwnerLevelForInventoryRules() : 1;
 	const int32 CorruptionSlots = Inventory.IsValid() ? Inventory->GetUnlockedEquipmentSlotCount(EEquipmentSlot::Corruption) : 0;
-	AJ_LOG(this, TEXT("[ItemBorder][CorruptionLane] Refresh Widget=%s Border=%s Level=%d CorruptionSlots=%d Unlocked=%s Visibility=%s"),
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder][CorruptionLane] Refresh Widget=%s Border=%s Level=%d CorruptionSlots=%d Unlocked=%s Visibility=%s"),
 		*GetNameSafe(this),
 		*GetNameSafe(CorruptionBorder),
 		PlayerLevel,
@@ -457,7 +499,7 @@ void UW_InventoryBag_Native::RefreshRegisteredEquipmentSlots()
 		if (SlotEntry.IsValid())
 		{
 			//AJ_LOG(this, TEXT("RefreshRegisteredEquipmentSlots -> %s"), *GetNameSafe(SlotEntry.Get()));
-			SlotEntry->BindInventory(Inventory.Get());
+			SlotEntry->RefreshFromInventory();
 		}
 	}
 }
@@ -496,7 +538,23 @@ UAeyerjiItemInstance* UW_InventoryBag_Native::ResolveItem(const FGuid& Id) const
 	return Inventory.IsValid() ? Inventory->FindItemById(Id) : nullptr;
 }
 
-void UW_InventoryBag_Native::DispatchRebuild()
+uint32 UW_InventoryBag_Native::BuildGridRenderSignature(const TArray<FInventoryItemGridData>& Placements) const
+{
+	const FIntPoint GridSize = Inventory.IsValid() ? Inventory->GetGridSize() : FIntPoint::ZeroValue;
+	uint32 Signature = HashCombineFast(GetTypeHash(GridSize.X), GetTypeHash(GridSize.Y));
+	Signature = HashCombineFast(Signature, GetTypeHash(Placements.Num()));
+	for (const FInventoryItemGridData& Placement : Placements)
+	{
+		Signature = HashCombineFast(Signature, GetTypeHash(Placement.ItemId));
+		Signature = HashCombineFast(Signature, GetTypeHash(Placement.TopLeft.X));
+		Signature = HashCombineFast(Signature, GetTypeHash(Placement.TopLeft.Y));
+		Signature = HashCombineFast(Signature, GetTypeHash(Placement.Size.X));
+		Signature = HashCombineFast(Signature, GetTypeHash(Placement.Size.Y));
+	}
+	return Signature;
+}
+
+void UW_InventoryBag_Native::DispatchRebuild(const bool bForce)
 {
 	if (!Inventory.IsValid())
 	{
@@ -506,7 +564,14 @@ void UW_InventoryBag_Native::DispatchRebuild()
 
 	TArray<FInventoryItemGridData> Placements;
 	Inventory->GetGridPlacements(Placements);
-	UE_LOG(LogTemp, Display, TEXT("[InventoryBag] RebuildGrid with %d placements"), Placements.Num());
+	const uint32 NewSignature = BuildGridRenderSignature(Placements);
+	if (!bForce && bHasGridRenderSignature && LastGridRenderSignature == NewSignature)
+	{
+		return;
+	}
+	LastGridRenderSignature = NewSignature;
+	bHasGridRenderSignature = true;
+	UE_LOG(LogTemp, VeryVerbose, TEXT("[InventoryBag] RebuildGrid with %d placements"), Placements.Num());
 	RebuildInventoryGrid(Placements);
 }
 
@@ -541,6 +606,10 @@ void UW_InventoryBag_Native::RebuildInventoryGrid_Implementation(const TArray<FI
 			continue;
 		}
 
+		Tile->BindInventory(Inventory.Get());
+		Tile->SetBorderMaterial(InventoryTileGenericBorderMaterial);
+		Tile->SetTileLayerPadding(InventoryTileIconPadding, InventoryTileBorderPadding);
+
 		UAeyerjiItemInstance* Item = Placement.ItemInstance ? Placement.ItemInstance.Get() : ResolveItem(Placement.ItemId);
 		if (Item)
 		{
@@ -553,13 +622,9 @@ void UW_InventoryBag_Native::RebuildInventoryGrid_Implementation(const TArray<FI
 			UE_LOG(LogTemp, Warning, TEXT("[InventoryBag] Missing item instance for %s"), *Placement.ItemId.ToString());
 			}
 
-			Tile->BindInventory(Inventory.Get());
-
 		const int32 SpanX = FMath::Max(1, Placement.Size.X);
 		const int32 SpanY = FMath::Max(1, Placement.Size.Y);
 		const FVector2D TileSize(CellSize.X * SpanX, CellSize.Y * SpanY);
-		Tile->SetBorderMaterial(InventoryTileGenericBorderMaterial);
-		Tile->SetTileLayerPadding(InventoryTileIconPadding, InventoryTileBorderPadding);
 		Tile->SetTileVisualSize(TileSize);
 
 		const FName TileContainerName = MakeUniqueObjectName(this, USizeBox::StaticClass(), TEXT("InventoryTileContainer"));
@@ -626,6 +691,7 @@ void UW_InventoryBag_Native::RebuildInventoryGrid_Implementation(const TArray<FI
 					continue;
 				}
 
+				EmptyTile->BindInventory(Inventory.Get());
 				EmptyTile->SetEmptySlotIcon(EmptyInventorySlotIcon);
 				EmptyTile->SetBorderMaterial(InventoryTileGenericBorderMaterial);
 				EmptyTile->SetTileLayerPadding(InventoryTileIconPadding, InventoryTileBorderPadding);

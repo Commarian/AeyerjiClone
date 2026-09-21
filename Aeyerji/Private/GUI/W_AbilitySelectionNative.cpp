@@ -10,10 +10,12 @@
 #include "AbilitySystemComponent.h"
 #include "Components/Button.h"
 #include "Components/SizeBox.h"
+#include "Components/TextBlock.h"
 #include "Components/UniformGridPanel.h"
 #include "Components/UniformGridSlot.h"
 #include "Engine/GameInstance.h"
 #include "GameFramework/PlayerController.h"
+#include "GUI/AeyerjiStringLibrary.h"
 #include "GUI/W_AbilityIconNative.h"
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
@@ -27,6 +29,12 @@ void UW_AbilitySelectionNative::NativeConstruct()
 	{
 		SaveBtn->OnClicked.RemoveDynamic(this, &UW_AbilitySelectionNative::HandleSaveClicked);
 		SaveBtn->OnClicked.AddDynamic(this, &UW_AbilitySelectionNative::HandleSaveClicked);
+		// The Designer owns the label's font and layout; resolve its localized
+		// text here so no raw string is baked into the widget.
+		if (UTextBlock* SaveLabel = Cast<UTextBlock>(SaveBtn->GetChildAt(0)))
+		{
+			SaveLabel->SetText(AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("AbilityPicker_Close")));
+		}
 	}
 
 	if (AAeyerjiPlayerState* PlayerState = ResolveOwningPlayerState())

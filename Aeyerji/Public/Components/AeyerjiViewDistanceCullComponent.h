@@ -93,8 +93,7 @@ protected:
 private:
 	struct FComponentVisibilityState
 	{
-		bool bCachedVisibility = false;
-		bool bOriginalVisible = true;
+		bool bCachedHiddenState = false;
 		bool bOriginalHiddenInGame = false;
 		bool bHiddenBySystem = false;
 	};

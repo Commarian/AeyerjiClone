@@ -2,6 +2,8 @@
 
 #include "Misc/AutomationTest.h"
 
+#include <limits>
+
 #include "Combat/AeyerjiMeleeDeterministicStrike.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -72,6 +74,49 @@ bool FAeyerjiPrimaryMeleeDeterministicStrikeTargetingPolicyTest::RunTest(const F
 		FAeyerjiMeleeDeterministicStrikePolicy::ShouldRefaceLockedTarget(-0.01f, 90.f));
 	TestFalse(TEXT("Target inside a 90-degree forward hemisphere does not request refacing."),
 		FAeyerjiMeleeDeterministicStrikePolicy::ShouldRefaceLockedTarget(0.01f, 90.f));
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiPrimaryMeleeArchetypeTimingTest,
+	"Aeyerji.Abilities.PrimaryMelee.ArchetypeTiming",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiPrimaryMeleeArchetypeTimingTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	// BuffRed tuning: base rate 1.0 with a 1.30 animation multiplier.
+	const float EffectiveRate = FAeyerjiMeleeDeterministicStrikePolicy::CalculateEffectiveMontagePlayRate(1.f, 1.3f);
+	TestTrue(TEXT("Animation multiplier scales the base montage rate."),
+		FMath::IsNearlyEqual(EffectiveRate, 1.3f, 0.0001f));
+
+	// Strike timing must use the same effective rate so impact stays aligned with the faster montage.
+	const float BuffRedImpactDelay = FAeyerjiMeleeDeterministicStrikePolicy::CalculateImpactDelay(0.12f, 0.05f, EffectiveRate);
+	TestTrue(TEXT("Deterministic strike timing follows the effective montage rate."),
+		FMath::IsNearlyEqual(BuffRedImpactDelay, 0.17f / 1.3f, 0.0001f));
+
+	// Default and degenerate multipliers preserve existing behavior (player and untuned enemies).
+	TestTrue(TEXT("Default multiplier keeps the base montage rate."),
+		FMath::IsNearlyEqual(FAeyerjiMeleeDeterministicStrikePolicy::CalculateEffectiveMontagePlayRate(1.5f, 1.f), 1.5f, 0.0001f));
+	TestTrue(TEXT("Zero multiplier falls back to the base montage rate."),
+		FMath::IsNearlyEqual(FAeyerjiMeleeDeterministicStrikePolicy::CalculateEffectiveMontagePlayRate(1.5f, 0.f), 1.5f, 0.0001f));
+	TestTrue(TEXT("Negative multiplier falls back to the base montage rate."),
+		FMath::IsNearlyEqual(FAeyerjiMeleeDeterministicStrikePolicy::CalculateEffectiveMontagePlayRate(1.5f, -2.f), 1.5f, 0.0001f));
+	TestTrue(TEXT("Non-finite multiplier falls back to the base montage rate."),
+		FMath::IsNearlyEqual(
+			FAeyerjiMeleeDeterministicStrikePolicy::CalculateEffectiveMontagePlayRate(1.5f, std::numeric_limits<float>::quiet_NaN()),
+			1.5f,
+			0.0001f));
+
+	// Cooldown override versus AttackSpeed-derived fallback.
+	TestTrue(TEXT("Positive cooldown override is used as-is."),
+		FMath::IsNearlyEqual(FAeyerjiMeleeDeterministicStrikePolicy::SanitizePrimaryAttackCooldownOverride(2.f), 2.f, 0.0001f));
+	TestEqual(TEXT("Zero cooldown override selects the AttackSpeed-derived fallback."),
+		FAeyerjiMeleeDeterministicStrikePolicy::SanitizePrimaryAttackCooldownOverride(0.f), 0.f);
+	TestEqual(TEXT("Negative cooldown override selects the AttackSpeed-derived fallback."),
+		FAeyerjiMeleeDeterministicStrikePolicy::SanitizePrimaryAttackCooldownOverride(-1.f), 0.f);
 
 	return true;
 }

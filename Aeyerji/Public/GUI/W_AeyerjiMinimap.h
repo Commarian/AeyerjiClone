@@ -7,6 +7,7 @@
 #include "W_AeyerjiMinimap.generated.h"
 
 class AActor;
+class UAeyerjiMinimapMapSubsystem;
 class UTexture2D;
 
 /** Cached local presentation data for one client-visible minimap actor. */
@@ -24,7 +25,7 @@ struct FAeyerjiTrackedMinimapMarker
 };
 
 /**
- * Local-only radar minimap with procedural placeholder art.
+ * Local-only north-up minimap with cached navmesh detail and procedural markers.
  * It reads actors already replicated to the owning client and never sends gameplay or networking requests.
  */
 UCLASS(Blueprintable)
@@ -40,6 +41,10 @@ public:
 	/** Returns the number of valid marker candidates currently cached for local rendering. */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Minimap")
 	int32 GetTrackedMarkerCount() const { return TrackedMarkers.Num(); }
+
+	/** Changes the displayed world radius without causing any world or texture recapture. */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Minimap")
+	void SetMapWorldRadius(float NewWorldRadius);
 
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
@@ -62,9 +67,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Range", meta=(ClampMin="0.05", UIMin="0.1", UIMax="2.0"))
 	float MarkerRefreshInterval = 0.25f;
 
-	/** Rotates world offsets so the owning pawn always points toward the top of the map. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Range")
-	bool bRotateWithPlayer = true;
+	/** Renders the one-time navmesh raster behind the minimap markers when it is ready. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Map Detail")
+	bool bShowMapDetail = true;
+
+	/** Tint and opacity applied to the generated navmesh map so markers remain easy to read. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Map Detail")
+	FLinearColor MapDetailTint = FLinearColor(0.62f, 0.68f, 0.72f, 0.88f);
+
+	/** Keeps the procedural scale grid visible over the generated map. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Map Detail")
+	bool bShowGridOverlay = true;
 
 	/** Automatically presents other Aeyerji player pawns as friendly markers. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Discovery")
@@ -94,7 +107,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Discovery")
 	bool bShowPointsOfInterest = true;
 
-	/** Viewport size of the native minimap placeholder. */
+	/** Viewport size of the native minimap. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Layout", meta=(ClampMin="64.0", UIMin="128.0", UIMax="512.0"))
 	FVector2D DisplaySize = FVector2D(220.f, 220.f);
 
@@ -112,7 +125,11 @@ protected:
 
 	/** Diameter used by the centered local-player direction marker. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style", meta=(ClampMin="4.0", UIMin="6.0", UIMax="32.0"))
-	float PlayerMarkerSize = 14.f;
+	float PlayerMarkerSize = 11.f;
+
+	/** Default diameter used by automatically discovered remote-player markers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style", meta=(ClampMin="2.0", UIMin="4.0", UIMax="32.0"))
+	float FriendlyPlayerMarkerSize = 8.f;
 
 	/** Diameter used by automatically discovered objective markers. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style", meta=(ClampMin="4.0", UIMin="6.0", UIMax="32.0"))
@@ -134,9 +151,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style")
 	FLinearColor GridColor = FLinearColor(0.10f, 0.48f, 0.58f, 0.28f);
 
-	/** Tint used by the owning player's centered direction marker. */
+	/** Soft drop shadow that separates the map from bright gameplay scenes. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style")
-	FLinearColor PlayerColor = FLinearColor(0.25f, 0.95f, 1.f, 1.f);
+	FLinearColor ShadowColor = FLinearColor(0.f, 0.f, 0.f, 0.58f);
+
+	/** Screen-space offset of the minimap drop shadow. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style", meta=(ClampMin="0.0", UIMin="0.0", UIMax="16.0"))
+	FVector2D ShadowOffset = FVector2D(4.f, 5.f);
+
+	/** Distinct local-player tint; remote players retain independent marker colors. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style")
+	FLinearColor PlayerColor = FLinearColor(1.f, 0.22f, 0.72f, 1.f);
 
 	/** Default tint used by remote friendly-player markers. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Aeyerji|Minimap|Style")
@@ -155,6 +180,7 @@ protected:
 	FLinearColor PointOfInterestColor = FLinearColor(0.72f, 0.38f, 1.f, 1.f);
 
 private:
+	UAeyerjiMinimapMapSubsystem* GetMapSubsystem() const;
 	bool IsMarkerTypeEnabled(EAeyerjiMinimapMarkerType MarkerType) const;
 	bool IsMarkerActorVisible(const FAeyerjiTrackedMinimapMarker& Marker) const;
 	FLinearColor ResolveMarkerColor(const FAeyerjiTrackedMinimapMarker& Marker) const;

@@ -14,6 +14,8 @@ class AEYERJI_API UAeyerjiRewardTuning : public UDataAsset
 {
     GENERATED_BODY()
 public:
+    static constexpr float DefaultTrashXPRewardMultiplier = 0.2f;
+
     /** Optional parent; child inherits values where override flags are false. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards")
     TObjectPtr<const UAeyerjiRewardTuning> Parent = nullptr;
@@ -50,4 +52,11 @@ public:
     /** Killer gets +X%; others get -X% */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards", meta=(ClampMin="0.0", EditCondition="bOverride_KillerBonusPercent"))
     float KillerBonusPercent = 1.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards|Overrides")
+    bool bOverride_TrashXPRewardMultiplier = false;
+
+    /** Multiplier applied after level/difficulty scaling to Enemy.Role.Mob rewards. Keep elites and bosses separately valuable. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Rewards", meta=(ClampMin="0.0", EditCondition="bOverride_TrashXPRewardMultiplier"))
+    float TrashXPRewardMultiplier = DefaultTrashXPRewardMultiplier;
 };

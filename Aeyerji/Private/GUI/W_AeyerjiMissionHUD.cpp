@@ -3,6 +3,7 @@
 #include "GUI/W_AeyerjiMissionHUD.h"
 
 #include "GUI/AeyerjiStringLibrary.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 #include "../../AeyerjiPlayerController.h"
 #include "Components/ProgressBar.h"
 #include "Components/TextBlock.h"
@@ -59,6 +60,27 @@ namespace
 			return FLinearColor(0.72f, 0.86f, 1.0f, 1.0f);
 		}
 	}
+}
+
+void UW_AeyerjiMissionHUD::NativeConstruct()
+{
+	Super::NativeConstruct();
+
+	// These optional bindings cover both the greater-rift objective panel and the
+	// survival defense panel. Styling them here keeps Blueprint layout and all
+	// replicated presentation hooks intact while every child HUD adopts the same kit.
+	UAeyerjiUIStyleLibrary::StyleMissionHeading(MapMissionDescript);
+	UAeyerjiUIStyleLibrary::StyleMissionHeading(MapMissionHeader);
+	UAeyerjiUIStyleLibrary::StyleMissionDifficulty(MapWorldTier);
+	UAeyerjiUIStyleLibrary::StyleMissionValue(Message);
+	UAeyerjiUIStyleLibrary::StyleMissionValue(MapProgressKills);
+	UAeyerjiUIStyleLibrary::StyleMissionProgressBar(MapProgressBar);
+	UAeyerjiUIStyleLibrary::StyleMissionProgressBar(MapTimerBar, /*bDefenseObjective=*/true);
+	UAeyerjiUIStyleLibrary::StyleMissionHeading(ObjectiveLabel);
+	UAeyerjiUIStyleLibrary::StyleMissionValue(ObjectiveHealthText);
+	UAeyerjiUIStyleLibrary::StyleMissionProgressBar(ObjectiveHPBar, /*bDefenseObjective=*/true);
+	UAeyerjiUIStyleLibrary::StyleMissionGold(GoldDeltaText, /*bDelta=*/true);
+	UAeyerjiUIStyleLibrary::StyleMissionGold(GoldTotalText);
 }
 
 void UW_AeyerjiMissionHUD::ApplyObjectiveState(const FAeyerjiObjectiveState& InObjectiveState)

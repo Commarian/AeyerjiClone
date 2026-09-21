@@ -5,8 +5,15 @@
 #include "AbilitySystemComponent.h"
 #include "Attributes/GE_Regen_Periodic.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "Components/BoxComponent.h"
+#include "Components/SphereComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/Pawn.h"
+#include "MouseNavBlueprintLibrary.h"
+#include "Inventory/AeyerjiLootPickup.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Inventory/AeyerjiPickupCollisionPolicy.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Items/InventoryComponent.h"
 #include "Items/ItemDefinition.h"
@@ -65,6 +72,114 @@ namespace
 		Definition->InventorySize = FIntPoint(1, 1);
 		return Definition;
 	}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiPickupCollisionPolicyTest,
+	"Aeyerji.Inventory.PickupCollisionPolicy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiPickupCollisionPolicyTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+
+	AActor* PickupOwner = NewObject<AActor>(GetTransientPackage());
+	USphereComponent* PickupVolume = NewObject<USphereComponent>(PickupOwner);
+	UBoxComponent* PresentationCollision = NewObject<UBoxComponent>(PickupOwner);
+	PickupOwner->AddInstanceComponent(PickupVolume);
+	PickupOwner->AddInstanceComponent(PresentationCollision);
+
+	PickupVolume->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	PresentationCollision->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+	PickupVolume->SetCanEverAffectNavigation(true);
+	PresentationCollision->SetCanEverAffectNavigation(true);
+
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(*PickupOwner, PickupVolume);
+
+	TestEqual(TEXT("Pickup volume overlaps Pawns for collection."),
+		PickupVolume->GetCollisionResponseToChannel(ECC_Pawn), ECR_Overlap);
+	TestEqual(TEXT("Pickup presentation ignores Pawns."),
+		PresentationCollision->GetCollisionResponseToChannel(ECC_Pawn), ECR_Ignore);
+	TestFalse(TEXT("Pickup volume cannot affect navigation."), PickupVolume->CanEverAffectNavigation());
+	TestFalse(TEXT("Pickup presentation cannot affect navigation."), PresentationCollision->CanEverAffectNavigation());
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiPickupGroundingTest,
+	"Aeyerji.CombatTest.Movement.PickupsAreNotGround",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiPickupGroundingTest::RunTest(const FString& Parameters)
+{
+	UWorld::InitializationValues Values;
+	Values.AllowAudioPlayback(false).CreatePhysicsScene(true).CreateNavigation(false)
+		.CreateAISystem(false).ShouldSimulatePhysics(false).SetTransactional(false);
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false, NAME_None, nullptr,
+		true, ERHIFeatureLevel::Num, &Values);
+	if (!TestNotNull(TEXT("Test world"), World)) { return false; }
+
+	AActor* Floor = World->SpawnActor<AActor>();
+	UBoxComponent* FloorBox = NewObject<UBoxComponent>(Floor);
+	Floor->AddInstanceComponent(FloorBox);
+	Floor->SetRootComponent(FloorBox);
+	FloorBox->SetBoxExtent(FVector(1000.f, 1000.f, 10.f));
+	FloorBox->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	FloorBox->SetCollisionObjectType(ECC_WorldStatic);
+	FloorBox->SetCollisionResponseToAllChannels(ECR_Block);
+	FloorBox->RegisterComponent();
+	Floor->SetActorLocation(FVector(0.f, 0.f, -10.f));
+
+	APawn* Pawn = World->SpawnActor<APawn>();
+	UCapsuleComponent* Capsule = NewObject<UCapsuleComponent>(Pawn);
+	Pawn->AddInstanceComponent(Capsule);
+	Pawn->SetRootComponent(Capsule);
+	Capsule->InitCapsuleSize(25.f, 80.f);
+	Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Capsule->RegisterComponent();
+
+	FVector Baseline;
+	TestTrue(TEXT("Bare floor resolves"), UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
+		World, FVector::ZeroVector, Pawn, Baseline, 300.f, 500.f, 0.f));
+
+	AAeyerjiLootPickup* Loot = World->SpawnActor<AAeyerjiLootPickup>(FVector(0.f, 0.f, 100.f), FRotator::ZeroRotator);
+	TestNotNull(TEXT("Native loot spawned"), Loot);
+	if (Loot)
+	{
+		// A queryable drop mesh above the floor, with the correct Pawn-ignore response.
+		UBoxComponent* DropMesh = NewObject<UBoxComponent>(Loot);
+		Loot->AddInstanceComponent(DropMesh);
+		DropMesh->SetBoxExtent(FVector(50.f));
+		DropMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		DropMesh->SetCollisionResponseToAllChannels(ECR_Block);
+		DropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		DropMesh->RegisterComponent();
+		DropMesh->SetWorldLocation(FVector(0.f, 0.f, 100.f));
+		for (ECollisionChannel ObjectType : { ECC_WorldDynamic, ECC_PhysicsBody, ECC_GameTraceChannel1 })
+		{
+			DropMesh->SetCollisionObjectType(ObjectType);
+			FVector WithLoot;
+			TestTrue(TEXT("Ground resolves through loot"), UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
+				World, FVector::ZeroVector, Pawn, WithLoot, 300.f, 500.f, 0.f));
+			TestTrue(TEXT("Loot does not raise character destination"), WithLoot.Equals(Baseline, 0.1f));
+			TestTrue(TEXT("Loot does not obstruct destination"),
+				UMouseNavBlueprintLibrary::IsTeleportLocationClear(World, Baseline, Pawn));
+		}
+		// Exercise visibility fallback with custom-channel terrain and loot above it.
+		FloorBox->SetCollisionObjectType(ECC_GameTraceChannel1);
+		FVector Fallback;
+		TestTrue(TEXT("Visibility fallback resolves through loot"), UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
+			World, FVector::ZeroVector, Pawn, Fallback, 300.f, 500.f, 0.f));
+		TestTrue(TEXT("Fallback preserves floor height"), Fallback.Equals(Baseline, 0.1f));
+		FloorBox->SetCollisionObjectType(ECC_WorldStatic);
+		DropMesh->SetCollisionObjectType(ECC_WorldDynamic);
+		DropMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+		TestFalse(TEXT("Real blocking geometry still obstructs destination"),
+			UMouseNavBlueprintLibrary::IsTeleportLocationClear(World, Baseline, Pawn));
+	}
+	World->DestroyWorld(false);
+	return true;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

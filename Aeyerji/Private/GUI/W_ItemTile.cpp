@@ -166,12 +166,19 @@ void UW_ItemTile::SetupEmptySlot()
 
 void UW_ItemTile::SetTileVisualSize(FVector2D InSize)
 {
-	TileVisualSize.X = FMath::Max(1.f, InSize.X);
-	TileVisualSize.Y = FMath::Max(1.f, InSize.Y);
+	const FVector2D NewSize(FMath::Max(1.f, InSize.X), FMath::Max(1.f, InSize.Y));
+	if (!TileVisualSize.Equals(NewSize))
+	{
+		TileVisualSize = NewSize;
+	}
 }
 
 void UW_ItemTile::SetEmptySlotIcon(UTexture2D* InIcon)
 {
+	if (EmptySlotIcon == InIcon)
+	{
+		return;
+	}
 	EmptySlotIcon = InIcon;
 	if (bIsPlaceholder)
 	{
@@ -182,12 +189,15 @@ void UW_ItemTile::SetEmptySlotIcon(UTexture2D* InIcon)
 void UW_ItemTile::SetBorderMaterial(UMaterialInterface* InMaterial)
 {
 	EnsureWidgetTree();
-	AJ_LOG(this, TEXT("[ItemBorder] GridTile SetBorderMaterial GenericMaterial=%s Item=%s Placeholder=%s"),
+	if (GenericBorderMaterial == InMaterial)
+	{
+		return;
+	}
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile SetBorderMaterial GenericMaterial=%s Item=%s Placeholder=%s"),
 		*GetNameSafe(InMaterial),
 		Item ? *Item->UniqueId.ToString() : TEXT("None"),
 		bIsPlaceholder ? TEXT("true") : TEXT("false"));
 	GenericBorderMaterial = InMaterial;
-	BorderDynamicMaterial = nullptr;
 	if (bIsPlaceholder || Item)
 	{
 		RefreshFromItem();
@@ -200,11 +210,15 @@ void UW_ItemTile::SetBorderMaterial(UMaterialInterface* InMaterial)
 
 void UW_ItemTile::SetTileLayerPadding(FMargin InIconPadding, FMargin InBorderPadding)
 {
+	if (IconLayerPadding == InIconPadding && BorderLayerPadding == InBorderPadding)
+	{
+		return;
+	}
 	IconLayerPadding = InIconPadding;
 	BorderLayerPadding = InBorderPadding;
 	EnsureWidgetTree();
 	ApplyLayerPadding();
-	AJ_LOG(this, TEXT("[ItemBorder] GridTile layer padding Icon=%s Border=%s"),
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile layer padding Icon=%s Border=%s"),
 		*FString::Printf(TEXT("L=%.2f T=%.2f R=%.2f B=%.2f"), IconLayerPadding.Left, IconLayerPadding.Top, IconLayerPadding.Right, IconLayerPadding.Bottom),
 		*FString::Printf(TEXT("L=%.2f T=%.2f R=%.2f B=%.2f"), BorderLayerPadding.Left, BorderLayerPadding.Top, BorderLayerPadding.Right, BorderLayerPadding.Bottom));
 }
@@ -373,7 +387,7 @@ void UW_ItemTile::RefreshFromItem()
 	{
 		IconImage->SetBrushFromTexture(EmptySlotIcon, false);
 		IconImage->SetColorAndOpacity(EmptySlotIconTint);
-		AJ_LOG(this, TEXT("[ItemBorder] GridTile placeholder generic border Item=None EmptyIcon=%s Material=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile placeholder generic border Item=None EmptyIcon=%s Material=%s"),
 			*GetNameSafe(EmptySlotIcon.Get()),
 			*GetNameSafe(GenericBorderMaterial));
 		RefreshBorderVisual(GenericBorderMaterial, FLinearColor::Transparent);
@@ -392,7 +406,7 @@ void UW_ItemTile::RefreshFromItem()
 	}
 
 	UMaterialInterface* SelectedBorderMaterial = GetBorderMaterialForItem();
-	AJ_LOG(this, TEXT("[ItemBorder] GridTile item border Item=%s Definition=%s Category=%d Rarity=%s RarityColor=%s Material=%s"),
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile item border Item=%s Definition=%s Category=%d Rarity=%s RarityColor=%s Material=%s"),
 		Item ? *Item->UniqueId.ToString() : TEXT("None"),
 		(Item && Item->Definition) ? *GetNameSafe(Item->Definition) : TEXT("None"),
 		(Item && Item->Definition) ? static_cast<int32>(Item->Definition->ItemCategory) : -1,
@@ -413,7 +427,7 @@ void UW_ItemTile::RefreshFromItem()
 	}
 	else
 	{
-		UE_LOG(LogTemp, Display, TEXT("[ItemTile] %s set icon %s for item %s"),
+		UE_LOG(LogTemp, VeryVerbose, TEXT("[ItemTile] %s set icon %s for item %s"),
 			*GetName(), *Icon->GetName(), Item ? *Item->UniqueId.ToString() : TEXT("None"));
 	}
 }
@@ -422,7 +436,7 @@ void UW_ItemTile::RefreshBorderVisual(UMaterialInterface* InBorderMaterial, cons
 {
 	if (!BorderImage)
 	{
-		AJ_LOG(this, TEXT("[ItemBorder] GridTile missing BorderImage Material=%s RarityColor=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile missing BorderImage Material=%s RarityColor=%s"),
 			*GetNameSafe(InBorderMaterial),
 			*RarityColor.ToString());
 		return;
@@ -430,37 +444,51 @@ void UW_ItemTile::RefreshBorderVisual(UMaterialInterface* InBorderMaterial, cons
 
 	if (InBorderMaterial)
 	{
-		BorderDynamicMaterial = UMaterialInstanceDynamic::Create(InBorderMaterial, this);
-		AJ_LOG(this, TEXT("[ItemBorder] GridTile created dynamic border material BaseMaterial=%s DynamicMaterial=%s"),
-			*GetNameSafe(InBorderMaterial),
-			*GetNameSafe(BorderDynamicMaterial));
+		if (!BorderDynamicMaterial || BorderDynamicMaterialSource != InBorderMaterial)
+		{
+			BorderDynamicMaterial = UMaterialInstanceDynamic::Create(InBorderMaterial, this);
+			BorderDynamicMaterialSource = InBorderMaterial;
+			bHasBorderVisualState = false;
+			AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile created dynamic border material BaseMaterial=%s DynamicMaterial=%s"),
+				*GetNameSafe(InBorderMaterial),
+				*GetNameSafe(BorderDynamicMaterial));
+		}
 
 		if (BorderDynamicMaterial)
 		{
-			BorderDynamicMaterial->SetVectorParameterValue(RarityColorParameterName, RarityColor);
-			AJ_LOG(this, TEXT("[ItemBorder] GridTile set dynamic material parameter DynamicMaterial=%s Param=%s Value=%s Placeholder=%s"),
-				*GetNameSafe(BorderDynamicMaterial),
-				*RarityColorParameterName.ToString(),
-				*RarityColor.ToString(),
-				bIsPlaceholder ? TEXT("true") : TEXT("false"));
-
-			BorderImage->SetBrushFromMaterial(BorderDynamicMaterial);
-			BorderImage->SetColorAndOpacity(FLinearColor::White);
-			BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+			if (!bHasBorderVisualState || !LastBorderRarityColor.Equals(RarityColor))
+			{
+				BorderDynamicMaterial->SetVectorParameterValue(RarityColorParameterName, RarityColor);
+				LastBorderRarityColor = RarityColor;
+			}
+			if (!bHasBorderVisualState || !bBorderVisualVisible)
+			{
+				BorderImage->SetBrushFromMaterial(BorderDynamicMaterial);
+				BorderImage->SetColorAndOpacity(FLinearColor::White);
+				BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+			}
+			bHasBorderVisualState = true;
+			bBorderVisualVisible = true;
 			return;
 		}
 
-		AJ_LOG(this, TEXT("[ItemBorder] GridTile failed to create dynamic border material BaseMaterial=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile failed to create dynamic border material BaseMaterial=%s"),
 			*GetNameSafe(InBorderMaterial));
 	}
 
-	AJ_LOG(this, TEXT("[ItemBorder] GridTile hiding border Placeholder=%s Material=%s Color=%s"),
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] GridTile hiding border Placeholder=%s Material=%s Color=%s"),
 		bIsPlaceholder ? TEXT("true") : TEXT("false"),
 		*GetNameSafe(InBorderMaterial),
 		*RarityColor.ToString());
-	BorderImage->SetBrushFromTexture(nullptr, false);
-	BorderImage->SetVisibility(ESlateVisibility::Collapsed);
-	BorderImage->SetColorAndOpacity(FLinearColor::White);
+	if (!bHasBorderVisualState || bBorderVisualVisible)
+	{
+		BorderImage->SetBrushFromTexture(nullptr, false);
+		BorderImage->SetVisibility(ESlateVisibility::Collapsed);
+		BorderImage->SetColorAndOpacity(FLinearColor::White);
+	}
+	bHasBorderVisualState = true;
+	bBorderVisualVisible = false;
+	LastBorderRarityColor = RarityColor;
 }
 
 UMaterialInterface* UW_ItemTile::GetBorderMaterialForItem() const
@@ -475,25 +503,25 @@ UMaterialInterface* UW_ItemTile::GetBorderMaterialForItem() const
 	case EItemCategory::Assault:
 		if (!AssaultBorderMaterial.IsNull())
 		{
-			return AssaultBorderMaterial.LoadSynchronous();
+			return AssaultBorderMaterial.Get() ? AssaultBorderMaterial.Get() : AssaultBorderMaterial.LoadSynchronous();
 		}
 		break;
 	case EItemCategory::Guard:
 		if (!GuardBorderMaterial.IsNull())
 		{
-			return GuardBorderMaterial.LoadSynchronous();
+			return GuardBorderMaterial.Get() ? GuardBorderMaterial.Get() : GuardBorderMaterial.LoadSynchronous();
 		}
 		break;
 	case EItemCategory::Flow:
 		if (!FlowBorderMaterial.IsNull())
 		{
-			return FlowBorderMaterial.LoadSynchronous();
+			return FlowBorderMaterial.Get() ? FlowBorderMaterial.Get() : FlowBorderMaterial.LoadSynchronous();
 		}
 		break;
 	case EItemCategory::Corruption:
 		if (!CorruptionBorderMaterial.IsNull())
 		{
-			return CorruptionBorderMaterial.LoadSynchronous();
+			return CorruptionBorderMaterial.Get() ? CorruptionBorderMaterial.Get() : CorruptionBorderMaterial.LoadSynchronous();
 		}
 		break;
 	default:

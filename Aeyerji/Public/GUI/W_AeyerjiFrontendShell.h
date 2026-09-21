@@ -10,6 +10,7 @@ class UButton;
 class UProgressBar;
 class UTextBlock;
 class UWidget;
+class UWidgetAnimation;
 class UWidgetSwitcher;
 
 /** Native event-driven contract that the existing W_MainMenu Blueprint should be reparented to later. */
@@ -91,6 +92,38 @@ private:
 	UPROPERTY(BlueprintReadOnly, meta=(BindWidgetOptional, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
 	TObjectPtr<UWidget> Page_PartyLobby;
 
+	/** Designer entrance stagger for the landing page. Randomly alternates with MenuOpenB. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> MenuOpen;
+
+	/** Mirrored landing entrance (descend stagger). Randomly alternates with MenuOpen. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> MenuOpenB;
+
+	/** Browser entrance, rise stagger. One of the pair is picked per page open. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> BrowserOpenA;
+
+	/** Browser entrance, mirrored descend in reverse order. One of the pair is picked per page open. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> BrowserOpenB;
+
+	/** Lobby entrance, rise stagger over roster cards and controls. One of the pair is picked per page open. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> LobbyOpenA;
+
+	/** Lobby entrance, scale-pop stagger. One of the pair is picked per page open. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> LobbyOpenB;
+
+	/** Scale pulse on Button_Ready, played when the local ready state flips. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> ReadyPulse;
+
+	/** Scale pulse on Button_Launch, played when launching becomes available. */
+	UPROPERTY(BlueprintReadOnly, Transient, meta=(BindWidgetAnim, AllowPrivateAccess="true"), Category="Aeyerji|Frontend|Presentation")
+	TObjectPtr<UWidgetAnimation> LaunchPulse;
+
 	UAeyerjiFrontendSubsystem* GetFrontendSubsystem() const;
 	bool HasOnlineParty() const;
 	UWidget* FindDesignerWidget(FName WidgetName) const;
@@ -100,10 +133,16 @@ private:
 	void ApplyNativeFrontendSnapshot(const FAeyerjiFrontendSnapshot& Snapshot);
 	void ApplyNativeLobbySnapshot(const FAeyerjiLobbySnapshot& Snapshot);
 	void ApplyLobbyMemberToSlot(int32 SlotIndex, const FAeyerjiLobbyMemberView& Member);
-	void ShowPage(UWidget* Page);
+	bool ShowPage(UWidget* Page);
 	void ShowLanding();
 	void ShowPartyBrowser();
-	void ShowPartyLobby();
+	void ShowPartyLobby(bool bForceReplay);
+	void PlayShellAnimation(UWidgetAnimation* Entrance, float PlaybackSpeed = 1.f);
+	void PlayLandingEntrance();
+	void PlayBrowserEntrance();
+	void PlayLobbyEntrance();
+	void BuildEntranceVariants();
+	UWidgetAnimation* PickVariant(const TArray<TObjectPtr<UWidgetAnimation>>& Variants) const;
 	void SetWidgetEnabled(FName WidgetName, bool bEnabled) const;
 	void SetWidgetVisibility(FName WidgetName, ESlateVisibility WidgetVisibility) const;
 	void SetWidgetText(FName WidgetName, const FText& Text) const;
@@ -154,6 +193,17 @@ private:
 
 	/** Avoids replaying a portal animation whenever an unchanged launching snapshot is republished. */
 	float LastPresentedLaunchTime = -1.f;
+
+	/** Tracks lobby button state so pulses fire only on flips, never on the first snapshot. */
+	bool bHasLobbyAnimState = false;
+	bool bLastLocalReady = false;
+	bool bLastLaunchEnabled = false;
+	int32 LastLobbyMemberCount = 0;
+
+	/** Entrance variant pools, rebuilt on construct from the bound animations above. */
+	TArray<TObjectPtr<UWidgetAnimation>> LandingEntrances;
+	TArray<TObjectPtr<UWidgetAnimation>> BrowserEntrances;
+	TArray<TObjectPtr<UWidgetAnimation>> LobbyEntrances;
 
 	void HandleFrontendSnapshot(const FAeyerjiFrontendSnapshot& Snapshot);
 	void HandleLobbySnapshot(const FAeyerjiLobbySnapshot& Snapshot);

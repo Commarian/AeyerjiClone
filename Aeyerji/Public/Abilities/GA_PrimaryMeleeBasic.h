@@ -13,6 +13,7 @@ class UAnimMontage;
 class UAbilityTask_PlayMontageAndWait;
 class UGameplayEffect;
 class AEnemyAIController;
+class UAeyerjiEnemyArchetypeComponent;
 struct FTimerHandle;
 
 UENUM(BlueprintType)
@@ -27,9 +28,12 @@ enum class EPrimaryMeleePhase : uint8
 
 /**
  * Primary melee ability driven by AttackSpeed.
- * - Plays a montage at a rate derived from AttackSpeed / BaselineAttackSpeed
+ * - Plays a montage at a rate derived from AttackSpeed / BaselineAttackSpeed,
+ *   multiplied by the avatar's archetype AttackAnimationPlayRateMultiplier when present
  * - Runs timed cone traces during the strike window (no animation notifies required)
  * - Processes hit results on the server and applies damage/cooldown
+ * - Uses the archetype PrimaryAttackCooldownSeconds override when positive,
+ *   otherwise the shared AttackSpeed-derived cooldown effect
  */
 UCLASS()
 class AEYERJI_API UGA_PrimaryMeleeBasic : public UGA_AeyerjiBase
@@ -268,7 +272,7 @@ private:
 
     bool bCompletionBroadcasted;
 
-    bool StartMontage(float AttackSpeed, UAnimMontage* MontageToPlay);
+    bool StartMontage(float EffectivePlayRate, UAnimMontage* MontageToPlay);
     void StopMontageTask();
     void ArmMontageFailsafe(UAnimMontage* Montage, float PlayRate);
     void ClearMontageFailsafeTimer();
@@ -326,6 +330,12 @@ private:
     void CaptureDeterministicStrikeShape(AActor* InstigatorActor);
     bool IsDeadForDeterministicStrike(AActor* TargetActor) const;
     float CalculateMontagePlayRate(float AttackSpeed) const;
+    /** Combines the AttackSpeed-derived base rate with the avatar's archetype animation multiplier. */
+    float ResolveEffectiveMontagePlayRate(float AttackSpeed, const FGameplayAbilityActorInfo* ActorInfo) const;
+    /** Returns the avatar's fixed primary-attack cooldown override, or 0 when the attribute path should be used. */
+    float ResolvePrimaryAttackCooldownOverride(const FGameplayAbilityActorInfo* ActorInfo) const;
+    /** Returns the avatar's enemy archetype component, or nullptr for non-archetype owners such as the player. */
+    const UAeyerjiEnemyArchetypeComponent* ResolveArchetypeComponent(const FGameplayAbilityActorInfo* ActorInfo) const;
     void ApplyAilmentsToTargetData(const FGameplayAbilityTargetDataHandle& TargetData);
     bool ResolveAilmentMagnitudes(const FGameplayTag& AilmentTypeTag, float& OutAmount, float& OutDuration) const;
 

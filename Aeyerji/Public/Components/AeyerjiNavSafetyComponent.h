@@ -29,6 +29,22 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Aeyerji|Navigation")
 	bool RecoverOwnerToSafeNav();
 
+	/**
+	 * Suspends off-nav checks while the owner is parked in the enemy pool.
+	 * The pool jail is intentionally off-nav, so the tick must be off and any
+	 * pending off-nav timer discarded before the pooled teleport happens.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Navigation")
+	void SuspendForPooledReuse();
+
+	/**
+	 * Reseeds the last-safe location at the checkout transform and resumes checks.
+	 * Call after teleporting a pooled enemy back into the world so recovery never
+	 * observes the jail transform and never drags a live enemy back to a stale spot.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Aeyerji|Navigation")
+	void ResumeAfterPooledCheckout(const FVector& SafeLocation, const FRotator& SafeRotation);
+
 	/** Returns the last safe grounded location tracked by this component. */
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Navigation")
 	FVector GetLastSafeNavLocation() const { return LastSafeNavLocation; }

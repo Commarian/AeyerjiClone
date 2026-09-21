@@ -11,6 +11,37 @@
 #include "CollisionShape.h"
 #include "CollisionQueryParams.h"
 #include "NavigationPath.h"
+#include "Engine/OverlapResult.h"
+
+namespace
+{
+	// Object queries do not honor the target's Pawn response. Pickup triggers and
+	// drop meshes must remain queryable for interaction without becoming ground.
+	bool BlocksCharacter(const UPrimitiveComponent* Component)
+	{
+		return Component && Component->GetCollisionResponseToChannel(ECC_Pawn) == ECR_Block;
+	}
+
+	template <typename TraceFunction>
+	bool TraceCharacterGround(FHitResult& Hit, FCollisionQueryParams& Params, TraceFunction Trace)
+	{
+		while (Trace())
+		{
+			const UPrimitiveComponent* Component = Hit.GetComponent();
+			if (BlocksCharacter(Component))
+			{
+				return Hit.IsValidBlockingHit();
+			}
+			if (!Component)
+			{
+				return false;
+			}
+			// Retry past the rejected component so a pickup cannot hide the floor below it.
+			Params.AddIgnoredComponent(Component);
+		}
+		return false;
+	}
+}
 
 bool UMouseNavBlueprintLibrary::IsTeleportLocationClear(
         const UObject* WorldContextObject,
@@ -62,12 +93,18 @@ bool UMouseNavBlueprintLibrary::IsTeleportLocationClear(
 	ObjectParams.AddObjectTypesToQuery(ECC_PhysicsBody);
 	ObjectParams.AddObjectTypesToQuery(ECC_Pawn);
 
-	return !World->OverlapAnyTestByObjectType(
+	TArray<FOverlapResult> Overlaps;
+	World->OverlapMultiByObjectType(
+		Overlaps,
 		Location,
 		FQuat::Identity,
 		ObjectParams,
 		CapsuleShape,
 		Params);
+	return !Overlaps.ContainsByPredicate([](const FOverlapResult& Overlap)
+	{
+		return BlocksCharacter(Overlap.GetComponent());
+	});
 }
 
 EMouseNavResult UMouseNavBlueprintLibrary::GetMouseNavContext(
@@ -522,10 +559,12 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 	FHitResult GroundHit;
 	bool bHitGround = false;
 
+	bHitGround = TraceCharacterGround(GroundHit, QueryParams, [&]()
+	{
 	if (bHasCapsule)
 	{
 		const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight);
-		bHitGround = World->SweepSingleByObjectType(
+		return World->SweepSingleByObjectType(
 			GroundHit,
 			TraceStart,
 			TraceEnd,
@@ -536,16 +575,19 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 	}
 	else
 	{
-		bHitGround = World->LineTraceSingleByObjectType(GroundHit, TraceStart, TraceEnd, ObjectParams, QueryParams);
+		return World->LineTraceSingleByObjectType(GroundHit, TraceStart, TraceEnd, ObjectParams, QueryParams);
 	}
+	});
 
 	if (!bHitGround || !GroundHit.IsValidBlockingHit())
 	{
 		// Fallback to visibility trace in case the project uses custom object channels for terrain.
+		bHitGround = TraceCharacterGround(GroundHit, QueryParams, [&]()
+		{
 		if (bHasCapsule)
 		{
 			const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight);
-			bHitGround = World->SweepSingleByChannel(
+			return World->SweepSingleByChannel(
 				GroundHit,
 				TraceStart,
 				TraceEnd,
@@ -556,8 +598,9 @@ bool UMouseNavBlueprintLibrary::ResolveGroundedTeleportLocation(
 		}
 		else
 		{
-			bHitGround = World->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
+			return World->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
 		}
+		});
 
 		if (!bHitGround || !GroundHit.IsValidBlockingHit())
 		{

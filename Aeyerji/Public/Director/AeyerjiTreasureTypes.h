@@ -3,11 +3,9 @@
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
 #include "GameplayTagContainer.h"
-#include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Items/ItemTypes.h"
 
 class AAeyerjiRewardPresentationActor;
-class UItemDefinition;
 
 #include "AeyerjiTreasureTypes.generated.h"
 
@@ -27,7 +25,7 @@ struct AEYERJI_API FAeyerjiTreasureLootProfileRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Rift|Treasure|Loot")
 	bool bEnabled = true;
 
-	/** Loot source used to select a pool in the global AeyerjiLootTable. Leave empty only when a fixed item is set. */
+	/** Loot source used to select the real item definitions in a matching global AeyerjiLootTable pool. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Rift|Treasure|Loot")
 	FGameplayTag SourceTag;
 
@@ -38,18 +36,6 @@ struct AEYERJI_API FAeyerjiTreasureLootProfileRow : public FTableRowBase
 	/** Number of loot-service rolls requested for this chest. The underlying source pool still controls which items are eligible. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Rift|Treasure|Loot", meta=(ClampMin="1"))
 	int32 DropsPerChest = 1;
-
-	/** Optional random +/- adjustment to Drops Per Chest. Keep zero for a fixed count. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Rift|Treasure|Loot", AdvancedDisplay, meta=(ClampMin="0"))
-	int32 DropCountVariance = 0;
-
-	/** Optional hand-authored item for a curated or test chest. It must be eligible for the current player level or the chest is skipped with a warning. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Rift|Treasure|Loot", AdvancedDisplay, meta=(DisplayName="Fixed Item Definition"))
-	TObjectPtr<UItemDefinition> ForcedItemDefinition = nullptr;
-
-	/** Pickup ownership rule after release. The normal Rift setting is Drop Only For Instigator. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Rift|Treasure|Loot", AdvancedDisplay)
-	EItemDropDistributionMode DropMode = EItemDropDistributionMode::DropOnlyForInstigator;
 };
 
 /**

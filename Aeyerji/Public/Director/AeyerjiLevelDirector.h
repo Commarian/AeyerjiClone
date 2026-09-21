@@ -875,6 +875,10 @@ public:
 	UFUNCTION(BlueprintPure, Category="Director|Rift")
 	FAeyerjiRiftActivitySnapshot GetActiveRiftActivity() const { return ActiveRiftActivity; }
 
+	/** Returns true while this director owns an active Rift whose enemy level must remain frozen. */
+	UFUNCTION(BlueprintPure, Category="Director|Rift")
+	bool IsRiftRunActive() const { return bRunActive && bHasActiveRiftActivity; }
+
 	/** Returns the immutable tier-derived monster-power snapshot for the active Rift. */
 	UFUNCTION(BlueprintPure, Category="Director|Rift")
 	FAeyerjiRiftMonsterPowerSnapshot GetActiveRiftMonsterPower() const { return ActiveRiftMonsterPower; }

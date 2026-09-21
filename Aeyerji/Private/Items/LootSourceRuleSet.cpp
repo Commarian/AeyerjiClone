@@ -1,5 +1,7 @@
 #include "Items/LootSourceRuleSet.h"
 
+#include "Items/ItemDefinition.h"
+
 namespace
 {
 	constexpr int32 MaxLootSourceRules = 1024;
@@ -42,7 +44,7 @@ FLootContext ULootSourceRuleSet::ResolveContext(const FLootContext& BaseContext,
 	{
 		Result.PityGroup = ResolvedProfile.PityGroup;
 	}
-	if (IsValid(ResolvedProfile.ForcedItemDefinition))
+	if (IsValid(ResolvedProfile.ForcedItemDefinition.Get()))
 	{
 		Result.ForcedItemDefinition = ResolvedProfile.ForcedItemDefinition;
 	}

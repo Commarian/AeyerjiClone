@@ -156,6 +156,12 @@ private:
 
 	bool bApplyingDefaultPotionSlot = false;
 
+	// A world timer continues checking readiness even when Slate stops ticking a collapsed widget.
+	void UpdateTransitionVisibility();
+	FTimerHandle VisibilityTimerHandle;
+	bool bBarHiddenForTransition = false;
+	ESlateVisibility SavedBarVisibility = ESlateVisibility::Visible;
+
 	UPROPERTY()
 	FAeyerjiAbilityTooltipData LastAbilityTooltipData;
 

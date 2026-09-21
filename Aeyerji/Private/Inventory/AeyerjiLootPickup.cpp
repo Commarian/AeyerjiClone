@@ -1,6 +1,9 @@
 // AeyerjiLootPickup.cpp
 
 #include "Inventory/AeyerjiLootPickup.h"
+#include "Inventory/AeyerjiPickupCollisionPolicy.h"
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetLayoutLibrary.h"
 
 #include "Aeyerji/AeyerjiPlayerController.h"
 #include "Inventory/AeyerjiInventoryBPFL.h"
@@ -14,6 +17,7 @@
 #include "Components/TextRenderComponent.h"
 #include "Components/WidgetComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 #include "GameFramework/WorldSettings.h"
 #include "NiagaraComponent.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
@@ -63,6 +67,9 @@ namespace
 	constexpr float MaxDropVelocity = 1000000.f;
 	constexpr float MaxPhysicsDamping = 1000.f;
 	constexpr float MaxPhysicsFriction = 1000.f;
+	// Match the inventory spawn resolver: loot must stay with the encounter that created it,
+	// even when a broad emergency NavMesh query finds a valid point on another nav island.
+	constexpr float MaxPickupLootDropNavDisplacement = 1000.f;
 	constexpr int32 MaxAdditionalHighlightMeshes = 64;
 
 	float ResolveFiniteFloat(const float Value, const float Fallback)
@@ -137,6 +144,20 @@ namespace
 			return false;
 		}
 
+		const float NavDisplacementSquared = FVector::DistSquared2D(
+			NavResult.GroundedLocation,
+			DesiredLocation);
+		if (NavDisplacementSquared > FMath::Square(MaxPickupLootDropNavDisplacement))
+		{
+			UE_LOG(LogAeyerji, Warning,
+				TEXT("[LootPickup][DropMotion] Rejected remote nav fallback Actor=%s Desired=%s Resolved=%s Distance2D=%.1f; preserving local drop fallback"),
+				*GetNameSafe(WorldContextObject),
+				*DesiredLocation.ToCompactString(),
+				*NavResult.GroundedLocation.ToCompactString(),
+				FMath::Sqrt(NavDisplacementSquared));
+			return false;
+		}
+
 		OutLocation = NavResult.GroundedLocation;
 		return true;
 	}
@@ -160,9 +181,13 @@ AAeyerjiLootPickup::AAeyerjiLootPickup()
 
 	PreviewMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PreviewMesh"));
 	PreviewMesh->SetupAttachment(Root);
-	// Use the pickup volume for interaction traces; keep the mesh collision-free unless physics handoff is active.
-	PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	// Keep the visible item directly cursor-queryable on clients from its first rendered frame.
+	// The pickup sphere remains the forgiving interaction volume and the server enables physics separately.
+	PreviewMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 	PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block); // interact
+	PreviewMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	PreviewMesh->SetGenerateOverlapEvents(false);
 	PreviewMesh->SetCanEverAffectNavigation(false);
 	PreviewMesh->SetIsReplicated(true);
@@ -635,6 +660,11 @@ void AAeyerjiLootPickup::OnConstruction(const FTransform& Transform)
 	SetLabelFromItem();
 	RefreshOutlineTargets();
 	RefreshRarityVisuals();
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(
+		*this,
+		PickupSphere,
+		ActivePickupVolume,
+		ActiveAutoPickupVolume);
 }
 
 void AAeyerjiLootPickup::BeginPlay()
@@ -699,6 +729,11 @@ void AAeyerjiLootPickup::BeginPlay()
 	SetLabelFromItem();
 	RefreshOutlineTargets();
 	RefreshRarityVisuals();
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(
+		*this,
+		PickupSphere,
+		ActivePickupVolume,
+		ActiveAutoPickupVolume);
 
 	AEYERJI_LOOT_DROP_VERBOSE(TEXT("BeginPlay init - Loc=%s Authority=%d NetMode=%d Replicates=%d EnableDrop=%d AutoDrop=%d"),
 		*GetActorLocation().ToString(),
@@ -1469,6 +1504,11 @@ bool AAeyerjiLootPickup::StartPhysicsHandoff(bool bForceImmediate /*=false*/)
 	PreviewMesh->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
 	PreviewMesh->SetCollisionResponseToChannel(ECC_WorldDynamic, ECR_Block);
 	PreviewMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	// The mesh is the only exact representation of the pickup while it is detached and simulating.
+	// Let cursor traces hit it immediately instead of waiting for the replicated actor/sphere to catch up.
+	PreviewMesh->SetCollisionResponseToChannel(InteractTraceChannel, ECR_Block);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	PreviewMesh->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	PreviewMesh->SetCollisionObjectType(ECC_PhysicsBody);
 	PreviewMesh->BodyInstance.bUseCCD = true;
 	PreviewMesh->SetGenerateOverlapEvents(false);
@@ -1615,8 +1655,11 @@ void AAeyerjiLootPickup::ApplyDefinitionMesh()
 		PreviewMesh->SetStaticMesh(NewMesh);
 		PreviewMesh->SetVisibility(true, true);
 		PreviewMesh->SetHiddenInGame(false);
-		PreviewMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		PreviewMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 		PreviewMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
+		PreviewMesh->SetCollisionResponseToChannel(InteractTraceChannel, ECR_Block);
+		PreviewMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+		PreviewMesh->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 
 		FVector SafeOffset = IsFiniteVector(ItemDefinition->WorldMeshOffset)
 			? ItemDefinition->WorldMeshOffset.BoundToBox(FVector(-MaxDropDistance), FVector(MaxDropDistance))
@@ -2038,7 +2081,7 @@ bool AAeyerjiLootPickup::CanPawnLoot(const AAeyerjiPlayerController* Controller)
 	if (ReservedPlayerState && Controller->PlayerState != ReservedPlayerState)
 	{
 		AJ_LOG(this, TEXT("[Interaction][InventoryPickup] Reserved pickup rejected Controller=%s ReservedPlayer=%s"),
-			*GetNameSafe(Controller), *GetNameSafe(ReservedPlayerState));
+			*GetNameSafe(Controller), *GetNameSafe(ReservedPlayerState.Get()));
 		return false;
 	}
 
@@ -2333,6 +2376,69 @@ bool AAeyerjiLootPickup::IsHoverTargetComponent(const UPrimitiveComponent* Compo
 	return Component->GetOwner() == this;
 }
 
+bool AAeyerjiLootPickup::HitTestLootVisual(APlayerController* Controller, const FVector& RayStart,
+	const FVector& RayEnd, FVector& OutPoint, bool& bOutLabel) const
+{
+	bOutLabel = false;
+	if (!Controller || IsHidden() || IsActorBeingDestroyed() || !GetActorEnableCollision()) { return false; }
+	auto IsVisible = [](const UPrimitiveComponent* Component)
+	{
+		return Component && Component->IsVisible() && !Component->bHiddenInGame;
+	};
+	if (IsVisible(LootLabel))
+	{
+		if (const UUserWidget* Widget = LootLabel->GetUserWidgetObject(); Widget && Widget->IsVisible())
+		{
+			const FGeometry& Geometry = Widget->GetCachedGeometry();
+			if (Geometry.GetLocalSize().X > 0.f && Geometry.GetLocalSize().Y > 0.f
+				&& Geometry.IsUnderLocation(UWidgetLayoutLibrary::GetMousePositionOnPlatform()))
+			{
+				OutPoint = LootLabel->GetComponentLocation();
+				bOutLabel = true;
+				return true;
+			}
+		}
+	}
+	// Text fallback has no widget hit geometry; test its projected rendered bounds.
+	if (IsVisible(LootLabelText) && !LootLabelText->Text.IsEmpty())
+	{
+		FVector2D Mouse;
+		FBox2D ScreenBounds(ForceInit);
+		const FBox Bounds = LootLabelText->Bounds.GetBox();
+		bool bProjected = Controller->GetMousePosition(Mouse.X, Mouse.Y);
+		for (int32 Corner = 0; Corner < 8 && bProjected; ++Corner)
+		{
+			FVector2D Screen;
+			const FVector Point((Corner & 1) ? Bounds.Max.X : Bounds.Min.X,
+				(Corner & 2) ? Bounds.Max.Y : Bounds.Min.Y, (Corner & 4) ? Bounds.Max.Z : Bounds.Min.Z);
+			bProjected = Controller->ProjectWorldLocationToScreen(Point, Screen);
+			ScreenBounds += Screen;
+		}
+		if (bProjected && ScreenBounds.IsInside(Mouse))
+		{
+			OutPoint = LootLabelText->GetComponentLocation();
+			bOutLabel = true;
+			return true;
+		}
+	}
+	if (IsVisible(PreviewMesh) && PreviewMesh->GetStaticMesh())
+	{
+		// Settled loot deliberately disables mesh collision. Use the mesh's oriented
+		// local bounds rather than its much larger pickup sphere for click intent.
+		FVector Min, Max;
+		PreviewMesh->GetLocalBounds(Min, Max);
+		const FTransform Transform = PreviewMesh->GetComponentTransform();
+		const FVector Start = Transform.InverseTransformPosition(RayStart);
+		const FVector End = Transform.InverseTransformPosition(RayEnd);
+		if (FMath::LineBoxIntersection(FBox(Min, Max), Start, End, End - Start))
+		{
+			OutPoint = PreviewMesh->Bounds.Origin;
+			return true;
+		}
+	}
+	return false;
+}
+
 void AAeyerjiLootPickup::ConfigureVolumes()
 {
 	UShapeComponent* RequestedPickupVolume = IsValid(PickupVolumeOverride) && PickupVolumeOverride->GetOwner() == this
@@ -2384,6 +2490,14 @@ void AAeyerjiLootPickup::ConfigureVolumes()
 	{
 		BoundAutoPickupVolume->OnComponentBeginOverlap.AddUniqueDynamic(this, &AAeyerjiLootPickup::HandlePickupSphereOverlap);
 	}
+
+	// Blueprint children may replace the pickup volumes or add visual primitives with blocking presets.
+	// Keep only the intentional pickup volumes overlapping Pawns; all presentation stays non-blocking.
+	Aeyerji::PickupCollision::EnforceNonBlockingPawnPolicy(
+		*this,
+		PickupSphere,
+		ActivePickupVolume,
+		ActiveAutoPickupVolume);
 }
 
 void AAeyerjiLootPickup::SanitizeRuntimeSettings()

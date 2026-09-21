@@ -8,6 +8,7 @@
 #include "AeyerjiCharacter.h"
 #include "AeyerjiGameplayTags.h"
 #include "CharacterStatsLibrary.h"
+#include "Enemy/EnemyParentNative.h"
 #include "GAS/GE_DamagePhysical.h"
 #include "Animation/AnimMontage.h"
 #include "Engine/OverlapResult.h"
@@ -84,6 +85,8 @@ void UGA_AeyerjiTargetedEffectBase::ActivateAbility(const FGameplayAbilitySpecHa
 
 	const float ImpactDelay = CalculateAbilityImpactDelay(Config);
 	BeginAbilityCastPresentation(*ActorInfo, Config, ImpactDelay);
+
+	OnTargetedAbilityCastStartedNative(*ActorInfo, Config, TargetLocation, ImpactDelay);
 
 	if (ImpactDelay <= KINDA_SMALL_NUMBER)
 	{
@@ -215,6 +218,14 @@ void UGA_AeyerjiTargetedEffectBase::ExecuteTargetedImpact(
 	OnTargetedAbilityAppliedNative(*ActorInfo, Config, ValidTargets, TargetLocation);
 	BP_OnTargetedAbilityApplied(ValidTargets, TargetLocation);
 	EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
+}
+
+void UGA_AeyerjiTargetedEffectBase::OnTargetedAbilityCastStartedNative(
+	const FGameplayAbilityActorInfo& ActorInfo,
+	const FAeyerjiAbilityResolvedConfig& Config,
+	FVector TargetLocation,
+	float ImpactDelaySeconds) const
+{
 }
 
 void UGA_AeyerjiTargetedEffectBase::OnTargetedAbilityAppliedNative(
@@ -433,6 +444,17 @@ bool UGA_AeyerjiTargetedEffectBase::IsTargetAllowed(const FGameplayAbilityActorI
 	if (Target == Avatar)
 	{
 		return Config.TargetTeam == EAeyerjiAbilityTargetTeam::Self || Config.TargetTeam == EAeyerjiAbilityTargetTeam::Friendly || Config.TargetTeam == EAeyerjiAbilityTargetTeam::Any;
+	}
+
+	// Dormant pooled or revealing enemies are excluded from every present and future
+	// targeted ability (Meteor, GravitonPull, ...) through this single choke point.
+	// Self-targeting above is unaffected: this only filters other actors.
+	if (const AEnemyParentNative* EnemyTarget = Cast<AEnemyParentNative>(Target))
+	{
+		if (!EnemyTarget->IsEncounterCombatActive())
+		{
+			return false;
+		}
 	}
 
 	switch (Config.TargetTeam)

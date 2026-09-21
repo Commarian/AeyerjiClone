@@ -14,6 +14,7 @@
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "GAS/GE_DamagePhysical.h"
 #include "Interaction/AeyerjiInteractable.h"
+#include "Inventory/AeyerjiInventoryBPFL.h"
 #include "Inventory/AeyerjiRewardPresentationActor.h"
 #include "Items/ItemDefinition.h"
 #include "Progression/AeyerjiLevelingComponent.h"
@@ -54,8 +55,10 @@ namespace
 	constexpr int32 MaxRiftTreasureSimulationRuns = 100000;
 	constexpr float MaxRiftTreasureDistance = 1000000.f;
 	constexpr int32 MaxRiftTreasureDropsPerChest = 64;
-	constexpr int32 MaxRiftTreasureDropCountVariance = 64;
 	constexpr float RiftTreasurePresentationLifeSpanAfterRelease = 10.f;
+	// Keep released pickups clear of the chest mesh. Loot spawning snaps vertically to the ground,
+	// so this must be a horizontal offset rather than only lifting the pickup above the chest.
+	constexpr float RiftTreasureLootReleaseDistance = 160.f;
 
 	bool IsFiniteRiftTreasureVector(const FVector& Value)
 	{
@@ -160,20 +163,11 @@ namespace
 			return false;
 		}
 
-		if (Profile.ForcedItemDefinition && !IsValid(Profile.ForcedItemDefinition))
+		if (!Profile.SourceTag.IsValid())
 		{
 			if (OutFailureReason)
 			{
-				*OutFailureReason = TEXT("Fixed Item Definition is no longer a valid asset.");
-			}
-			return false;
-		}
-
-		if (!Profile.SourceTag.IsValid() && !IsValid(Profile.ForcedItemDefinition))
-		{
-			if (OutFailureReason)
-			{
-				*OutFailureReason = TEXT("Configure a Source Tag or a Fixed Item Definition.");
+				*OutFailureReason = TEXT("Configure a Source Tag for a global loot-table pool.");
 			}
 			return false;
 		}
@@ -185,11 +179,8 @@ namespace
 	{
 		FLootMultiDropConfig Config;
 		Config.TotalBaseDrops = FMath::Clamp(Profile.DropsPerChest, 1, MaxRiftTreasureDropsPerChest);
-		// A Rift chest must never turn a legal positive drop count into zero solely because of variance.
-		Config.TotalVariance = FMath::Clamp(
-			Profile.DropCountVariance,
-			0,
-			FMath::Min(MaxRiftTreasureDropCountVariance, Config.TotalBaseDrops - 1));
+		// Rift treasure rows use a fixed count; item chance and selection live in the source pool.
+		Config.TotalVariance = 0;
 		Config.bRequireTotalUnique = false;
 		Config.bShuffleBuckets = false;
 		Config.UniquenessRetryCount = 0;
@@ -1339,7 +1330,6 @@ FLootContext AAeyerjiLevelDirector::BuildRiftTreasureLootContext(
 	RuntimeContext.PlayerLevel = GetCurrentPlayerLevel();
 	RuntimeContext.WorldTier = GetEffectiveWorldTier();
 	RuntimeContext.SourceTag = Profile.SourceTag;
-	RuntimeContext.ForcedItemDefinition = Profile.ForcedItemDefinition;
 	RuntimeContext.MinimumRarity = Profile.MinimumRarity;
 	RuntimeContext.DifficultyScale = GetDifficultyScale();
 	RuntimeContext.RewardQualityMultiplier = FMath::Clamp(
@@ -1487,22 +1477,6 @@ bool AAeyerjiLevelDirector::SpawnRiftTreasuresForRun(
 		}
 
 		const FLootContext LootContext = BuildRiftTreasureLootContext(*LootProfile, PlayerActor);
-		if (const UItemDefinition* const FixedItem = LootProfile->ForcedItemDefinition.Get())
-		{
-			const int32 RequiredLevel = FixedItem->GetEffectiveRequiredLevel();
-			if (LootContext.PlayerLevel < RequiredLevel)
-			{
-				UE_LOG(LogAeyerji, Warning,
-					TEXT("[Treasure] Skipped point %s because fixed item %s in loot-profile row %s requires level %d but the Rift player is level %d."),
-					*GetNameSafe(Point),
-					*GetNameSafe(FixedItem),
-					*DescribeRiftTreasureLootProfileRow(LootProfileRow),
-					RequiredLevel,
-					LootContext.PlayerLevel);
-				continue;
-			}
-		}
-
 		const FLootMultiDropConfig MultiDropConfig = BuildRiftTreasureMultiDropConfig(*LootProfile);
 		TArray<FLootDropResult> LootResults;
 		if (!LootService->RollMultiDrop(LootContext, MultiDropConfig, LootResults)
@@ -1524,12 +1498,11 @@ bool AAeyerjiLevelDirector::SpawnRiftTreasuresForRun(
 		if (LootResults.IsEmpty())
 		{
 			UE_LOG(LogAeyerji, Warning,
-				TEXT("[Treasure] Skipped empty reward Point=%s ProfileRow=%s Source=%s Rolled=%d Usable=0 FixedItem=%s. Check the source pool's drop gates and item eligibility."),
+				TEXT("[Treasure] Skipped empty reward Point=%s ProfileRow=%s Source=%s Rolled=%d Usable=0. Check the source pool's item definitions, drop gates, and item eligibility."),
 				*GetNameSafe(Point),
 				*DescribeRiftTreasureLootProfileRow(LootProfileRow),
 				*LootContext.SourceTag.ToString(),
-				RolledResultCount,
-				*GetNameSafe(LootProfile->ForcedItemDefinition));
+				RolledResultCount);
 			continue;
 		}
 		if (LootResults.Num() != RolledResultCount)
@@ -1562,12 +1535,24 @@ bool AAeyerjiLevelDirector::SpawnRiftTreasuresForRun(
 
 		Chest->SetInteractionNavigationAnchor(Candidate.SelectionCandidate.NavigationAnchor);
 		Chest->SetSnapPresentationToGroundOnInitialize(false);
+		FVector LootReleaseDirection =
+			(Candidate.SelectionCandidate.NavigationAnchor - Chest->GetActorLocation()).GetSafeNormal2D();
+		if (LootReleaseDirection.IsNearlyZero())
+		{
+			LootReleaseDirection = Chest->GetActorForwardVector().GetSafeNormal2D();
+		}
+		if (LootReleaseDirection.IsNearlyZero())
+		{
+			LootReleaseDirection = FVector::ForwardVector;
+		}
+		const FVector LootReleaseOffset = LootReleaseDirection * RiftTreasureLootReleaseDistance;
 		Chest->InitializeReward(
 			LootResults,
-			LootProfile->DropMode,
+			// Rift treasure is always a personal, server-authoritative reward; source pools only choose its contents.
+			EItemDropDistributionMode::DropOnlyForInstigator,
 			LootContext.SourceTag,
 			PlayerActor,
-			FVector::ZeroVector,
+			LootReleaseOffset,
 			RiftTreasurePresentationLifeSpanAfterRelease);
 		Chest->ConfigureTreasureAutomation(
 			RiftTreasureSpawnConfig.bEnableAutoOpen,

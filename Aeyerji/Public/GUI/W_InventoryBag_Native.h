@@ -15,6 +15,7 @@ class UW_EquipmentSlot;
 class UWidget;
 class UTexture2D;
 class UMaterialInterface;
+class URichTextBlock;
 
 /** Native logic for the replicated inventory bag grid. */
 UCLASS()
@@ -66,6 +67,7 @@ public:
 
 protected:
 	virtual void NativeConstruct() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 	virtual void NativeDestruct() override;
 
 	/** Designers can override this in BP to fully control how tiles are laid out. */
@@ -101,6 +103,18 @@ protected:
 	/** Optional Corruption lane container; hidden until Corruption unlocks at level 50. */
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UWidget> CorruptionBorder = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<URichTextBlock> OffenseHeading = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<URichTextBlock> MagicHeading = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<URichTextBlock> DefenseHeading = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<URichTextBlock> CorruptionHeading = nullptr;
 
 	/** Tile widget class; defaults to the native item tile. */
 	UPROPERTY(EditAnywhere, Category = "Aeyerji|UI")
@@ -140,7 +154,8 @@ private:
 	TWeakObjectPtr<UAeyerjiInventoryComponent> Inventory;
 	TWeakObjectPtr<APlayerParentNative> BoundPlayer;
 
-	void DispatchRebuild();
+	void DispatchRebuild(bool bForce = false);
+	uint32 BuildGridRenderSignature(const TArray<FInventoryItemGridData>& Placements) const;
 	UAeyerjiItemInstance* ResolveItem(const FGuid& Id) const;
 
 	/** Subscribe to player inventory events. */
@@ -171,4 +186,6 @@ private:
 	FAeyerjiItemTooltipData LastTooltipData;
 
 	TWeakObjectPtr<UWidget> ActiveTooltipSource;
+	uint32 LastGridRenderSignature = 0;
+	bool bHasGridRenderSignature = false;
 };

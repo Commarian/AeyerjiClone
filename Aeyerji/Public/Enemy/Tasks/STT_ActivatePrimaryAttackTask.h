@@ -55,6 +55,8 @@ private:
     UPROPERTY(Transient)
     bool bLoggedPrimarySpecSnapshot = false;
     UPROPERTY(Transient)
+    bool bRecordedInvalidTarget = false;
+    UPROPERTY(Transient)
     float ObservedPrimaryActiveStartTime = -1.f;
 
     FGameplayAbilitySpecHandle ObservedPrimarySpecHandle;

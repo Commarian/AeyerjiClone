@@ -1,5 +1,6 @@
 // File: Source/Aeyerji/Private/Attributes/AeyerjiAttributeSet.cpp
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "AeyerjiCharacter.h"
 #include "Net/UnrealNetwork.h"
 #include "GameplayEffectExtension.h"
 #include "AbilitySystemComponent.h"
@@ -9,8 +10,16 @@
 #include "Attributes/AeyerjiStatTuning.h"
 #include "GAS/AeyerjiGameplayEffectContext.h"
 #include "GAS/ExecCalc_DamagePhysical.h"
+#include "GAS/GE_AeyerjiHealInstant.h"
 #include "GAS/GE_Stagger.h"
+#include "Attributes/GE_Regen_Periodic.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
+#include "UObject/Package.h"
+
+const FName UAeyerjiAttributeSet::HealingSourcePotion(TEXT("Potion"));
+const FName UAeyerjiAttributeSet::HealingSourcePassiveRegen(TEXT("PassiveRegen"));
+const FName UAeyerjiAttributeSet::HealingSourceLifeSteal(TEXT("LifeSteal"));
+const FName UAeyerjiAttributeSet::HealingSourceGameplayEffect(TEXT("GameplayEffect"));
 
 namespace
 {
@@ -382,6 +391,22 @@ void UAeyerjiAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribut
 }
 
 /* ---------------- Zero-HP detection ---------------- */
+bool UAeyerjiAttributeSet::PreGameplayEffectExecute(FGameplayEffectModCallbackData& Data)
+{
+    bTrackingHPGameplayEffectExecute = false;
+    if (!Super::PreGameplayEffectExecute(Data))
+    {
+        return false;
+    }
+
+    bTrackingHPGameplayEffectExecute = Data.EvaluatedData.Attribute == GetHPAttribute();
+    if (bTrackingHPGameplayEffectExecute)
+    {
+        HPBeforeGameplayEffectExecute = FMath::Max(0.f, AttributeFiniteOrDefault(GetHP()));
+    }
+    return true;
+}
+
 void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data)
 {
     Super::PostGameplayEffectExecute(Data);
@@ -412,9 +437,53 @@ void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCal
     }
     else if (Data.EvaluatedData.Attribute == GetHPAttribute())
     {
+        // Direct-HP effects bypass the IncomingDamage boundary above. Discard any HP change
+        // for dormant pooled enemies so a parked pawn can never die (and grant loot or
+        // objective progress) while out of play. Checkout restores vitals authoritatively.
+        if (const AAeyerjiCharacter* HPCharacter = Cast<AAeyerjiCharacter>(GetOwningActor()))
+        {
+            if (HPCharacter->ShouldIgnoreIncomingDamage())
+            {
+                if (bTrackingHPGameplayEffectExecute)
+                {
+                    SetHP(HPBeforeGameplayEffectExecute);
+                }
+                bTrackingHPGameplayEffectExecute = false;
+                return;
+            }
+        }
         // Final clamp in case the incoming GE pushed us below zero.
 		const float SafeHPMax = AttributeMaximum(GetHPMax(), 1.f);
 		SetHP(FMath::Clamp(AttributeFiniteOrDefault(GetHP()), 0.f, SafeHPMax));
+
+        const float HealingReceived = bTrackingHPGameplayEffectExecute
+            ? FMath::Max(0.f, GetHP() - HPBeforeGameplayEffectExecute)
+            : 0.f;
+        if (HealingReceived > KINDA_SMALL_NUMBER)
+        {
+            const UGameplayEffect* EffectDefinition = Data.EffectSpec.Def;
+            FName SourceType = HealingSourceGameplayEffect;
+            const FString EffectPackageName = EffectDefinition && EffectDefinition->GetPackage()
+                ? EffectDefinition->GetPackage()->GetName()
+                : FString();
+            if (EffectDefinition
+                && (EffectDefinition->IsA<UGE_AeyerjiHealInstant>()
+                    || EffectPackageName.StartsWith(TEXT("/Game/Abilities/Potions/"))))
+            {
+                SourceType = HealingSourcePotion;
+            }
+            else if (EffectDefinition && EffectDefinition->IsA<UGE_Regen_Periodic>())
+            {
+                SourceType = HealingSourcePassiveRegen;
+            }
+
+            const FGameplayEffectContextHandle Context = Data.EffectSpec.GetContext();
+            NotifyHealingReceived(
+                Context.GetOriginalInstigator(),
+                HealingReceived,
+                SourceType,
+                Context.GetSourceObject() ? Context.GetSourceObject() : const_cast<UGameplayEffect*>(EffectDefinition));
+        }
 
         if (!bIsDead && GetHP() <= 0.f)
         {
@@ -433,6 +502,28 @@ void UAeyerjiAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModCal
 		SetXP(FMath::Clamp(AttributeFiniteOrDefault(GetXP()), 0.f, SafeXPMax));
     }
 
+    bTrackingHPGameplayEffectExecute = false;
+
+}
+
+void UAeyerjiAttributeSet::NotifyHealingReceived(
+    AActor* Instigator,
+    const float HealingReceived,
+    const FName HealingSourceType,
+    UObject* SourceObject)
+{
+    AActor* Recipient = GetOwningActor();
+    if (!Recipient || !Recipient->HasAuthority() || !FMath::IsFinite(HealingReceived) || HealingReceived <= KINDA_SMALL_NUMBER)
+    {
+        return;
+    }
+
+    OnHealingReceived.Broadcast(
+        Recipient,
+        Instigator,
+        HealingReceived,
+        HealingSourceType.IsNone() ? HealingSourceGameplayEffect : HealingSourceType,
+        SourceObject);
 }
 
 void UAeyerjiAttributeSet::HandleIncomingDamage(const FGameplayEffectModCallbackData& Data)
@@ -456,6 +547,23 @@ void UAeyerjiAttributeSet::HandleIncomingDamage(const FGameplayEffectModCallback
 	FAeyerjiDamageResult* Result = AeyerjiContext ? &AeyerjiContext->GetMutableDamageResult() : nullptr;
 
 	const float HPBeforeDamage = FMath::Max(0.f, AttributeFiniteOrDefault(GetHP()));
+	if (const AAeyerjiCharacter* TargetCharacter = Cast<AAeyerjiCharacter>(TargetActor))
+	{
+		// Dormant pooled enemies reject GAS damage here: CanBeDamaged only guards TakeDamage,
+		// so without this a lingering DoT or direct effect could kill an enemy while parked.
+		if (TargetCharacter->ShouldIgnoreIncomingDamage())
+		{
+			if (Result)
+			{
+				Result->FinalDamage = 0.f;
+				Result->bWasFatal = false;
+				Result->StaggerDamage = 0.f;
+				Result->bTriggeredStagger = false;
+			}
+			return;
+		}
+	}
+
 	if (bIsDead || HPBeforeDamage <= KINDA_SMALL_NUMBER)
 	{
 		if (Result)
@@ -503,6 +611,14 @@ void UAeyerjiAttributeSet::HandleIncomingDamage(const FGameplayEffectModCallback
         if (Healing > KINDA_SMALL_NUMBER)
         {
             SourceASC->ApplyModToAttributeUnsafe(GetHPAttribute(), EGameplayModOp::Additive, Healing);
+            if (UAeyerjiAttributeSet* SourceAttributes = const_cast<UAeyerjiAttributeSet*>(SourceASC->GetSet<UAeyerjiAttributeSet>()))
+            {
+                SourceAttributes->NotifyHealingReceived(
+                    SourceActor,
+                    Healing,
+                    HealingSourceLifeSteal,
+                    ContextHandle.GetSourceObject());
+            }
         }
     }
 

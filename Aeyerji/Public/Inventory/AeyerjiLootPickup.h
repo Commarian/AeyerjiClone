@@ -101,6 +101,10 @@ public:
 
 	bool IsHoverTargetComponent(const UPrimitiveComponent* Component) const;
 
+	/** Tests visible loot geometry/labels, never the collection radius; works during drop physics and after settling. */
+	bool HitTestLootVisual(APlayerController* Controller, const FVector& RayStart, const FVector& RayEnd,
+		FVector& OutPoint, bool& bOutLabel) const;
+
 	/** Reserves this pickup for one authoritative PlayerState; all other manual/auto pickup attempts are rejected. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Loot|Ownership")
 	void ReserveForPlayerState(APlayerState* PlayerState);

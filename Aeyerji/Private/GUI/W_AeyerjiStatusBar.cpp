@@ -13,6 +13,7 @@
 #include "Kismet/KismetMathLibrary.h"
 #include "Components/TextBlock.h"
 #include "GUI/AeyerjiStringLibrary.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
 #include "TimerManager.h"
 
@@ -274,6 +275,17 @@ void UW_AeyerjiStatusBar::NativeOnInitialized()
 {
     Super::NativeOnInitialized();
 
+    // Floating bars use a cheap shared Slate treatment. The player HUD has no
+    // OverlaySizeBox and keeps its dedicated foreground presentation.
+    if (OverlaySizeBox)
+    {
+        UAeyerjiUIStyleLibrary::StyleCompactStatusBar(HealthBar);
+        UAeyerjiUIStyleLibrary::StyleCompactStatusBar(HealthBar_Ghost);
+        UAeyerjiUIStyleLibrary::StyleCompactStatusBar(ManaBar);
+        UAeyerjiUIStyleLibrary::StyleCompactStatusBar(ManaBar_Ghost);
+        UAeyerjiUIStyleLibrary::StyleFloatingStatusText(LevelText);
+    }
+
     // Start from a deterministic full state before ASC binding/replication catches up.
     HealthTarget = HealthMain = HealthGhost = 1.f;
     ManaTarget = ManaMain = ManaGhost = 1.f;
@@ -441,9 +453,24 @@ void UW_AeyerjiStatusBar::OnMaxXPChanged(const FOnAttributeChangeData& /*Data*/)
     UpdateXPLabel();
 }
 
-void UW_AeyerjiStatusBar::OnLevelChanged(const FOnAttributeChangeData& /*Data*/)
+void UW_AeyerjiStatusBar::OnLevelChanged(const FOnAttributeChangeData& Data)
 {
     UpdateLevelLabel();
+
+    // Both values convert through the shared rounding/clamp rule so the comparison matches
+    // the displayed level. Fractional or out-of-range attribute noise that does not change the
+    // gameplay level, initial binds, and level decreases never reach the presentation hook.
+    const int32 OldLevel = UAeyerjiDifficultySettings::FloatToGameplayLevel(Data.OldValue);
+    const int32 NewLevel = UAeyerjiDifficultySettings::FloatToGameplayLevel(Data.NewValue);
+    if (NewLevel > OldLevel)
+    {
+        HandleLevelAdvanced(OldLevel, NewLevel);
+    }
+}
+
+void UW_AeyerjiStatusBar::HandleLevelAdvanced(int32 /*OldLevel*/, int32 /*NewLevel*/)
+{
+    // Intentionally empty: only player-facing subclasses present level-ups.
 }
 
 void UW_AeyerjiStatusBar::OnHPRegenChanged(const FOnAttributeChangeData& /*Data*/)

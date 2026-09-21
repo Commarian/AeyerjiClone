@@ -3,6 +3,7 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemGlobals.h"
 #include "AeyerjiGameplayTags.h"
+#include "Enemy/EnemyParentNative.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/WorldSettings.h"
 
@@ -135,12 +136,45 @@ APawn* UAeyerjiNavSafetyComponent::GetOwnerPawn() const
 	return Cast<APawn>(GetOwner());
 }
 
+void UAeyerjiNavSafetyComponent::SuspendForPooledReuse()
+{
+	SetComponentTickEnabled(false);
+	OffNavStartTime = -1.0;
+}
+
+void UAeyerjiNavSafetyComponent::ResumeAfterPooledCheckout(const FVector& SafeLocation, const FRotator& SafeRotation)
+{
+	if (!SafeLocation.ContainsNaN())
+	{
+		LastSafeNavLocation = SafeLocation;
+		LastSafeNavRotation = SafeRotation;
+		if (UWorld* World = GetWorld())
+		{
+			LastSafeNavTime = World->GetTimeSeconds();
+		}
+	}
+
+	OffNavStartTime = -1.0;
+	SetComponentTickEnabled(true);
+}
+
 bool UAeyerjiNavSafetyComponent::IsOwnerRecoverable() const
 {
 	const APawn* Pawn = GetOwnerPawn();
 	if (!Pawn || !Pawn->HasAuthority())
 	{
 		return false;
+	}
+
+	// Pooled and revealing enemies are fully dormant by contract. The pool jail is
+	// intentionally off-nav, so recovery must never "rescue" a parked enemy back
+	// into the playable space, even if its tick was left enabled by mistake.
+	if (const AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(Pawn))
+	{
+		if (!Enemy->IsEncounterCombatActive())
+		{
+			return false;
+		}
 	}
 
 	if (Pawn->ActorHasTag(AeyerjiTags::State_Dead.GetTag().GetTagName()))

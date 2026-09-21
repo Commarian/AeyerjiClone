@@ -102,7 +102,7 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward")
 	bool ReleaseStoredLoot(AActor* Activator = nullptr);
 
-	/** Releases stored loot at an explicit transform. Authority only. */
+	/** Releases stored loot at an explicit transform. Rift treasure preserves its authored horizontal LootReleaseOffset clearance. Authority only. */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="Aeyerji|Reward")
 	bool ReleaseStoredLootAtTransform(const FTransform& ReleaseTransform, AActor* Activator = nullptr);
 
@@ -148,7 +148,7 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Aeyerji|Reward|Interaction")
 	TObjectPtr<class USphereComponent> InteractionSphere;
 
-	/** Server-side distance guard for player-controller release requests. Set to 0 to allow any distance. */
+	/** Shared client-approach and server-validation distance. Zero or invalid values use the safe 350 cm default. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Reward|Interaction", meta=(ClampMin="0.0", Units="cm"))
 	float ReleaseInteractionRadius = 350.f;
 
@@ -299,6 +299,7 @@ private:
 	bool bInitialized = false;
 
 	/** Runtime-only Rift automation; disabled by default so existing reward presentation behavior is unchanged. */
+	bool bTreasureRuntimeConfigured = false;
 	bool bTreasureAutoOpenEnabled = false;
 	bool bTreasureAutoOpenRequestPending = false;
 	bool bTreasureAutoOpenRequiresMaxCharacterLevel = false;

@@ -20,6 +20,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AeyerjiCharacter.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Components/BoxComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Navigation/AeyerjiNavSafetyLibrary.h"
@@ -350,7 +351,7 @@ namespace
 		FAeyerjiNavSafetyResult NavResult;
 		if (!UAeyerjiNavSafetyLibrary::ResolveSafeNavLocationForPawn(Pawn, DesiredLocation, Pawn, NavParams, NavResult))
 		{
-			MOVE_LOG(Warning,
+			MOVE_LOG(Verbose,
 				TEXT("Objective destination nav resolve FAILED. Pawn=%s Target=%s Requested=%s FailureReason=%s ProjectionExtent=%s SearchRadius=%.1f SearchStep=%.1f"),
 				*GetNameSafe(Pawn),
 				*GetNameSafe(TargetActor),
@@ -385,7 +386,7 @@ namespace
 			FVector MoveLocation = FVector::ZeroVector;
 			if (!MoveToAttackRangeTask_GetObjectiveMoveLocation(Pawn, TargetActor, DesiredSurfaceDistance, MoveLocation))
 			{
-				MOVE_LOG(Warning,
+				MOVE_LOG(Verbose,
 					TEXT("Move request skipped: no objective move location. AI=%s Pawn=%s Target=%s DesiredSurfaceDistance=%.1f AcceptMoveRadius=%.1f"),
 					*GetNameSafe(AI),
 					*GetNameSafe(Pawn),
@@ -442,8 +443,31 @@ USTT_MoveToAttackRangeTask::USTT_MoveToAttackRangeTask(const FObjectInitializer&
 	bShouldCallTick = true;
 }
 
+bool USTT_MoveToAttackRangeTask::IsMoveRequestBackoffActive(const UWorld* World) const
+{
+	return World && World->GetTimeSeconds() + UE_DOUBLE_SMALL_NUMBER < NextMoveRequestWorldTime;
+}
+
+float USTT_MoveToAttackRangeTask::RecordMoveRequestFailure(const UWorld* World)
+{
+	++ConsecutiveMoveRequestFailures;
+	const float InitialDelay = FMath::Max(0.05f, MoveFailureInitialBackoffSeconds);
+	const float MaximumDelay = FMath::Max(InitialDelay, MoveFailureMaximumBackoffSeconds);
+	const int32 Exponent = FMath::Clamp(ConsecutiveMoveRequestFailures - 1, 0, 8);
+	const float Delay = FMath::Min(MaximumDelay, InitialDelay * FMath::Pow(2.f, static_cast<float>(Exponent)));
+	NextMoveRequestWorldTime = World ? World->GetTimeSeconds() + static_cast<double>(Delay) : 0.0;
+	return Delay;
+}
+
+void USTT_MoveToAttackRangeTask::ResetMoveRequestBackoff()
+{
+	NextMoveRequestWorldTime = 0.0;
+	ConsecutiveMoveRequestFailures = 0;
+}
+
 EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition)
 {
+	ResetMoveRequestBackoff();
 	AAIController* AI = Cast<AAIController>(Context.GetOwner());
 	APawn* Pawn = AI ? AI->GetPawn() : nullptr;
 	if (!AI || !Pawn)
@@ -465,11 +489,14 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 	if (EnemyAI)
 	{
 		EnemyAI->RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
-		TargetActor = EnemyAI->GetTargetActor();
+		if (EnemyAI->EnsureCurrentTargetIsLive())
+		{
+			TargetActor = EnemyAI->GetTargetActor();
+		}
 	}
 	if (!TargetActor)
 	{
-		MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [EnterState] Missing TargetActor. AI=%s Pawn=%s AIClass=%s"),
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [EnterState] Missing TargetActor. AI=%s Pawn=%s AIClass=%s"),
 			*GetNameSafe(AI),
 			*GetNameSafe(Pawn),
 			AI ? *AI->GetClass()->GetName() : TEXT("None"));
@@ -550,12 +577,15 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::EnterState(FStateTreeExecutionCo
 	MOVE_SNAPSHOT(TEXT("EnterState-AfterMoveTo"), AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius);
 	if (Result == EPathFollowingRequestResult::Failed)
 	{
-		MOVE_LOG(Warning, TEXT("Move request FAILED from EnterState. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
-		return EStateTreeRunStatus::Failed;
+		const float RetryDelay = RecordMoveRequestFailure(Pawn->GetWorld());
+		MOVE_LOG(Verbose, TEXT("Move request failed from EnterState. Pawn=%s Target=%s RetryIn=%.2fs"),
+			*GetNameSafe(Pawn), *GetNameSafe(TargetActor), RetryDelay);
+		return EStateTreeRunStatus::Running;
 	}
+	ResetMoveRequestBackoff();
 	if (Result == EPathFollowingRequestResult::AlreadyAtGoal)
 	{
-		MOVE_LOG(Warning, TEXT("Move request returned AlreadyAtGoal from EnterState. Distance=%.1f AcceptRadius=%.1f. This typically means acceptance radius is too large or goal location is considered reached."),
+		MOVE_LOG(Verbose, TEXT("Move request returned AlreadyAtGoal from EnterState. Distance=%.1f AcceptRadius=%.1f. This typically means acceptance radius is too large or goal location is considered reached."),
 			EnterDistance,
 			AcceptMoveRadius);
 	}
@@ -569,7 +599,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 	APawn* Pawn = AI ? AI->GetPawn() : nullptr;
 	if (!AI || !Pawn)
 	{
-		MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] Missing AI/Pawn. Owner=%s AI=%s Pawn=%s"),
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [Tick] Missing AI/Pawn. Owner=%s AI=%s Pawn=%s"),
 			*GetNameSafe(Context.GetOwner()),
 			*GetNameSafe(AI),
 			*GetNameSafe(Pawn));
@@ -588,12 +618,15 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 	{
 		const AActor* PreviousTargetActor = EnemyAI->GetTargetActor();
 		bRetargeted = EnemyAI->RefreshDefenseObjectiveTarget(/*bSendTargetAcquiredEvent=*/false, /*bStopCurrentMovement=*/false);
-		TargetActor = EnemyAI->GetTargetActor();
+		if (EnemyAI->EnsureCurrentTargetIsLive())
+		{
+			TargetActor = EnemyAI->GetTargetActor();
+		}
 		bRetargeted = bRetargeted && PreviousTargetActor != TargetActor;
 	}
 	if (!TargetActor)
 	{
-		MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] Missing TargetActor. AI=%s Pawn=%s"), *GetNameSafe(AI), *GetNameSafe(Pawn));
+		MOVE_LOG(Verbose, TEXT("MoveToAttackRangeTask: [Tick] Missing TargetActor. AI=%s Pawn=%s"), *GetNameSafe(AI), *GetNameSafe(Pawn));
 		return EStateTreeRunStatus::Failed;
 	}
 
@@ -622,6 +655,10 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 	{
 		// Target arbitration can switch between player and defense objective while this task is running.
 		// Re-issue immediately so path-following does not keep walking toward the old target until it idles.
+		if (IsMoveRequestBackoffActive(Pawn->GetWorld()))
+		{
+			return EStateTreeRunStatus::Running;
+		}
 		AI->StopMovement();
 		const EPathFollowingRequestResult::Type Result = MoveToAttackRangeTask_RequestMove(
 			AI,
@@ -631,9 +668,12 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 			AcceptMoveRadius);
 		if (Result == EPathFollowingRequestResult::Failed)
 		{
-			MOVE_LOG(Warning, TEXT("Move request FAILED after retarget. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
-			return EStateTreeRunStatus::Failed;
+			const float RetryDelay = RecordMoveRequestFailure(Pawn->GetWorld());
+			MOVE_LOG(Verbose, TEXT("Move request failed after retarget. Pawn=%s Target=%s RetryIn=%.2fs"),
+				*GetNameSafe(Pawn), *GetNameSafe(TargetActor), RetryDelay);
+			return EStateTreeRunStatus::Running;
 		}
+		ResetMoveRequestBackoff();
 		return EStateTreeRunStatus::Running;
 	}
 
@@ -646,7 +686,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 
 			if (AcceptMoveRadius <= 0.f)
 			{
-				MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] AcceptMoveRadius is <= 0 (AttackRange=%.1f Reduction=%.1f). This can make the AI try to reach the exact target location."),
+				MOVE_LOG(VeryVerbose, TEXT("MoveToAttackRangeTask: [Tick] AcceptMoveRadius is <= 0 (AttackRange=%.1f Reduction=%.1f). This can make the AI try to reach the exact target location."),
 					AttackRange,
 					AttackRangeReduction);
 			}
@@ -675,7 +715,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 					CrowdFollowing && CrowdManager && CrowdManager->IsAgentValid(CrowdFollowing);
 				const FNavPathSharedPtr CurrentPath = PFC ? PFC->GetPath() : nullptr;
 
-				MOVE_LOG(Warning,
+				MOVE_LOG(VeryVerbose,
 					TEXT("MoveToAttackRangeTask: [Tick] PathFollowing=Moving but speed is ~0. AI=%s Pawn=%s PathFollowingClass=%s RequestId=%u PathElement=%d PathValid=%d PathPoints=%d CrowdState=%d CrowdAgentValid=%d RVO=%d MoveActive=%d MoveTick=%d MoveRegistered=%d Mode=%d Updated=%s Capsule=%s CapsuleCollision=%d RootPhysics=%d MeshPhysics=%d MaxWalkSpeed=%.1f Velocity=%s Acceleration=%s LastRequestedVelocity=%s RootedTagCount=%d Distance=%.1f"),
 					*GetNameSafe(AI),
 					*GetNameSafe(Pawn),
@@ -691,7 +731,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 					CharacterMovement && CharacterMovement->IsComponentTickEnabled() ? 1 : 0,
 					CharacterMovement && CharacterMovement->IsRegistered() ? 1 : 0,
 					CharacterMovement ? static_cast<int32>(CharacterMovement->MovementMode) : -1,
-					CharacterMovement ? *GetNameSafe(CharacterMovement->UpdatedComponent) : TEXT("None"),
+					CharacterMovement ? *GetNameSafe(CharacterMovement->UpdatedComponent.Get()) : TEXT("None"),
 					*GetNameSafe(Capsule),
 					Capsule ? static_cast<int32>(Capsule->GetCollisionEnabled()) : -1,
 					Capsule && Capsule->IsSimulatingPhysics() ? 1 : 0,
@@ -707,11 +747,11 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 			const UMovementComponent* MovementComponent = Pawn->GetMovementComponent();
 			if (!MovementComponent)
 			{
-				MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] Pawn has no MovementComponent. MoveToActor will not physically move it."));
+				MOVE_LOG(VeryVerbose, TEXT("MoveToAttackRangeTask: [Tick] Pawn has no MovementComponent. MoveToActor will not physically move it."));
 			}
 			else if (!MovementComponent->IsActive())
 			{
-				MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] MovementComponent is inactive (%s)."), *MovementComponent->GetClass()->GetName());
+				MOVE_LOG(VeryVerbose, TEXT("MoveToAttackRangeTask: [Tick] MovementComponent is inactive (%s)."), *MovementComponent->GetClass()->GetName());
 			}
 
 			if (const ACharacter* CharacterPawn = Cast<ACharacter>(Pawn))
@@ -720,7 +760,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 				{
 					if (CharacterMovement->MaxWalkSpeed <= 1.f)
 					{
-						MOVE_LOG(Warning, TEXT("MoveToAttackRangeTask: [Tick] CharacterMovement MaxWalkSpeed is very low (%.1f)."), CharacterMovement->MaxWalkSpeed);
+						MOVE_LOG(VeryVerbose, TEXT("MoveToAttackRangeTask: [Tick] CharacterMovement MaxWalkSpeed is very low (%.1f)."), CharacterMovement->MaxWalkSpeed);
 					}
 				}
 			}
@@ -745,6 +785,10 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 		MoveStatus == EPathFollowingStatus::Paused ||
 		MoveStatus == EPathFollowingStatus::Waiting)
 	{
+		if (IsMoveRequestBackoffActive(Pawn->GetWorld()))
+		{
+			return EStateTreeRunStatus::Running;
+		}
 		FAeyerjiNavSafetyResolveParams NavParams;
 		NavParams.ProjectionExtent = FVector(500.f, 500.f, 1000.f);
 		FVector SafePawnLocation = Pawn->GetActorLocation();
@@ -753,7 +797,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 			return EStateTreeRunStatus::Failed;
 		}
 
-		MOVE_LOG(Warning, TEXT("PathFollowingStatus=%s; re-issuing move request. Distance=%.1f AttackRange=%.1f AcceptRadius=%.1f"),
+		MOVE_LOG(VeryVerbose, TEXT("PathFollowingStatus=%s; re-issuing move request. Distance=%.1f AttackRange=%.1f AcceptRadius=%.1f"),
 			MoveToAttackRangeTask_GetPathStatusString(MoveStatus),
 			Distance,
 			AttackRange,
@@ -773,9 +817,12 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 		MOVE_SNAPSHOT(TEXT("Tick-AfterReissueMoveTo"), AI, Pawn, TargetActor, AttackRange, AttackRangeReduction, AcceptMoveRadius);
 		if (Result == EPathFollowingRequestResult::Failed)
 		{
-			MOVE_LOG(Warning, TEXT("Move request FAILED on re-issue. Pawn=%s Target=%s"), *GetNameSafe(Pawn), *GetNameSafe(TargetActor));
-			return EStateTreeRunStatus::Failed;
+			const float RetryDelay = RecordMoveRequestFailure(Pawn->GetWorld());
+			MOVE_LOG(Verbose, TEXT("Move request failed on re-issue. Pawn=%s Target=%s RetryIn=%.2fs"),
+				*GetNameSafe(Pawn), *GetNameSafe(TargetActor), RetryDelay);
+			return EStateTreeRunStatus::Running;
 		}
+		ResetMoveRequestBackoff();
 		return EStateTreeRunStatus::Running;
 	}
 
@@ -784,6 +831,7 @@ EStateTreeRunStatus USTT_MoveToAttackRangeTask::Tick(FStateTreeExecutionContext&
 
 void USTT_MoveToAttackRangeTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition)
 {
+	ResetMoveRequestBackoff();
 	// Ensure movement is stopped when leaving this state (in case of abort or transition)
 	if (AAIController* AI = Cast<AAIController>(Context.GetOwner()))
 	{

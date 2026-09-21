@@ -289,6 +289,8 @@ public:
 	bool IsPoolManagedBySpawner() const { return bPoolManagedBySpawner; }
 
 	/** Resets enemy-only runtime state immediately before a pooled checkout is made live. */
+	// Safe to repeat: the pooled-activation Blueprint hook fires from ExitPooledInactive,
+	// so every checkout path fires it exactly once per activation.
 	void PrepareForPooledActivation();
 
 	/** Clears enemy-only runtime state immediately before a pooled enemy is hidden and parked. */
@@ -307,11 +309,48 @@ public:
 	/** Marks the actor as a hidden pooled instance without playing a reveal. */
 	void SetPooledEncounterInactive();
 
+	/**
+	 * Authoritative server-only entry into the dormant pooled state.
+	 * Shuts down combat, AI, navigation, movement, collision, damage, ticking, and
+	 * visibility, then parks the actor at ParkingLocation and marks it network-dormant.
+	 * The parking spot is insurance only; correctness never depends on where it is.
+	 */
+	void EnterPooledInactive(const FVector& ParkingLocation);
+
+	/**
+	 * Authoritative server-only checkout from the dormant pooled state.
+	 * Wakes replication BEFORE touching replicated state, teleports to SpawnTransform,
+	 * restores health, collision, movement, damage, and AI in a controlled order, reseeds
+	 * nav safety at the spawn point, and unhides the actor last.
+	 */
+	void ExitPooledInactive(const FTransform& SpawnTransform);
+
+	/**
+	 * Applies the dormant physical state on any machine. The pool multicast calls this on
+	 * clients; the replicated encounter phase (OnRep) applies the matching gameplay lock.
+	 * Idempotent, so crossing multicast/replication packets converge on the same state.
+	 */
+	void ApplyPooledDormantPresentation(const FVector& ParkingLocation);
+
+	/** Applies the awake physical state on any machine (pool multicast client path). */
+	void ApplyPooledAwakePresentation(const FTransform& SpawnTransform);
+
+	/**
+	 * Reliable pool-park broadcast. Fired from EnterPooledInactive BEFORE dormancy closes
+	 * the actor channel, so clients always receive the hide/park/teleport presentation.
+	 * Clients also converge through the replicated encounter phase (OnRep gameplay lock).
+	 */
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastPooledDormantPresentation(const FVector& ParkingLocation);
+
 	/** True only when this enemy may participate in combat pressure and targeting. */
 	bool IsEncounterCombatActive() const
 	{
 		return EncounterPresentationState.Phase == EAeyerjiEnemyEncounterPhase::Active;
 	}
+
+	/** Dormant pooled or revealing enemies discard authoritative GameplayEffect damage. */
+	virtual bool ShouldIgnoreIncomingDamage() const override { return !IsEncounterCombatActive(); }
 
 	EAeyerjiEnemyEncounterPhase GetEncounterPhase() const { return EncounterPresentationState.Phase; }
 

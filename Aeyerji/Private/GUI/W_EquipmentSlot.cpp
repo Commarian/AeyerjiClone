@@ -18,6 +18,16 @@
 
 namespace
 {
+	template <typename AssetType>
+	AssetType* ResolveSoftAsset(const TSoftObjectPtr<AssetType>& Asset)
+	{
+		if (Asset.IsNull())
+		{
+			return nullptr;
+		}
+		return Asset.Get() ? Asset.Get() : Asset.LoadSynchronous();
+	}
+
 	FString EquipmentSlotToLogString(EEquipmentSlot Slot)
 	{
 		if (const UEnum* Enum = StaticEnum<EEquipmentSlot>())
@@ -124,8 +134,6 @@ void UW_EquipmentSlot::BindInventory(UAeyerjiInventoryComponent* InInventory)
 {
 	if (Inventory.Get() == InInventory)
 	{
-		//AJ_LOG(this, TEXT("BindInventory ignored (unchanged) Slot=%d Inventory=%s"), GetEffectiveSlotIndex(), *GetNameSafe(InInventory));
-		RefreshFromInventory();
 		return;
 	}
 
@@ -196,13 +204,13 @@ UTexture2D* UW_EquipmentSlot::GetLockedSlotIcon() const
 	switch (GetEffectiveSlotType())
 	{
 	case EEquipmentSlot::Assault:
-		return AssaultLockedIcon.LoadSynchronous();
+		return ResolveSoftAsset(AssaultLockedIcon);
 	case EEquipmentSlot::Guard:
-		return GuardLockedIcon.LoadSynchronous();
+		return ResolveSoftAsset(GuardLockedIcon);
 	case EEquipmentSlot::Flow:
-		return FlowLockedIcon.LoadSynchronous();
+		return ResolveSoftAsset(FlowLockedIcon);
 	case EEquipmentSlot::Corruption:
-		return CorruptionLockedIcon.LoadSynchronous();
+		return ResolveSoftAsset(CorruptionLockedIcon);
 	default:
 		return nullptr;
 	}
@@ -317,8 +325,17 @@ void UW_EquipmentSlot::UpdateSlotVisuals()
 	const bool bHasItem = Item != nullptr;
 	const bool bLocked = IsSlotLocked();
 
-	SetVisibility(GetSlotVisibility());
-	SetIsEnabled(IsSlotInteractionEnabled() || bLocked);
+	const ESlateVisibility NewVisibility = GetSlotVisibility();
+	if (!bHasSlotVisualState || LastSlotVisibility != NewVisibility)
+	{
+		SetVisibility(NewVisibility);
+		LastSlotVisibility = NewVisibility;
+	}
+	const bool bNewEnabled = IsSlotInteractionEnabled() || bLocked;
+	if (!bHasSlotVisualState || GetIsEnabled() != bNewEnabled)
+	{
+		SetIsEnabled(bNewEnabled);
+	}
 
 	UImage* EffectiveInsideImage = GetInsideImageWidget();
 	if (EffectiveInsideImage)
@@ -338,8 +355,12 @@ void UW_EquipmentSlot::UpdateSlotVisuals()
 			EffectiveTexture = LaneEmptyIcon;
 		}
 
-		EffectiveInsideImage->SetBrushFromTexture(EffectiveTexture, EffectiveTexture != nullptr);
-		EffectiveInsideImage->SetColorAndOpacity(FLinearColor::White);
+		if (!bHasSlotVisualState || LastInsideTexture != EffectiveTexture)
+		{
+			EffectiveInsideImage->SetBrushFromTexture(EffectiveTexture, EffectiveTexture != nullptr);
+			EffectiveInsideImage->SetColorAndOpacity(FLinearColor::White);
+			LastInsideTexture = EffectiveTexture;
+		}
 
 		const FVector2D WidgetDesired = EffectiveInsideImage->GetDesiredSize();
 		const FVector2D BrushSize = EffectiveInsideImage->GetBrush().ImageSize;
@@ -353,6 +374,18 @@ void UW_EquipmentSlot::UpdateSlotVisuals()
 	}
 
 	UpdateBorderVisual(Item);
+	bHasSlotVisualState = true;
+}
+
+void UW_EquipmentSlot::InvalidateVisualCache()
+{
+	bHasSlotVisualState = false;
+	bHasBorderVisualState = false;
+	LastInsideTexture = nullptr;
+	LastBorderTexture = nullptr;
+	LastBorderMaterial = nullptr;
+	BorderDynamicMaterial = nullptr;
+	LastBorderColor = FLinearColor::Transparent;
 }
 
 FReply UW_EquipmentSlot::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
@@ -473,7 +506,7 @@ bool UW_EquipmentSlot::NativeOnDrop(
 		if (DragOp)
 		{
 			const UItemDefinition* Definition = DragOp->ItemInstance ? DragOp->ItemInstance->Definition.Get() : nullptr;
-			AJ_LOG(this, TEXT("[ItemBorder][EquipmentDrop] Drop rejected Widget=%s TargetSlot=%s TargetIndex=%d Item=%s Category=%s Inventory=%s Interaction=%s CanAccept=%s"),
+			AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder][EquipmentDrop] Drop rejected Widget=%s TargetSlot=%s TargetIndex=%d Item=%s Category=%s Inventory=%s Interaction=%s CanAccept=%s"),
 				*GetNameSafe(this),
 				*EquipmentSlotToLogString(GetEffectiveSlotType()),
 				GetEffectiveSlotIndex(),
@@ -486,7 +519,7 @@ bool UW_EquipmentSlot::NativeOnDrop(
 			if (DragOp->Source == EAeyerjiItemDragSource::Bag
 				|| DragOp->Source == EAeyerjiItemDragSource::Equipment)
 			{
-				AJ_LOG(this, TEXT("[ItemBorder][EquipmentDrop] Invalid equipment drop consumed so item stays in original slot Source=%d SourceSlot=%s SourceIndex=%d TargetSlot=%s TargetIndex=%d Item=%s"),
+				AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder][EquipmentDrop] Invalid equipment drop consumed so item stays in original slot Source=%d SourceSlot=%s SourceIndex=%d TargetSlot=%s TargetIndex=%d Item=%s"),
 					static_cast<int32>(DragOp->Source),
 					*EquipmentSlotToLogString(DragOp->SourceEquipmentSlot),
 					DragOp->SourceEquipmentSlotIndex,
@@ -639,25 +672,25 @@ UTexture2D* UW_EquipmentSlot::GetEmptySlotIcon() const
 	case EEquipmentSlot::Assault:
 		if (!AssaultEmptyIcon.IsNull())
 		{
-			return AssaultEmptyIcon.LoadSynchronous();
+			return ResolveSoftAsset(AssaultEmptyIcon);
 		}
 		break;
 	case EEquipmentSlot::Guard:
 		if (!GuardEmptyIcon.IsNull())
 		{
-			return GuardEmptyIcon.LoadSynchronous();
+			return ResolveSoftAsset(GuardEmptyIcon);
 		}
 		break;
 	case EEquipmentSlot::Flow:
 		if (!FlowEmptyIcon.IsNull())
 		{
-			return FlowEmptyIcon.LoadSynchronous();
+			return ResolveSoftAsset(FlowEmptyIcon);
 		}
 		break;
 	case EEquipmentSlot::Corruption:
 		if (!CorruptionEmptyIcon.IsNull())
 		{
-			return CorruptionEmptyIcon.LoadSynchronous();
+			return ResolveSoftAsset(CorruptionEmptyIcon);
 		}
 		break;
 	default:
@@ -674,25 +707,25 @@ UTexture2D* UW_EquipmentSlot::GetBorderSlotIcon() const
 	case EEquipmentSlot::Assault:
 		if (!AssaultBorderIcon.IsNull())
 		{
-			return AssaultBorderIcon.LoadSynchronous();
+			return ResolveSoftAsset(AssaultBorderIcon);
 		}
 		break;
 	case EEquipmentSlot::Guard:
 		if (!GuardBorderIcon.IsNull())
 		{
-			return GuardBorderIcon.LoadSynchronous();
+			return ResolveSoftAsset(GuardBorderIcon);
 		}
 		break;
 	case EEquipmentSlot::Flow:
 		if (!FlowBorderIcon.IsNull())
 		{
-			return FlowBorderIcon.LoadSynchronous();
+			return ResolveSoftAsset(FlowBorderIcon);
 		}
 		break;
 	case EEquipmentSlot::Corruption:
 		if (!CorruptionBorderIcon.IsNull())
 		{
-			return CorruptionBorderIcon.LoadSynchronous();
+			return ResolveSoftAsset(CorruptionBorderIcon);
 		}
 		break;
 	default:
@@ -709,25 +742,25 @@ UMaterialInterface* UW_EquipmentSlot::GetBorderSlotMaterial() const
 	case EEquipmentSlot::Assault:
 		if (!AssaultBorderMaterial.IsNull())
 		{
-			return AssaultBorderMaterial.LoadSynchronous();
+			return ResolveSoftAsset(AssaultBorderMaterial);
 		}
 		break;
 	case EEquipmentSlot::Guard:
 		if (!GuardBorderMaterial.IsNull())
 		{
-			return GuardBorderMaterial.LoadSynchronous();
+			return ResolveSoftAsset(GuardBorderMaterial);
 		}
 		break;
 	case EEquipmentSlot::Flow:
 		if (!FlowBorderMaterial.IsNull())
 		{
-			return FlowBorderMaterial.LoadSynchronous();
+			return ResolveSoftAsset(FlowBorderMaterial);
 		}
 		break;
 	case EEquipmentSlot::Corruption:
 		if (!CorruptionBorderMaterial.IsNull())
 		{
-			return CorruptionBorderMaterial.LoadSynchronous();
+			return ResolveSoftAsset(CorruptionBorderMaterial);
 		}
 		break;
 	default:
@@ -746,7 +779,7 @@ void UW_EquipmentSlot::UpdateBorderVisual(const UAeyerjiItemInstance* Item)
 {
 	if (!BorderImage)
 	{
-		AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot missing BorderImage binding Slot=%s Index=%d Item=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] EquipmentSlot missing BorderImage binding Slot=%s Index=%d Item=%s"),
 			*EquipmentSlotToLogString(GetEffectiveSlotType()),
 			GetEffectiveSlotIndex(),
 			Item ? *Item->UniqueId.ToString() : TEXT("None"));
@@ -758,7 +791,7 @@ void UW_EquipmentSlot::UpdateBorderVisual(const UAeyerjiItemInstance* Item)
 		const FLinearColor RarityColor = Item
 			? Item->RarityTint(Item->Rarity)
 			: FLinearColor::Transparent;
-		AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot material border Slot=%s Index=%d Material=%s Item=%s Rarity=%s RarityColor=%s Param=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] EquipmentSlot material border Slot=%s Index=%d Material=%s Item=%s Rarity=%s RarityColor=%s Param=%s"),
 			*EquipmentSlotToLogString(GetEffectiveSlotType()),
 			GetEffectiveSlotIndex(),
 			*GetNameSafe(BorderMaterial),
@@ -767,48 +800,66 @@ void UW_EquipmentSlot::UpdateBorderVisual(const UAeyerjiItemInstance* Item)
 			*RarityColor.ToString(),
 			*RarityColorParameterName.ToString());
 
-		BorderImage->SetBrushFromMaterial(BorderMaterial);
-		BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
-		BorderImage->SetColorAndOpacity(FLinearColor::White);
+		if (!BorderDynamicMaterial || LastBorderMaterial != BorderMaterial)
+		{
+			BorderDynamicMaterial = UMaterialInstanceDynamic::Create(BorderMaterial, this);
+			LastBorderMaterial = BorderMaterial;
+			LastBorderTexture = nullptr;
+			bHasBorderVisualState = false;
+		}
 
-		if (UMaterialInstanceDynamic* DynamicMaterial = BorderImage->GetDynamicMaterial())
+		if (BorderDynamicMaterial)
 		{
-			DynamicMaterial->SetVectorParameterValue(RarityColorParameterName, RarityColor);
-			AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot set dynamic material parameter DynamicMaterial=%s Param=%s Value=%s"),
-				*GetNameSafe(DynamicMaterial),
-				*RarityColorParameterName.ToString(),
-				*RarityColor.ToString());
+			if (!bHasBorderVisualState || !LastBorderColor.Equals(RarityColor))
+			{
+				BorderDynamicMaterial->SetVectorParameterValue(RarityColorParameterName, RarityColor);
+				LastBorderColor = RarityColor;
+			}
+			if (!bHasBorderVisualState)
+			{
+				BorderImage->SetBrushFromMaterial(BorderDynamicMaterial);
+				BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+				BorderImage->SetColorAndOpacity(FLinearColor::White);
+			}
+			bHasBorderVisualState = true;
+			return;
 		}
-		else
-		{
-			AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot failed to get dynamic material after SetBrushFromMaterial Slot=%s Index=%d Material=%s"),
-				*EquipmentSlotToLogString(GetEffectiveSlotType()),
-				GetEffectiveSlotIndex(),
-				*GetNameSafe(BorderMaterial));
-		}
-		return;
 	}
 
 	if (UTexture2D* BorderTexture = GetBorderSlotIcon())
 	{
-		AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot texture fallback Slot=%s Index=%d Texture=%s Item=%s"),
+		AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] EquipmentSlot texture fallback Slot=%s Index=%d Texture=%s Item=%s"),
 			*EquipmentSlotToLogString(GetEffectiveSlotType()),
 			GetEffectiveSlotIndex(),
 			*GetNameSafe(BorderTexture),
 			Item ? *Item->UniqueId.ToString() : TEXT("None"));
-		BorderImage->SetBrushFromTexture(BorderTexture, true);
-		BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
-		BorderImage->SetColorAndOpacity(FLinearColor::White);
+		if (!bHasBorderVisualState || LastBorderTexture != BorderTexture || LastBorderMaterial)
+		{
+			BorderImage->SetBrushFromTexture(BorderTexture, true);
+			BorderImage->SetVisibility(ESlateVisibility::HitTestInvisible);
+			BorderImage->SetColorAndOpacity(FLinearColor::White);
+		}
+		LastBorderTexture = BorderTexture;
+		LastBorderMaterial = nullptr;
+		BorderDynamicMaterial = nullptr;
+		bHasBorderVisualState = true;
 		return;
 	}
 
-	AJ_LOG(this, TEXT("[ItemBorder] EquipmentSlot no border material or texture Slot=%s Index=%d Item=%s"),
+	AJ_LOG_VERY_VERBOSE(this, TEXT("[ItemBorder] EquipmentSlot no border material or texture Slot=%s Index=%d Item=%s"),
 		*EquipmentSlotToLogString(GetEffectiveSlotType()),
 		GetEffectiveSlotIndex(),
 		Item ? *Item->UniqueId.ToString() : TEXT("None"));
-	BorderImage->SetBrushFromTexture(nullptr, false);
-	BorderImage->SetVisibility(ESlateVisibility::Collapsed);
-	BorderImage->SetColorAndOpacity(FLinearColor::White);
+	if (!bHasBorderVisualState || LastBorderTexture || LastBorderMaterial)
+	{
+		BorderImage->SetBrushFromTexture(nullptr, false);
+		BorderImage->SetVisibility(ESlateVisibility::Collapsed);
+		BorderImage->SetColorAndOpacity(FLinearColor::White);
+	}
+	LastBorderTexture = nullptr;
+	LastBorderMaterial = nullptr;
+	BorderDynamicMaterial = nullptr;
+	bHasBorderVisualState = true;
 }
 
 void UW_EquipmentSlot::HandleInventoryEquippedChanged(EEquipmentSlot ChangedSlot, int32 ChangedIndex, UAeyerjiItemInstance* Item)
@@ -857,7 +908,13 @@ int32 UW_EquipmentSlot::GetEffectiveSlotIndex() const
 
 void UW_EquipmentSlot::SetRuntimeSlotIndexOverride(int32 InSlotIndex)
 {
-	RuntimeSlotIndexOverride = InSlotIndex >= 0 ? InSlotIndex : INDEX_NONE;
+	const int32 NewOverride = InSlotIndex >= 0 ? InSlotIndex : INDEX_NONE;
+	if (RuntimeSlotIndexOverride == NewOverride)
+	{
+		return;
+	}
+	RuntimeSlotIndexOverride = NewOverride;
+	InvalidateVisualCache();
 	UpdateSlotVisuals();
 }
 

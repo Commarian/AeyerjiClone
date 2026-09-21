@@ -1,8 +1,10 @@
 #include "GUI/W_AeyerjiFrontendShell.h"
 
 #include "Algo/AllOf.h"
+#include "Animation/WidgetAnimation.h"
 #include "Components/Button.h"
 #include "Components/ProgressBar.h"
+#include "Components/RichTextBlock.h"
 #include "Components/TextBlock.h"
 #include "Components/Widget.h"
 #include "Components/WidgetSwitcher.h"
@@ -12,17 +14,15 @@
 #include "Frontend/AeyerjiFrontendSubsystem.h"
 #include "Frontend/AeyerjiSessionSubsystem.h"
 #include "GUI/AeyerjiStringLibrary.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 
 namespace
 {
-	constexpr float MaxFrontendXPDisplay = 1000000000000.f;
-
-	int64 FrontendXPInteger(const float Value)
+	float SubmenuEntranceSpeed(const UWidgetAnimation* Animation)
 	{
-		return FMath::RoundToInt64(FMath::Clamp(
-			FMath::IsFinite(Value) ? static_cast<double>(Value) : 0.0,
-			0.0,
-			static_cast<double>(MaxFrontendXPDisplay)));
+		return Animation
+			? FMath::Max(0.01f, Animation->GetEndTime() - Animation->GetStartTime()) / UAeyerjiUIStyleLibrary::MessageEntranceSeconds
+			: 1.f;
 	}
 
 	FText GetFrontendOperationText(const EAeyerjiFrontendOperationState OperationState)
@@ -56,6 +56,9 @@ void UW_AeyerjiFrontendShell::NativeConstruct()
 {
 	Super::NativeConstruct();
 	BindNativeButtonHandlers();
+	BuildEntranceVariants();
+	// Explicit initial page; also plays the landing entrance animation.
+	ShowLanding();
 	if (UAeyerjiFrontendSubsystem* Frontend = GetFrontendSubsystem())
 	{
 		Frontend->OnFrontendSnapshotChanged.AddUObject(this, &ThisClass::HandleFrontendSnapshot);
@@ -130,27 +133,14 @@ void UW_AeyerjiFrontendShell::BindNativeButtonHandlers()
 
 void UW_AeyerjiFrontendShell::ApplyNativeFrontendSnapshot(const FAeyerjiFrontendSnapshot& Snapshot)
 {
-	SetWidgetText(TEXT("Text_Level"), FText::Format(
-		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("Frontend_LevelFormat")), FText::AsNumber(Snapshot.CharacterLevel)));
-	SetWidgetText(TEXT("Text_XP"), FText::Format(
-		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("Frontend_XPFormat")),
-		FText::AsNumber(FrontendXPInteger(Snapshot.CurrentXP)),
-		FText::AsNumber(FrontendXPInteger(Snapshot.XPRequiredForNextLevel))));
-	SetWidgetText(TEXT("Text_Gold"), FText::Format(
-		AeyerjiStringLibrary::GetGlobalStringTableText(TEXT("Frontend_GoldFormat")), FText::AsNumber(Snapshot.Gold)));
+	// Shared living-UI formatters keep submenu headers identical to this shell.
+	SetWidgetText(TEXT("Text_Level"), UAeyerjiUIStyleLibrary::FormatFrontendLevel(Snapshot.CharacterLevel));
+	SetWidgetText(TEXT("Text_XP"), UAeyerjiUIStyleLibrary::FormatFrontendXP(Snapshot.CurrentXP, Snapshot.XPRequiredForNextLevel));
+	SetWidgetText(TEXT("Text_Gold"), UAeyerjiUIStyleLibrary::FormatFrontendGold(Snapshot.Gold));
 
 	if (UProgressBar* ProgressBar = Cast<UProgressBar>(FindDesignerWidget(TEXT("Progress_XP"))))
 	{
-		const float SafeCurrentXP = FMath::Clamp(
-			FMath::IsFinite(Snapshot.CurrentXP) ? Snapshot.CurrentXP : 0.f, 0.f, MaxFrontendXPDisplay);
-		const float SafeRequiredXP = FMath::Clamp(
-			FMath::IsFinite(Snapshot.XPRequiredForNextLevel) ? Snapshot.XPRequiredForNextLevel : 0.f,
-			0.f,
-			MaxFrontendXPDisplay);
-		const float Percent = SafeRequiredXP > 0.f
-			? FMath::Clamp(SafeCurrentXP / SafeRequiredXP, 0.f, 1.f)
-			: 0.f;
-		ProgressBar->SetPercent(Percent);
+		ProgressBar->SetPercent(UAeyerjiUIStyleLibrary::ComputeFrontendXPPercent(Snapshot.CurrentXP, Snapshot.XPRequiredForNextLevel));
 	}
 
 	const bool bProfileReady = Snapshot.ProfileState == EAeyerjiFrontendProfileState::Ready;
@@ -203,7 +193,33 @@ void UW_AeyerjiFrontendShell::ApplyNativeLobbySnapshot(const FAeyerjiLobbySnapsh
 	SetWidgetEnabled(TEXT("ExcursionButton"), bCanConfigure);
 	SetWidgetEnabled(TEXT("Button_TierPrevious"), bCanChangeTier);
 	SetWidgetEnabled(TEXT("Button_TierNext"), bCanChangeTier);
-	SetWidgetEnabled(TEXT("Button_Launch"), bCanConfigure && bAllMembersLaunchReady);
+	const bool bLaunchEnabledNow = bCanConfigure && bAllMembersLaunchReady;
+	SetWidgetEnabled(TEXT("Button_Launch"), bLaunchEnabledNow);
+	// Button pulses acknowledge state flips; the first snapshot only arms the tracker.
+	const bool bLocalReadyNow = LocalMember && LocalMember->bReady;
+	const int32 MemberCountNow = Snapshot.Members.Num();
+	if (bHasLobbyAnimState)
+	{
+		if (bLocalReadyNow != bLastLocalReady)
+		{
+			PlayShellAnimation(ReadyPulse);
+		}
+		if (bLaunchEnabledNow && !bLastLaunchEnabled)
+		{
+			PlayShellAnimation(LaunchPulse);
+		}
+		if (LastLobbyMemberCount == 0 && MemberCountNow > 0
+			&& PageSwitcher && PageSwitcher->GetActiveWidget() == Page_PartyLobby)
+		{
+			// Members just populated an empty roster: the arrival entrance ran
+			// against collapsed cards, so replay it now that the wave can read.
+			PlayLobbyEntrance();
+		}
+	}
+	bHasLobbyAnimState = true;
+	bLastLocalReady = bLocalReadyNow;
+	bLastLaunchEnabled = bLaunchEnabledNow;
+	LastLobbyMemberCount = MemberCountNow;
 	SetWidgetText(TEXT("Text_SelectedTier"), FText::AsNumber(Snapshot.SelectedExcursionTier));
 	SetWidgetVisibility(TEXT("Button_TierPrevious"), bTierVisible ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
 	SetWidgetVisibility(TEXT("Text_SelectedTier"), bTierVisible ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
@@ -229,27 +245,101 @@ void UW_AeyerjiFrontendShell::ApplyLobbyMemberToSlot(const int32 SlotIndex, cons
 		: ESlateVisibility::Collapsed);
 }
 
-void UW_AeyerjiFrontendShell::ShowPage(UWidget* const Page)
+bool UW_AeyerjiFrontendShell::ShowPage(UWidget* const Page)
 {
-	if (PageSwitcher && Page)
+	if (!PageSwitcher || !Page)
 	{
-		PageSwitcher->SetActiveWidget(Page);
+		return false;
 	}
+	// Lobby snapshots re-select the lobby page while already there; callers use
+	// the result so background updates never restart an entrance mid-read.
+	const bool bChanged = PageSwitcher->GetActiveWidget() != Page;
+	PageSwitcher->SetActiveWidget(Page);
+	return bChanged;
 }
 
 void UW_AeyerjiFrontendShell::ShowLanding()
 {
+	// The switcher already starts on the landing page, so the changed-guard would
+	// swallow the entrance; landing arrivals always replay a random variant instead.
 	ShowPage(Page_Landing);
+	PlayLandingEntrance();
 }
 
 void UW_AeyerjiFrontendShell::ShowPartyBrowser()
 {
-	ShowPage(Page_PartyBrowser);
+	if (ShowPage(Page_PartyBrowser))
+	{
+		PlayBrowserEntrance();
+	}
 }
 
-void UW_AeyerjiFrontendShell::ShowPartyLobby()
+void UW_AeyerjiFrontendShell::ShowPartyLobby(const bool bForceReplay)
 {
-	ShowPage(Page_PartyLobby);
+	// Explicit PLAY/host navigation always replays so the button never feels
+	// dead; snapshot re-selects pass false and stay silent when already there.
+	if (ShowPage(Page_PartyLobby) || bForceReplay)
+	{
+		PlayLobbyEntrance();
+	}
+}
+
+void UW_AeyerjiFrontendShell::PlayShellAnimation(UWidgetAnimation* const Entrance, const float PlaybackSpeed)
+{
+	// BindWidgetAnim bindings are compile-required, so a null here only guards
+	// dynamic edge cases; normal play always has the animation.
+	if (Entrance)
+	{
+		PlayAnimation(Entrance, 0.f, 1, EUMGSequencePlayMode::Forward, PlaybackSpeed);
+	}
+}
+
+void UW_AeyerjiFrontendShell::PlayLandingEntrance()
+{
+	UWidgetAnimation* const Picked = PickVariant(LandingEntrances);
+	// The legacy 1.1s MenuOpen plays doubled to match the 0.55s variants;
+	// MenuOpenB was authored at target speed and plays at 1x.
+	PlayShellAnimation(Picked, Picked == MenuOpen ? 2.f : 1.f);
+}
+
+void UW_AeyerjiFrontendShell::PlayBrowserEntrance()
+{
+	UWidgetAnimation* const Entrance = PickVariant(BrowserEntrances);
+	PlayShellAnimation(Entrance, SubmenuEntranceSpeed(Entrance));
+}
+
+void UW_AeyerjiFrontendShell::PlayLobbyEntrance()
+{
+	UWidgetAnimation* const Entrance = PickVariant(LobbyEntrances);
+	PlayShellAnimation(Entrance, SubmenuEntranceSpeed(Entrance));
+}
+
+void UW_AeyerjiFrontendShell::BuildEntranceVariants()
+{
+	LandingEntrances.Reset();
+	BrowserEntrances.Reset();
+	LobbyEntrances.Reset();
+	for (UWidgetAnimation* Candidate : {MenuOpen, MenuOpenB})
+	{
+		if (Candidate) LandingEntrances.Add(Candidate);
+	}
+	for (UWidgetAnimation* Candidate : {BrowserOpenA, BrowserOpenB})
+	{
+		if (Candidate) BrowserEntrances.Add(Candidate);
+	}
+	for (UWidgetAnimation* Candidate : {LobbyOpenA, LobbyOpenB})
+	{
+		if (Candidate) LobbyEntrances.Add(Candidate);
+	}
+}
+
+UWidgetAnimation* UW_AeyerjiFrontendShell::PickVariant(const TArray<TObjectPtr<UWidgetAnimation>>& Variants) const
+{
+	if (Variants.Num() == 0)
+	{
+		return nullptr;
+	}
+	return Variants[FMath::RandRange(0, Variants.Num() - 1)];
 }
 
 void UW_AeyerjiFrontendShell::SetWidgetEnabled(const FName WidgetName, const bool bEnabled) const
@@ -273,6 +363,12 @@ void UW_AeyerjiFrontendShell::SetWidgetText(const FName WidgetName, const FText&
 	if (UTextBlock* TextBlock = FindDesignerText(WidgetName))
 	{
 		TextBlock->SetText(Text);
+		return;
+	}
+	// RichText rollout: converted Designer labels keep their names but change type.
+	if (URichTextBlock* RichText = Cast<URichTextBlock>(FindDesignerWidget(WidgetName)))
+	{
+		RichText->SetText(Text);
 	}
 }
 
@@ -297,7 +393,7 @@ bool UW_AeyerjiFrontendShell::IsLocalLobbyLeader(const FAeyerjiLobbySnapshot& Sn
 
 void UW_AeyerjiFrontendShell::HandlePlayClicked()
 {
-	ShowPartyLobby();
+	ShowPartyLobby(true);
 }
 
 void UW_AeyerjiFrontendShell::HandleHostPublicPartyClicked()
@@ -366,7 +462,11 @@ void UW_AeyerjiFrontendShell::HandleLaunchClicked()
 
 void UW_AeyerjiFrontendShell::HandleLeaveClicked()
 {
-	LeaveCurrentParty();
+	// Return to landing so a later PLAY press is a real navigation again.
+	if (LeaveCurrentParty())
+	{
+		ShowLanding();
+	}
 }
 
 void UW_AeyerjiFrontendShell::HandleInviteClicked()
@@ -386,7 +486,7 @@ bool UW_AeyerjiFrontendShell::HostPublicParty(const FString& PartyName)
 	if (bRequestAccepted)
 	{
 		// The session request is asynchronous, but staging can be presented while creation is in progress.
-		ShowPartyLobby();
+		ShowPartyLobby(true);
 	}
 	return bRequestAccepted;
 }
@@ -462,7 +562,7 @@ void UW_AeyerjiFrontendShell::HandleLobbySnapshot(const FAeyerjiLobbySnapshot& S
 	// Hosting reloads the menu as a listen server; select staging again on the newly constructed widget.
 	if (HasOnlineParty())
 	{
-		ShowPartyLobby();
+		ShowPartyLobby(false);
 	}
 	if (Snapshot.Phase != EAeyerjiLobbyPhase::Launching)
 	{

@@ -12,6 +12,7 @@ class UAeyerjiInventoryComponent;
 class UAeyerjiItemInstance;
 class UAeyerjiItemDragOperation;
 class UImage;
+class UMaterialInstanceDynamic;
 class UMaterialInterface;
 class UTexture2D;
 
@@ -184,12 +185,31 @@ private:
 	TWeakObjectPtr<UAeyerjiItemInstance> CurrentItem;
 	int32 RuntimeSlotIndexOverride = INDEX_NONE;
 
+	/** Cached brushes and MID prevent an unchanged slot refresh from loading assets or allocating materials. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> LastInsideTexture = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> LastBorderTexture = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> LastBorderMaterial = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> BorderDynamicMaterial = nullptr;
+
+	FLinearColor LastBorderColor = FLinearColor::Transparent;
+	ESlateVisibility LastSlotVisibility = ESlateVisibility::Collapsed;
+	bool bHasSlotVisualState = false;
+	bool bHasBorderVisualState = false;
+
 	/** Snapshot of the bound item's change delegate so we can refresh visuals when stats/icons change. */
 	FDelegateHandle ItemChangedHandle;
 
 	void UnbindInventory();
 	void BindToCurrentItem(UAeyerjiItemInstance *NewItem);
 	void UpdateSlotVisuals();
+	void InvalidateVisualCache();
 	bool CanAcceptDragOperation(UAeyerjiItemDragOperation *DragOp) const;
 	bool IsItemCompatible(const UAeyerjiItemInstance *Item) const;
 	bool TryEquipFromDragOperation(UAeyerjiItemDragOperation *DragOp);

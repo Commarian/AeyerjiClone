@@ -7,6 +7,11 @@
 #include "Director/AeyerjiSpawnerGroup.h"
 #include "Director/AeyerjiSpawnRegion.h"
 #include "Attributes/AeyerjiAttributeSet.h"
+#include "AbilitySystemComponent.h"
+#include "AeyerjiGameplayTags.h"
+#include "Components/AeyerjiNavSafetyComponent.h"
+#include "GAS/GE_DamagePhysical.h"
+#include "GAS/GE_Stagger.h"
 #include "Components/CapsuleComponent.h"
 #include "Enemy/EnemyAIController.h"
 #include "Enemy/EnemyParentNative.h"
@@ -151,6 +156,11 @@ bool FAeyerjiRiftEnemyRevealLockAuthorityTest::RunTest(const FString& Parameters
 
 	Enemy->PrepareForPooledActivation();
 	TestTrue(TEXT("A pooled checkout restores damage participation after an inactive lock."), Enemy->CanBeDamaged());
+	TestFalse(TEXT("The active phase independently restores actor visibility."), Enemy->IsHidden());
+	TestFalse(TEXT("The active phase independently clears mesh HiddenInGame."),
+		Enemy->GetMesh()->bHiddenInGame);
+	TestTrue(TEXT("The active phase independently restores mesh visibility."),
+		Enemy->GetMesh()->GetVisibleFlag());
 
 	Enemy->CompleteEncounterReveal();
 	Enemy->BeginEncounterReveal(EAeyerjiEnemyRevealStyle::GroundEmergence, 5.f);
@@ -183,6 +193,149 @@ bool FAeyerjiRiftEnemyRevealLockAuthorityTest::RunTest(const FString& Parameters
 			== static_cast<USceneComponent*>(Enemy->GetCapsuleComponent()));
 	TestEqual(TEXT("Completed reveal restores walking movement mode."),
 		Enemy->GetCharacterMovement()->MovementMode, MOVE_Walking);
+
+	Enemy->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FAeyerjiRiftEnemyDormantPoolAuthorityTest,
+	"Aeyerji.Rift.Authority.EnemyDormantPool",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FAeyerjiRiftEnemyDormantPoolAuthorityTest::RunTest(const FString& Parameters)
+{
+	(void)Parameters;
+	AEnemyParentNative* Enemy = SpawnAutomationActor<AEnemyParentNative>(GWorld);
+	TestNotNull(TEXT("Dormant-pool enemy spawns."), Enemy);
+	if (!Enemy)
+	{
+		return false;
+	}
+
+	UAbilitySystemComponent* ASC = Enemy->GetAbilitySystemComponent();
+	TestNotNull(TEXT("Dormant-pool enemy owns an ASC."), ASC);
+	if (!ASC)
+	{
+		Enemy->Destroy();
+		return false;
+	}
+	ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPMaxAttribute(), 1000.f);
+	ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetHPAttribute(), 1000.f);
+	ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetArmorAttribute(), 0.f);
+	ASC->SetNumericAttributeBase(UAeyerjiAttributeSet::GetPhysicalDamageBonusAttribute(), 0.f);
+
+	auto ApplyThirtyDamage = [ASC]()
+	{
+		FGameplayEffectSpecHandle Spec = ASC->MakeOutgoingSpec(
+			UGE_DamagePhysical::StaticClass(), 1.f, ASC->MakeEffectContext());
+		if (!Spec.Data.IsValid())
+		{
+			return false;
+		}
+		Spec.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_Damage_Instant, 30.f);
+		ASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
+		return true;
+	};
+
+	// Persistent-effect lifecycle probe: a finite stagger stands in for any lingering DoT.
+	// Period ticks need game time, so presence (tag + active count) is the observable.
+	auto ApplyStagger = [ASC]()
+	{
+		FGameplayEffectSpecHandle Spec = ASC->MakeOutgoingSpec(
+			UGE_Stagger::StaticClass(), 1.f, ASC->MakeEffectContext());
+		if (!Spec.Data.IsValid())
+		{
+			return false;
+		}
+		Spec.Data->SetSetByCallerMagnitude(AeyerjiTags::SBC_Stagger_Duration, 30.f);
+		const FActiveGameplayEffectHandle Handle = ASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
+		return Handle.IsValid();
+	};
+
+	TestTrue(TEXT("Persistent stagger spec builds and applies."), ApplyStagger());
+	TestTrue(TEXT("Live enemy carries the stagger tag."),
+		ASC->HasMatchingGameplayTag(AeyerjiTags::State_CrowdControl_Staggered));
+	TestTrue(TEXT("Live enemy holds the persistent stagger effect."),
+		ASC->GetActiveEffects(FGameplayEffectQuery()).Num() > 0);
+
+	const FVector JailLocation(250000.f, 0.f, 20000.f);
+	Enemy->EnterPooledInactive(JailLocation);
+	TestEqual(TEXT("Dormant enemy publishes the inactive encounter phase."),
+		Enemy->GetEncounterPhase(), EAeyerjiEnemyEncounterPhase::PooledInactive);
+	TestFalse(TEXT("Dormant enemy is excluded from combat."), Enemy->IsEncounterCombatActive());
+	TestTrue(TEXT("Dormant enemy discards GameplayEffect damage."),
+		Enemy->ShouldIgnoreIncomingDamage());
+	TestTrue(TEXT("Dormant enemy is hidden."), Enemy->IsHidden());
+	TestFalse(TEXT("Dormant enemy collision is disabled."), Enemy->GetActorEnableCollision());
+	TestFalse(TEXT("Dormant enemy cannot take normal actor damage."), Enemy->CanBeDamaged());
+	TestTrue(TEXT("Dormant enemy parks at the pool jail."),
+		Enemy->GetActorLocation().Equals(JailLocation, 0.01f));
+	TestFalse(TEXT("Dormant enemy mesh ticking is disabled."),
+		Enemy->GetMesh()->IsComponentTickEnabled());
+	TestFalse(TEXT("Dormant enemy movement ticking is disabled."),
+		Enemy->GetCharacterMovement()->IsComponentTickEnabled());
+	TestEqual(TEXT("Dormant enemy movement mode is none."),
+		Enemy->GetCharacterMovement()->MovementMode, MOVE_None);
+
+	UAeyerjiNavSafetyComponent* NavSafety = Enemy->GetNavSafetyComponent();
+	TestNotNull(TEXT("Dormant-pool enemy owns nav safety."), NavSafety);
+	if (NavSafety)
+	{
+		TestFalse(TEXT("Dormant enemy nav safety ticking is suspended."),
+			NavSafety->IsComponentTickEnabled());
+		TestFalse(TEXT("Dormant enemy is not nav-recoverable while parked."),
+			NavSafety->EnsureOwnerOnSafeNav(true));
+	}
+
+	TestTrue(TEXT("Dormant damage spec builds."), ApplyThirtyDamage());
+	TestEqual(TEXT("Dormant enemy ignores real GAS damage."),
+		ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()), 1000.f);
+	TestFalse(TEXT("Parked enemy drops the persistent stagger tag."),
+		ASC->HasMatchingGameplayTag(AeyerjiTags::State_CrowdControl_Staggered));
+	TestEqual(TEXT("Parked enemy holds no persistent effects."),
+		ASC->GetActiveEffects(FGameplayEffectQuery()).Num(), 0);
+
+	// An off-nav checkout rejection re-parks a pawn that never left the pool. Repeat entry
+	// must stay dormant without replaying shutdown hooks.
+	Enemy->EnterPooledInactive(JailLocation);
+	TestEqual(TEXT("Repeat pool entry stays dormant."),
+		Enemy->GetEncounterPhase(), EAeyerjiEnemyEncounterPhase::PooledInactive);
+	TestTrue(TEXT("Repeat pool entry stays hidden."), Enemy->IsHidden());
+
+	const FVector SpawnLocation(100.f, 200.f, 300.f);
+	Enemy->ExitPooledInactive(FTransform(FRotator::ZeroRotator, SpawnLocation));
+	TestEqual(TEXT("Checkout publishes the active encounter phase."),
+		Enemy->GetEncounterPhase(), EAeyerjiEnemyEncounterPhase::Active);
+	TestTrue(TEXT("Checkout restores combat participation."), Enemy->IsEncounterCombatActive());
+	TestFalse(TEXT("Checkout restores damage participation."),
+		Enemy->ShouldIgnoreIncomingDamage());
+	TestFalse(TEXT("Checkout unhides the enemy."), Enemy->IsHidden());
+	TestTrue(TEXT("Checkout restores actor collision."), Enemy->GetActorEnableCollision());
+	TestTrue(TEXT("Checkout restores normal damage participation."), Enemy->CanBeDamaged());
+	TestTrue(TEXT("Checkout teleports to the spawn transform."),
+		Enemy->GetActorLocation().Equals(SpawnLocation, 0.01f));
+	TestTrue(TEXT("Checkout restores mesh ticking."),
+		Enemy->GetMesh()->IsComponentTickEnabled());
+	TestTrue(TEXT("Checkout restores movement ticking."),
+		Enemy->GetCharacterMovement()->IsComponentTickEnabled());
+	TestEqual(TEXT("Checkout restores walking movement mode."),
+		Enemy->GetCharacterMovement()->MovementMode, MOVE_Walking);
+	if (NavSafety)
+	{
+		TestTrue(TEXT("Checkout resumes nav safety ticking."),
+			NavSafety->IsComponentTickEnabled());
+		TestTrue(TEXT("Checkout reseeds nav safety at the spawn transform."),
+			NavSafety->GetLastSafeNavLocation().Equals(SpawnLocation, 0.01f));
+	}
+
+	TestTrue(TEXT("Live damage spec builds."), ApplyThirtyDamage());
+	TestEqual(TEXT("Live enemy takes real GAS damage."),
+		ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetHPAttribute()), 970.f);
+	TestFalse(TEXT("Checked-out enemy does not resume the old stagger tag."),
+		ASC->HasMatchingGameplayTag(AeyerjiTags::State_CrowdControl_Staggered));
+	TestEqual(TEXT("Checked-out enemy holds no resumed effects."),
+		ASC->GetActiveEffects(FGameplayEffectQuery()).Num(), 0);
 
 	Enemy->Destroy();
 	return true;

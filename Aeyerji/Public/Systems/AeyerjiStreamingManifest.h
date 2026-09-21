@@ -6,6 +6,25 @@
 
 class UWorld;
 
+/** Designer-authored vertical band used when a zone contains overlapping minimap floors. */
+USTRUCT(BlueprintType)
+struct AEYERJI_API FAeyerjiMinimapFloorDef
+{
+	GENERATED_BODY()
+
+	/** Stable label shown to UI and debugging tools for this floor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Streaming|Minimap")
+	FName FloorId = NAME_None;
+
+	/** Lowest world-space Z included in this minimap floor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Streaming|Minimap")
+	float MinZ = 0.f;
+
+	/** Highest world-space Z included in this minimap floor; must be greater than Min Z. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Streaming|Minimap")
+	float MaxZ = 0.f;
+};
+
 /**
  * Designer-authored description of a streaming zone and which sublevels should be active for it.
  */
@@ -45,6 +64,13 @@ struct AEYERJI_API FZoneDef
 	/** If true, loading/unloading can block the game thread until complete. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Streaming")
 	bool bBlockOnLoad = false;
+
+	/**
+	 * Optional vertical minimap floors for zones with overlapping walkable spaces.
+	 * Leave empty for a single automatically sized floor covering the complete zone navmesh.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Aeyerji|Streaming|Minimap")
+	TArray<FAeyerjiMinimapFloorDef> MinimapFloors;
 };
 
 /**

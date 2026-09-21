@@ -20,6 +20,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "Director/AeyerjiEncounterDirector.h"
 #include "Director/AeyerjiLevelDirector.h"
 #include "Director/AeyerjiSpawnRegion.h"
+#include "Director/AeyerjiSpawnScalePolicy.h"
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -46,6 +47,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Stats/Stats.h"
 #include "Systems/AeyerjiDifficultyTuning.h"
+#include "Testing/AeyerjiCombatTestIsolation.h"
 #include "Algo/RandomShuffle.h"
 
 DECLARE_STATS_GROUP(TEXT("Aeyerji Encounter Spawner"), STATGROUP_AeyerjiEncounterSpawner, STATCAT_Advanced);
@@ -229,6 +231,16 @@ void AAeyerjiSpawnerGroup::ActivateEncounter(AActor* ActivationInstigator, ACont
 
 	if (bActive || bCleared)
 	{
+		return;
+	}
+
+	// Sequence, survival, activation-volume, and gameplay-event spawners all converge here.
+	// The combat-test harness does not use this activation path, so its explicit roster remains available.
+	if (AeyerjiCombatTestIsolation::IsWorldSpawningSuppressed())
+	{
+		UE_LOG(LogTemp, Display,
+			TEXT("SpawnerGroup activation suppressed by combat-test isolation on %s."),
+			*GetNameSafe(this));
 		return;
 	}
 
@@ -958,6 +970,27 @@ void AAeyerjiSpawnerGroup::KickoffFirstWave()
 	StartWave(CurrentWaveIndex);
 }
 
+FTransform AAeyerjiSpawnerGroup::StripSpawnSourceScale(const FTransform& SourceTransform, const AActor* SourceActor)
+{
+	FTransform SanitizedTransform = SourceTransform;
+	if (!FAeyerjiSpawnScalePolicy::StripNonUnitScale(SanitizedTransform))
+	{
+		return SanitizedTransform;
+	}
+
+	// Stripping is permanent behavior, but the warning fires once per source actor so a
+	// mis-scaled marker cannot flood the log every time its spawner picks a transform.
+	const FName SourceName = IsValid(SourceActor) ? SourceActor->GetFName() : NAME_None;
+	if (!WarnedScaledSpawnSources.Contains(SourceName))
+	{
+		WarnedScaledSpawnSources.Add(SourceName);
+		AJ_LOG_VERBOSITY(Warning, this, TEXT("Spawn source %s has non-unit scale %s; stripping scale so spawned pawns keep their authored size."),
+			*GetNameSafe(SourceActor),
+			*SourceTransform.GetScale3D().ToCompactString());
+	}
+	return SanitizedTransform;
+}
+
 bool AAeyerjiSpawnerGroup::ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, FTransform& OutTransform)
 {
 	FVector ReferenceLocation = GetActorLocation();
@@ -977,7 +1010,7 @@ bool AAeyerjiSpawnerGroup::ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, F
 			if (PointTransform.IsValid()
 				&& (!bRequireSpawnReachableFromTarget || !bHasReferenceLocation || IsSpawnCandidateReachable(PointTransform.GetLocation(), ReferenceLocation)))
 			{
-				OutTransform = PointTransform;
+				OutTransform = StripSpawnSourceScale(PointTransform, Point);
 				return true;
 			}
 		}
@@ -1100,7 +1133,7 @@ bool AAeyerjiSpawnerGroup::ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, F
 			const FTransform PointTransform = Point->GetActorTransform();
 			if (!bRequireSpawnReachableFromTarget || !bHasReferenceLocation || IsSpawnCandidateReachable(PointTransform.GetLocation(), ReferenceLocation))
 			{
-				OutTransform = PointTransform;
+				OutTransform = StripSpawnSourceScale(PointTransform, Point);
 				return true;
 			}
 		}
@@ -1109,7 +1142,7 @@ bool AAeyerjiSpawnerGroup::ChooseSpawnTransform(TSubclassOf<APawn> EnemyClass, F
 	const FTransform OwnTransform = GetActorTransform();
 	if (!bRequireSpawnReachableFromTarget || !bHasReferenceLocation || IsSpawnCandidateReachable(OwnTransform.GetLocation(), ReferenceLocation))
 	{
-		OutTransform = OwnTransform;
+		OutTransform = StripSpawnSourceScale(OwnTransform, this);
 		return true;
 	}
 
@@ -1245,13 +1278,11 @@ bool AAeyerjiSpawnerGroup::SpawnOneFromSet(int32 WaveIndex, int32 SetIndex)
 		return false;
 	}
 
+	// Defensive for actors created before a Live Coding update. This lifecycle tag is
+	// permanent and must not be tracked as transient state removed on pooled checkout.
 	if (bTagSpawnedEnemiesAsCullIgnored && !SpawnedEnemyCullIgnoreActorTag.IsNone())
 	{
-		if (!SpawnedPawn->Tags.Contains(SpawnedEnemyCullIgnoreActorTag))
-		{
-			SpawnedPawn->Tags.Add(SpawnedEnemyCullIgnoreActorTag);
-			TrackPooledActorTag(SpawnedPawn, SpawnedEnemyCullIgnoreActorTag);
-		}
+		SpawnedPawn->Tags.AddUnique(SpawnedEnemyCullIgnoreActorTag);
 	}
 	return true;
 }
@@ -1295,6 +1326,14 @@ APawn* AAeyerjiSpawnerGroup::SpawnRawEnemyActor(const FEnemySet& EnemySet, const
 			*GetNameSafe(EnemySet.EnemyClass),
 			*SpawnTransform.GetLocation().ToCompactString());
 		return nullptr;
+	}
+
+	// The local view-distance culler receives the actor-spawn callback before this method
+	// returns. Apply the exclusion before its next evaluation so a prewarmed pawn parked
+	// in the distant pool jail is never cached as an ordinary hidden-by-distance actor.
+	if (bTagSpawnedEnemiesAsCullIgnored && !SpawnedEnemyCullIgnoreActorTag.IsNone())
+	{
+		SpawnedPawn->Tags.AddUnique(SpawnedEnemyCullIgnoreActorTag);
 	}
 	FreshEnemyConstructionCount++;
 
@@ -1603,11 +1642,31 @@ FVector AAeyerjiSpawnerGroup::ResolvePooledOriginalScale(APawn* EnemyPawn) const
 
 FVector AAeyerjiSpawnerGroup::GetPoolParkingLocation() const
 {
+	// The NaN fallback mirrors the PoolParkingOffset default above: a distant jail, never
+	// an underground spot that mimics a nav failure.
 	const FVector SafeOffset = PoolSettings.PoolParkingOffset.ContainsNaN()
-		? FVector(0.f, 0.f, -5000.f)
+		? FVector(250000.f, 0.f, 20000.f)
 		: PoolSettings.PoolParkingOffset.GetClampedToMaxSize(MaxSpawnerWorldDistance);
-	const FVector ParkingLocation = GetActorTransform().TransformPosition(SafeOffset);
-	return ParkingLocation.ContainsNaN() ? GetActorLocation() : ParkingLocation;
+	const FVector BaseLocation = GetActorTransform().TransformPosition(SafeOffset);
+	if (BaseLocation.ContainsNaN())
+	{
+		return GetActorLocation();
+	}
+
+	// Each parked pawn takes the next jail grid slot so pooled actors never stack exactly
+	// and stay individually inspectable while hidden. The resolved location replicates to
+	// clients through the pool multicast, so this server-side counter cannot desync them.
+	const int32 Slot = PoolParkingSlotCounter;
+	PoolParkingSlotCounter = (PoolParkingSlotCounter + 1) % 4096;
+	const int32 SlotsPerRow = FMath::Max(1, PoolSettings.PoolParkingSlotsPerRow);
+	const float Spacing = FMath::IsFinite(PoolSettings.PoolParkingSlotSpacing)
+		? FMath::Max(0.f, PoolSettings.PoolParkingSlotSpacing)
+		: 0.f;
+	const int32 Row = Slot / SlotsPerRow;
+	const int32 Column = Slot % SlotsPerRow;
+	const FVector SlottedLocation = BaseLocation
+		+ FVector(static_cast<float>(Column) * Spacing, static_cast<float>(Row) * Spacing, 0.f);
+	return SlottedLocation.ContainsNaN() ? BaseLocation : SlottedLocation;
 }
 
 void AAeyerjiSpawnerGroup::DestroySpawnerAppliedVFX(APawn* EnemyPawn)
@@ -1654,6 +1713,22 @@ void AAeyerjiSpawnerGroup::SetPooledEnemyInactiveState(APawn* EnemyPawn, const F
 	}
 
 	DestroySpawnerAppliedVFX(EnemyPawn);
+	// Native enemies own the authoritative dormant lifecycle; the spawner only routes to it.
+	// The client multicast path applies the same physical state without authority steps.
+	if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPawn))
+	{
+		if (HasAuthority())
+		{
+			Enemy->EnterPooledInactive(ParkingLocation);
+		}
+		else
+		{
+			Enemy->ApplyPooledDormantPresentation(ParkingLocation);
+		}
+		return;
+	}
+
+	// Generic fallback for non-enemy pooled pawns without a native lifecycle.
 	EnemyPawn->SetActorHiddenInGame(true);
 	EnemyPawn->SetActorEnableCollision(false);
 	EnemyPawn->SetActorTickEnabled(false);
@@ -1721,6 +1796,22 @@ void AAeyerjiSpawnerGroup::SetPooledEnemyActiveState(APawn* EnemyPawn, const FTr
 		EnemyPawn->FlushNetDormancy();
 		EnemyPawn->SetNetDormancy(DORM_Awake);
 	}
+	// Native enemies own the authoritative checkout lifecycle; the spawner only routes to it.
+	// The client multicast path applies the same physical state without authority steps.
+	if (AEnemyParentNative* Enemy = Cast<AEnemyParentNative>(EnemyPawn))
+	{
+		if (HasAuthority())
+		{
+			Enemy->ExitPooledInactive(SpawnTransform);
+		}
+		else
+		{
+			Enemy->ApplyPooledAwakePresentation(SpawnTransform);
+		}
+		return;
+	}
+
+	// Generic fallback for non-enemy pooled pawns without a native lifecycle.
 	EnemyPawn->SetActorTransform(SpawnTransform, false, nullptr, ETeleportType::TeleportPhysics);
 	EnemyPawn->SetActorHiddenInGame(false);
 	EnemyPawn->SetActorEnableCollision(true);
@@ -1786,6 +1877,47 @@ void AAeyerjiSpawnerGroup::MulticastSetPooledEnemyActive_Implementation(APawn* E
 	}
 
 	SetPooledEnemyActiveState(EnemyPawn, SpawnTransform);
+}
+
+void AAeyerjiSpawnerGroup::CheckSpawnedPawnScale(APawn* SpawnedPawn, const FEnemySet& ResolvedEnemySet)
+{
+	if (!IsValid(SpawnedPawn))
+	{
+		return;
+	}
+
+	// Elites, mini-bosses, and bosses carry intentional scale multipliers; only flag the rest.
+	const bool bHasIntentionalScale = ResolvedEnemySet.bIsElite || ResolvedEnemySet.bIsMiniBoss || ResolvedEnemySet.bIsBoss;
+	const FVector FinalScale = SpawnedPawn->GetActorScale3D();
+	if (!FAeyerjiSpawnScalePolicy::IsAnomalousSpawnScale(FinalScale, bHasIntentionalScale))
+	{
+		return;
+	}
+
+	// Pawns spawn constantly, so throttle repeat reports while counting what was suppressed.
+	constexpr double WarningIntervalSeconds = 30.0;
+	const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	if (LastOverscaleWarningTime >= 0.0 && (Now - LastOverscaleWarningTime) < WarningIntervalSeconds)
+	{
+		++SuppressedOverscaleWarningCount;
+		return;
+	}
+
+	FString ArchetypeName = TEXT("<no-archetype>");
+	if (const UAeyerjiEnemyArchetypeComponent* ArchetypeComponent = SpawnedPawn->FindComponentByClass<UAeyerjiEnemyArchetypeComponent>())
+	{
+		ArchetypeName = ArchetypeComponent->GetArchetypeTag().ToString();
+	}
+
+	AJ_LOG_VERBOSITY(Warning, this, TEXT("Non-elite pawn spawned with anomalous actor scale %s (suppressed=%d): Pawn=%s Class=%s Archetype=%s Spawner=%s."),
+		*FinalScale.ToCompactString(),
+		SuppressedOverscaleWarningCount,
+		*GetNameSafe(SpawnedPawn),
+		*GetNameSafe(SpawnedPawn->GetClass()),
+		*ArchetypeName,
+		*GetNameSafe(this));
+	LastOverscaleWarningTime = Now;
+	SuppressedOverscaleWarningCount = 0;
 }
 
 APawn* AAeyerjiSpawnerGroup::SpawnRegisteredEnemyFromSet(const FEnemySet& EnemySet, const FTransform& SpawnTransform, AActor* SpawnOwner, APawn* InstigatorPawn, bool bApplyEliteSettings, bool bApplyAggro, bool bAutoActivate, bool bAutoActivateOnlyIfNoWaves, AActor* ActivationInstigator, AController* ActivationController, bool bSkipRandomEliteResolution)
@@ -1883,6 +2015,7 @@ APawn* AAeyerjiSpawnerGroup::SpawnRegisteredEnemyFromSet(const FEnemySet& EnemyS
 		ActivationController,
 		/*bSkipRandomEliteResolution=*/true);
 
+	CheckSpawnedPawnScale(SpawnedPawn, ResolvedEnemySet);
 	return SpawnedPawn;
 }
 
@@ -1940,7 +2073,12 @@ bool AAeyerjiSpawnerGroup::ReturnEnemyToPool(APawn* EnemyPawn)
 	State->State = EAeyerjiPooledEnemyState::Inactive;
 	const FVector ParkingLocation = GetPoolParkingLocation();
 	SetPooledEnemyInactiveState(EnemyPawn, ParkingLocation);
-	MulticastSetPooledEnemyInactive(EnemyPawn, ParkingLocation);
+	// Native enemies broadcast presentation from EnterPooledInactive (pre-dormancy, so the
+	// multicast cannot get stuck behind a dormant channel); this only serves generic pawns.
+	if (!Cast<AEnemyParentNative>(EnemyPawn))
+	{
+		MulticastSetPooledEnemyInactive(EnemyPawn, ParkingLocation);
+	}
 	Bucket.AddUnique(TWeakObjectPtr<APawn>(EnemyPawn));
 	return true;
 }
@@ -2064,7 +2202,11 @@ void AAeyerjiSpawnerGroup::PrewarmPoolForEnemySets(const TArray<FEnemySet>& Enem
 				State->State = EAeyerjiPooledEnemyState::Inactive;
 			}
 			SetPooledEnemyInactiveState(PooledPawn, ParkingLocation);
+			// Native enemies broadcast presentation from EnterPooledInactive (pre-dormancy).
+		if (!Cast<AEnemyParentNative>(PooledPawn))
+		{
 			MulticastSetPooledEnemyInactive(PooledPawn, ParkingLocation);
+		}
 			Bucket.Add(TWeakObjectPtr<APawn>(PooledPawn));
 			PrewarmConstructionCount++;
 			--RemainingBudget;
@@ -2161,7 +2303,11 @@ bool AAeyerjiSpawnerGroup::PrewarmExactEnemy(const FEnemySet& ExactEnemySet)
 		State->State = EAeyerjiPooledEnemyState::Inactive;
 	}
 	SetPooledEnemyInactiveState(PooledPawn, ParkingLocation);
-	MulticastSetPooledEnemyInactive(PooledPawn, ParkingLocation);
+	// Native enemies broadcast presentation from EnterPooledInactive (pre-dormancy).
+	if (!Cast<AEnemyParentNative>(PooledPawn))
+	{
+		MulticastSetPooledEnemyInactive(PooledPawn, ParkingLocation);
+	}
 	// SetPooledEnemyInactiveState normally makes pooled actors dormant immediately. Exact
 	// loading prewarm keeps them awake for the configured settle window so connected clients
 	// receive an initial actor channel while the pawn remains hidden and noninteractive.
@@ -3917,15 +4063,26 @@ void AAeyerjiSpawnerGroup::ApplyEnemyScaling(APawn* SpawnedPawn, const FEnemySet
 	const float OldManaMax = ASC->GetNumericAttribute(UAeyerjiAttributeSet::GetManaMaxAttribute());
 
 	const int32 PlayerLevel = ResolvePlayerLevelForScaling();
-	const int32 EnemyLevel = LevelDirector
-		? LevelDirector->GetEffectiveEnemyLevelForPlayerLevel(PlayerLevel)
-		: UAeyerjiDifficultySettings::Get()->EvaluateEnemyLevel(PlayerLevel);
-	const float DifficultyAlpha = LevelDirector
-		? LevelDirector->GetDerivedDifficultyAlpha()
-		: UAeyerjiDifficultySettings::Get()->EvaluateDifficultyAlpha(UAeyerjiDifficultySettings::GetNormalWorldTier());
-	const float RawGlobalStatBudgetMultiplier = LevelDirector
-		? LevelDirector->GetGlobalStatBudgetMultiplier()
-		: UAeyerjiDifficultySettings::Get()->EvaluateStatBudget(UAeyerjiDifficultySettings::GetNormalWorldTier());
+	const bool bUseCombatTestLevel = CombatTestEnemyLevelOverride > 0;
+	const int32 EnemyLevel = bUseCombatTestLevel
+		? UAeyerjiDifficultySettings::ClampGameplayLevel(CombatTestEnemyLevelOverride)
+		: (LevelDirector
+			? LevelDirector->GetEffectiveEnemyLevelForPlayerLevel(PlayerLevel)
+			: UAeyerjiDifficultySettings::Get()->EvaluateEnemyLevel(PlayerLevel));
+	const bool bUseCombatTestWorldTier = CombatTestWorldTierOverride != INDEX_NONE;
+	const int32 ScalingWorldTier = bUseCombatTestWorldTier
+		? FMath::Clamp(CombatTestWorldTierOverride, 0, UAeyerjiDifficultySettings::WorldTierMax)
+		: UAeyerjiDifficultySettings::GetNormalWorldTier();
+	const float DifficultyAlpha = bUseCombatTestWorldTier
+		? UAeyerjiDifficultySettings::Get()->EvaluateDifficultyAlpha(ScalingWorldTier)
+		: (LevelDirector
+			? LevelDirector->GetDerivedDifficultyAlpha()
+			: UAeyerjiDifficultySettings::Get()->EvaluateDifficultyAlpha(ScalingWorldTier));
+	const float RawGlobalStatBudgetMultiplier = bUseCombatTestWorldTier
+		? UAeyerjiDifficultySettings::Get()->EvaluateStatBudget(ScalingWorldTier)
+		: (LevelDirector
+			? LevelDirector->GetGlobalStatBudgetMultiplier()
+			: UAeyerjiDifficultySettings::Get()->EvaluateStatBudget(ScalingWorldTier));
 	const float GlobalStatBudgetMultiplier = FMath::IsFinite(RawGlobalStatBudgetMultiplier)
 		? FMath::Clamp(RawGlobalStatBudgetMultiplier, 0.f, MaxRuntimeStatMultiplier)
 		: 1.f;
@@ -4236,6 +4393,37 @@ int32 AAeyerjiSpawnerGroup::ResolvePlayerLevelForScaling() const
 	}
 
 	return 1;
+}
+
+void AAeyerjiSpawnerGroup::SetCombatTestScalingOverrides(const int32 InEnemyLevel, const int32 InWorldTier)
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	CombatTestEnemyLevelOverride = UAeyerjiDifficultySettings::ClampGameplayLevel(InEnemyLevel);
+	CombatTestWorldTierOverride = FMath::Clamp(InWorldTier, 0, UAeyerjiDifficultySettings::WorldTierMax);
+
+	// Test setup is explicitly interactive and must not race the normal async preload;
+	// otherwise the first actors in a level-sweep could silently miss their scaling row.
+	if (!EnemyScalingTable.IsNull())
+	{
+		CachedEnemyScalingTable = EnemyScalingTable.LoadSynchronous();
+		CachedScalingRows.Reset();
+		CachedMissingScalingRows.Reset();
+	}
+}
+
+void AAeyerjiSpawnerGroup::ClearCombatTestScalingOverrides()
+{
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	CombatTestEnemyLevelOverride = 0;
+	CombatTestWorldTierOverride = INDEX_NONE;
 }
 
 FGameplayAttribute AAeyerjiSpawnerGroup::ResolveAttribute(const FName& AttributeName) const

@@ -3,6 +3,8 @@
 #include "GUI/W_CharacterStatsPreview.h"
 
 #include "AbilitySystemComponent.h"
+#include "AbilitySystemGlobals.h"
+#include "GameFramework/Pawn.h"
 #include "Attributes/AeyerjiAttributeSet.h"
 #include "Components/Border.h"
 #include "Components/HorizontalBox.h"
@@ -12,7 +14,9 @@
 #include "Components/VerticalBoxSlot.h"
 #include "Components/Widget.h"
 #include "Blueprint/WidgetTree.h"
+#include "Engine/Font.h"
 #include "GUI/AeyerjiStringLibrary.h"
+#include "GUI/AeyerjiUIStyleLibrary.h"
 
 namespace
 {
@@ -95,6 +99,7 @@ void UW_CharacterStatsPreview::NativeConstruct()
 void UW_CharacterStatsPreview::NativeDestruct()
 {
     UnbindDelegates();
+    BoundASC.Reset();
     Super::NativeDestruct();
 }
 
@@ -106,6 +111,7 @@ void UW_CharacterStatsPreview::BindToAbilitySystem(UAbilitySystemComponent* InAS
         return;
     }
 
+    UnbindDelegates();
     BoundASC = InASC;
     BuildRows();
     RefreshAll();
@@ -116,6 +122,17 @@ void UW_CharacterStatsPreview::RefreshAll()
     for (int32 Index = 0; Index < ActiveRows.Num(); ++Index)
     {
         RefreshRowValue(Index);
+    }
+}
+
+void UW_CharacterStatsPreview::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+    Super::NativeTick(MyGeometry, InDeltaTime);
+    // Possession and ASC replication may arrive after widget initialization.
+    if (GetOwningPlayer())
+    {
+        UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(GetOwningPlayerPawn());
+        if (ASC != BoundASC.Get()) BindToAbilitySystem(ASC);
     }
 }
 
@@ -160,6 +177,11 @@ void UW_CharacterStatsPreview::BuildRows()
         {
             LabelText->SetFont(LabelFont);
         }
+        else if (UFont* Exo2 = UAeyerjiUIStyleLibrary::GetExo2Font())
+        {
+            // Living-theme fallback so runtime-built rows never render in Roboto.
+            LabelText->SetFont(FSlateFontInfo(Exo2, 16, TEXT("Medium")));
+        }
         if (LabelColor.IsColorSpecified())
         {
             LabelText->SetColorAndOpacity(LabelColor);
@@ -169,6 +191,10 @@ void UW_CharacterStatsPreview::BuildRows()
         if (ValueFont.FontObject)
         {
             ValueText->SetFont(ValueFont);
+        }
+        else if (UFont* Exo2 = UAeyerjiUIStyleLibrary::GetExo2Font())
+        {
+            ValueText->SetFont(FSlateFontInfo(Exo2, 16, TEXT("Medium")));
         }
         if (ValueColor.IsColorSpecified())
         {

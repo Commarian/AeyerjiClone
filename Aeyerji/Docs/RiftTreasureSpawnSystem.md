@@ -16,23 +16,22 @@ No map, Blueprint, or DataTable binary was changed by the C++ implementation. Th
 
 1. Restart Unreal after compiling so the `Aeyerji Treasure Spawn Point` actor and **Rift Treasure Loot Profile** DataTable row struct appear.
 2. Create one DataTable using row struct `FAeyerjiTreasureLootProfileRow`, for example `/Game/Systems/Rifts/DT_RiftTreasureLootProfiles`.
-   - Import `Data/Rifts/TreasureLootDT.json` for starter rows `Treasure_Mobs`, `Treasure_Elite`, and `Treasure_Boss`.
-   - The currently loaded `BP_AeyerjiLootTable` pools have blank `Source Tag` values, which behave as wildcards. Until those tags are authored, every starter row resolves the first Mobs pool rather than its intended Mobs, Elite, or Boss pool.
-   - Assign these source tags to the corresponding global loot-table pools before using the starter rows:
+   - Import `Data/Rifts/TreasureLootDT.json` for starter rows `Treasure_Mobs`, `Treasure_Elite`, and `Treasure_Boss`. `Treasure_Mobs` is the standard starter row and uses the dedicated `Loot.Source.Rift.Treasure` source.
+   - Author actual item definitions once in `/Game/Loot/BP_AeyerjiLootTable`; the Rift DataTable deliberately does not contain item assets, chances, or level gates.
+     1. Add a **new first pool** in `BP_AeyerjiLootTable`. Pool order matters because the first matching pool wins, and the existing pools currently have blank `Source Tag` values that act as wildcards.
+     2. Set that pool's `Source Tag` to `Loot.Source.Rift.Treasure`, leave its world-tier and level bounds at `0`, and add item definitions directly to its `Entries` array. Do not create a separate entry-set DataAsset for this starter pool.
+     3. For a guaranteed level-one proof pool, add these existing definitions as Common entries: `DI_BasicSword_Json`, `DI_BasicHammer_Json`, `DI_Shield_Json`, `DI_SilverHeart_Json`, and `DI_PoisonousDagger_Json` from `/Game/Inventory/Items/JsonImported`.
+     4. Set each entry's `Percentage Chance To Drop In Pool` to `100`, `Weight` to `1`, and `Min Level` / `Max Level` to `0`. The exact chest items, rarities, weights, and level gates belong here, not on a Rift row.
+   - Later, give the old Mobs, Boss, Elite, and Survival pools their own source tags so they stop behaving as wildcards:
      - `MobsMap1LootSet` pool: `Loot.Source.Mobs`
      - `Boss` pool: `Loot.Source.Boss`
      - `Elite` pool: `Loot.Source.Elite`
      - `Survival` pool: `Loot.Source.5RoundsSurvived`
-   - Alternatively, author a dedicated Rift treasure pool with a `100%` overall drop gate and give it a dedicated source tag. Point the Rift rows at that tag instead of changing ordinary mob-drop behavior.
-   - For normal Rift treasure, configure only `Enabled`, `Source Tag`, `Minimum Rarity`, and `Drops Per Chest`.
-     - `Source Tag` selects the tagged pool in `BP_AeyerjiLootTable`.
+   - Every Rift row has exactly four editable settings: `Enabled`, `Source Tag`, `Minimum Rarity`, and `Drops Per Chest`.
+     - `Source Tag` selects the pool that owns the real item definitions.
      - `Minimum Rarity` is the floor applied to each selected item.
-     - `Drops Per Chest` is the requested number of loot-service rolls. Rolls that are suppressed or cannot resolve a valid item do not create an empty chest; that candidate is skipped with a diagnostic log.
-   - The advanced fields are exceptions rather than ordinary tuning:
-     - `Drop Count Variance` adds a random amount to `Drops Per Chest`; leave it at `0` for a predictable chest.
-     - `Forced Item Definition` bypasses source-pool item selection. Use it only for a curated reward or a temporary test, then clear it. The item must be eligible for the current player level; otherwise the candidate is skipped with a warning.
-     - `Drop Mode` controls the existing authoritative pickup ownership policy. Leave the default `Drop Only For Instigator` unless the Rift explicitly needs a shared reward.
-   - Player/enemy level, world tier, pity, rarity weights, item-level jitter, uniqueness/bucket rules, debug settings, and reward-presentation lifetime are deliberately not Rift-treasure row settings. Runtime supplies the relevant live context and the ordinary loot system keeps ownership of its global policy.
+     - `Drops Per Chest` is a fixed requested number of loot-service rolls. Rolls that are suppressed or cannot resolve a valid item skip the chest rather than creating an empty chest.
+   - Player/enemy level, world tier, pity, rarity weights, item-level jitter, uniqueness/bucket rules, debug settings, reward presentation, and pickup ownership are deliberately not Rift-treasure row settings. Runtime supplies live gameplay context; Rift chest pickups remain server-authoritative and personal to the instigating player.
    - A row does not own a separate reward implementation; the normal `ULootService`, reward chest, pickup, and inventory path remain in use.
 3. Create `BP_RiftTreasureSpawnPoint` as a Blueprint child of `AAeyerjiTreasureSpawnPoint`.
    - Assign a static mesh or simple marker to the inherited `PreviewMesh` component.
@@ -58,6 +57,8 @@ No map, Blueprint, or DataTable binary was changed by the C++ implementation. Th
 `UAeyerjiTreasureLootProfile` has been removed; Rift treasure loot policies now exist only as `FAeyerjiTreasureLootProfileRow` rows. If any old profile asset was created, copy its values into a row and remove that asset in the editor.
 
 `DefaultLootProfile` and point-level `LootProfileOverride` have become `Default Loot Profile Row` and `Loot Profile Row Override`. Reassign any existing ZoneRunDefinition/spawn-point defaults (and reconnect any Blueprint property graphs) to the intended table and row. Leave both override fields empty only when the Rift default should apply; a half-filled handle is intentionally treated as invalid and reported by treasure validation.
+
+The row now contains only the four fields shown in the DataTable Row Editor. `Drop Count Variance`, `Fixed Item Definition`, and per-row `Drop Mode` were intentionally removed because the DataTable Row Editor hides advanced properties while its grid still shows them. Reimport `TreasureLootDT` after compiling; existing row handles remain valid because the row struct and row names are unchanged.
 
 ## Runtime behavior
 
@@ -85,7 +86,7 @@ Both are opt-in in **Treasure Spawn Config** and disabled by default.
 3. Confirm a chest visually remains at its placed transform while click-to-move/range validation uses the nearby navigation anchor.
 4. Manually interact with a chest and confirm one release only, normal pickup spawning, and that an inventory-full rejection leaves the pickup alive.
 5. Reset/end the Rift with unopened and released chests present; confirm the new run has no stale chest or pickup actors.
-6. Repeat with two clients or a dedicated server. The selected loot-profile row's `Drop Mode` semantics remain authoritative; the placement system does not choose shared versus personal rewards.
+6. Repeat with two clients or a dedicated server. Rift chest rolls and released pickups remain authoritative and personal to the instigating player.
 7. Enable auto-open/auto-collect at level 1, then repeat at maximum-level mode.
 8. Run the editor simulation and inspect selection frequencies for unintended point bias.
 

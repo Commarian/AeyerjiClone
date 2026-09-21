@@ -59,6 +59,18 @@ public:
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
 	UAnimMontage* GetAttackMontage() const;
 
+	// Returns the archetype attack-animation play-rate multiplier (1.0 when unset).
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
+	float GetAttackAnimationPlayRateMultiplier() const;
+
+	// Returns the optional fixed primary-attack cooldown in seconds (<= 0 means use AttackSpeed-derived behavior).
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
+	float GetPrimaryAttackCooldownSeconds() const;
+
+	// Returns the leash distance from the spawn home location (<= 0 means the pawn never leashes).
+	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
+	float GetLeashDistance() const;
+
 	// Returns the optional basic attack effect reference.
 	UFUNCTION(BlueprintPure, Category="Aeyerji|Archetype")
 	TSubclassOf<UGameplayEffect> GetBasicAttackEffect() const;

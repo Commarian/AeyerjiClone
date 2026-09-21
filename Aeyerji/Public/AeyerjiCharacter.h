@@ -121,6 +121,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Aeyerji|Death")
 	void ResetDeathStateForReuse();
 
+	/**
+	 * True when authoritative GameplayEffect damage must be discarded for this pawn.
+	 * GAS damage bypasses CanBeDamaged, so dormant pooled enemies override this to
+	 * reject direct-effect damage that targeting and collision can no longer prevent.
+	 */
+	virtual bool ShouldIgnoreIncomingDamage() const { return false; }
+
+	/** Hides retained floating widgets on death and restores them after pooled reuse. */
+	void SetFloatingWidgetsPresentationVisible(bool bVisible);
+
 	UFUNCTION(BlueprintCallable)
 	void DetachDestroyAttachedActors();
 
@@ -320,7 +330,7 @@ private:
 	void SpawnStunOverheadEffect();
 	void DestroyStunOverheadEffect();
 	/** Hides retained floating widgets on death and restores them after pooled reuse. */
-	void SetFloatingWidgetsPresentationVisible(bool bVisible);
+	// (Declaration moved to the public section below for the enemy pool lifecycle.)
 	void RemoveFloatingWidgets();
 	void StopRegeneration();
 	void StopMovementAndInput();

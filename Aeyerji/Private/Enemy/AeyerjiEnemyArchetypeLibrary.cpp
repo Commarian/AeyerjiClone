@@ -13,6 +13,8 @@ void CopyArchetypeDataToEntry(const UAeyerjiEnemyArchetypeData& Source, FAeyerji
 	OutEntry.bOverrideTeamTag = Source.bOverrideTeamTag;
 	OutEntry.TeamTagOverride = Source.TeamTagOverride;
 	OutEntry.AttackMontage = Source.AttackMontage;
+	OutEntry.AttackAnimationPlayRateMultiplier = Source.AttackAnimationPlayRateMultiplier;
+	OutEntry.PrimaryAttackCooldownSeconds = Source.PrimaryAttackCooldownSeconds;
 	OutEntry.AbilityLevel = Source.AbilityLevel;
 	OutEntry.EffectLevel = Source.EffectLevel;
 	OutEntry.GrantedAbilities = Source.GrantedAbilities;

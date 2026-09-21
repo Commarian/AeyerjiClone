@@ -614,6 +614,39 @@ UAnimMontage* UAeyerjiEnemyArchetypeComponent::GetAttackMontage() const
 	return Data->AttackMontage.LoadSynchronous();
 }
 
+float UAeyerjiEnemyArchetypeComponent::GetAttackAnimationPlayRateMultiplier() const
+{
+	if (const FAeyerjiEnemyArchetypeEntry* LibraryEntry = ResolveArchetypeEntry(true))
+	{
+		return LibraryEntry->AttackAnimationPlayRateMultiplier;
+	}
+
+	const UAeyerjiEnemyArchetypeData* Data = ResolveArchetypeData(true);
+	return Data ? Data->AttackAnimationPlayRateMultiplier : 1.0f;
+}
+
+float UAeyerjiEnemyArchetypeComponent::GetPrimaryAttackCooldownSeconds() const
+{
+	if (const FAeyerjiEnemyArchetypeEntry* LibraryEntry = ResolveArchetypeEntry(true))
+	{
+		return LibraryEntry->PrimaryAttackCooldownSeconds;
+	}
+
+	const UAeyerjiEnemyArchetypeData* Data = ResolveArchetypeData(true);
+	return Data ? Data->PrimaryAttackCooldownSeconds : 0.0f;
+}
+
+float UAeyerjiEnemyArchetypeComponent::GetLeashDistance() const
+{
+	if (const FAeyerjiEnemyArchetypeEntry* LibraryEntry = ResolveArchetypeEntry(true))
+	{
+		return LibraryEntry->AggroSettings.LeashDistance;
+	}
+
+	const UAeyerjiEnemyArchetypeData* Data = ResolveArchetypeData(true);
+	return Data ? Data->AggroSettings.LeashDistance : 0.0f;
+}
+
 TSubclassOf<UGameplayEffect> UAeyerjiEnemyArchetypeComponent::GetBasicAttackEffect() const
 {
 	if (const FAeyerjiEnemyArchetypeEntry* LibraryEntry = ResolveArchetypeEntry(false))

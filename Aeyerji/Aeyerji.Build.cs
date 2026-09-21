@@ -10,7 +10,7 @@ public class Aeyerji : ModuleRules
 		// Frontend session code uses the existing OnlineSubsystem/OnlineSubsystemUtils dependencies below.
 
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "AIModule", "Niagara", "EnhancedInput", "GameplayAbilities", "GameplayTags", "GameplayTasks", "StateTreeModule", "GameplayStateTreeModule", "NavigationSystem", "OnlineSubsystem", "OnlineSubsystemUtils", "UMG", "SlateCore", "DeveloperSettings", "NetCore", "PhysicsCore" });
-        PrivateDependencyModuleNames.AddRange(new string[] { "ApplicationCore", "AssetRegistry", "Json" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "ApplicationCore", "AssetRegistry", "Json", "RenderCore" });
 
 		// Steam remains selected through DefaultEngine.ini; load its provider when the plugin is present.
 		DynamicallyLoadedModuleNames.Add("OnlineSubsystemSteam");

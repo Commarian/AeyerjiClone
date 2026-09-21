@@ -7,12 +7,14 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 #include "AeyerjiCharacter.h"
 #include "AeyerjiGameplayTags.h"
 #include "CharacterStatsLibrary.h"
+#include "Enemy/EnemyAIController.h"
 #include "GameplayAbilitySpec.h"
 #include "Abilities/GameplayAbilityTypes.h"
 #include "GameFramework/MovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "StateTreeExecutionContext.h"
 #include "Logging/AeyerjiLog.h"
+#include "Testing/AeyerjiCombatBalanceTestHarness.h"
 
 namespace
 {
@@ -94,6 +96,27 @@ namespace
             OutTags.AppendTags(Spec.Ability->GetAssetTags());
         }
     }
+
+	bool EnsureLivePrimaryTarget(APawn* Pawn, bool& bRecordedInvalidTarget)
+	{
+		AEnemyAIController* EnemyAI = Pawn ? Cast<AEnemyAIController>(Pawn->GetController()) : nullptr;
+		if (EnemyAI && EnemyAI->EnsureCurrentTargetIsLive())
+		{
+			return true;
+		}
+
+		if (!bRecordedInvalidTarget)
+		{
+			AAeyerjiCombatBalanceTestHarness::RecordTargetingEvent(
+				EnemyAI ? static_cast<AActor*>(EnemyAI) : Pawn,
+				nullptr,
+				nullptr,
+				EAeyerjiCombatTargetingTelemetryEvent::InvalidPrimaryActivationPrevented,
+				TEXT("NoLiveTarget"));
+			bRecordedInvalidTarget = true;
+		}
+		return false;
+	}
 }
 
 
@@ -115,9 +138,15 @@ EStateTreeRunStatus USTT_ActivatePrimaryAttackTask::EnterState(FStateTreeExecuti
     bLoggedMissingPrimarySpec = false;
     bLoggedActivationFailure = false;
     bLoggedPrimarySpecSnapshot = false;
+	bRecordedInvalidTarget = false;
     ObservedPrimaryActiveStartTime = -1.f;
     ObservedPrimarySpecHandle = FGameplayAbilitySpecHandle();
     NextRetryTime = 0.f;
+	APawn* Pawn = ResolveStateTreePawn(Context);
+	if (!Pawn || !EnsureLivePrimaryTarget(Pawn, bRecordedInvalidTarget))
+	{
+		return EStateTreeRunStatus::Failed;
+	}
     BOSS_PRIMARY_AJ_LOG(Verbose, this, TEXT("[BossPrimaryAttack] ActivatePrimaryAttack: enter state owner=%s."), *GetNameSafe(Context.GetOwner()));
     return EStateTreeRunStatus::Running;
 }
@@ -130,6 +159,11 @@ EStateTreeRunStatus USTT_ActivatePrimaryAttackTask::Tick(FStateTreeExecutionCont
         BOSS_PRIMARY_AJ_LOG(Verbose, this, TEXT("[BossPrimaryAttack] ActivatePrimaryAttack: no pawn resolved from owner %s - failing."), *GetNameSafe(Context.GetOwner()));
         return EStateTreeRunStatus::Failed;
     }
+	if (!EnsureLivePrimaryTarget(Pawn, bRecordedInvalidTarget))
+	{
+		BOSS_PRIMARY_AJ_LOG(Verbose, this, TEXT("[BossPrimaryAttack] ActivatePrimaryAttack: no live combat target - failing without activation."));
+		return EStateTreeRunStatus::Failed;
+	}
 
     if (const AAeyerjiCharacter* ControlledCharacter = Cast<AAeyerjiCharacter>(Pawn))
     {

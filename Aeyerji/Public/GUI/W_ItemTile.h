@@ -96,6 +96,10 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> BorderDynamicMaterial = nullptr;
 
+	/** Base material used by the cached MID so repeated inventory refreshes do not allocate another instance. */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInterface> BorderDynamicMaterialSource = nullptr;
+
 	UPROPERTY(EditAnywhere, Category = "Aeyerji|UI")
 	FLinearColor EmptySlotIconTint = FLinearColor::White;
 
@@ -131,6 +135,9 @@ protected:
 	FVector2D PendingGrabOffset = FVector2D::ZeroVector;
 	FVector2D TileVisualSize = FVector2D(64.f, 64.f);
 	bool bIsPlaceholder = false;
+	bool bHasBorderVisualState = false;
+	bool bBorderVisualVisible = false;
+	FLinearColor LastBorderRarityColor = FLinearColor::Transparent;
 
 	/** Ensures we have a minimal widget tree so the native widget renders without a blueprint. */
 	void EnsureWidgetTree();

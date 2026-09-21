@@ -4,13 +4,10 @@
 		"bEnabled": true,
 		"SourceTag":
 		{
-			"TagName": "Loot.Source.Mobs"
+			"TagName": "Loot.Source.Rift.Treasure"
 		},
 		"MinimumRarity": "Common",
-		"DropsPerChest": 1,
-		"DropCountVariance": 0,
-		"ForcedItemDefinition": "None",
-		"DropMode": "DropOnlyForInstigator"
+		"DropsPerChest": 1
 	},
 	{
 		"Name": "Treasure_Elite",
@@ -20,10 +17,7 @@
 			"TagName": "Loot.Source.Elite"
 		},
 		"MinimumRarity": "Uncommon",
-		"DropsPerChest": 1,
-		"DropCountVariance": 0,
-		"ForcedItemDefinition": "None",
-		"DropMode": "DropOnlyForInstigator"
+		"DropsPerChest": 1
 	},
 	{
 		"Name": "Treasure_Boss",
@@ -33,9 +27,6 @@
 			"TagName": "Loot.Source.Boss"
 		},
 		"MinimumRarity": "Epic",
-		"DropsPerChest": 1,
-		"DropCountVariance": 0,
-		"ForcedItemDefinition": "None",
-		"DropMode": "DropOnlyForInstigator"
+		"DropsPerChest": 1
 	}
 ]
