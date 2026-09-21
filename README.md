@@ -54,19 +54,8 @@ This is a **source-code mirror and project showcase**. The full Unreal project i
 
 The mirror contains the `Aeyerji` C++ module and its accompanying data and documentation. It does **not** include the complete Unreal project, Content assets, project configuration, or all dependencies needed to launch the game. Cloning this repository alone will not produce a playable build.
 
-## Explore the source
+## Art and assets
 
-| Area | Location |
-| --- | --- |
-| Player input and combat control | [AeyerjiPlayerController.cpp](Aeyerji/AeyerjiPlayerController.cpp) |
-| Gameplay abilities | [Public/Abilities](Aeyerji/Public/Abilities) |
-| Inventory implementation | [InventoryComponent.cpp](Aeyerji/Private/Items/InventoryComponent.cpp) |
-| Encounter and spawn systems | [Public/Director](Aeyerji/Public/Director) |
-| Sessions and frontend | [Public/Frontend](Aeyerji/Public/Frontend) |
-| UI and HUD | [Private/GUI](Aeyerji/Private/GUI) |
-| Automated tests | [Private/Tests](Aeyerji/Private/Tests) |
-| Tuning data | [Data](Aeyerji/Data) |
-| Technical documentation | [Docs](Aeyerji/Docs) |
-| Module dependencies | [Aeyerji.Build.cs](Aeyerji/Aeyerji.Build.cs) |
+Most of the art currently used in Aeyerji comes from free asset collections provided by Epic Games and serves as placeholder content while the gameplay takes shape. The remaining assets are made by me in **Blender**.
 
-The full project targets **Unreal Engine 5.8** with a compatible Visual Studio C++ toolchain on Windows. Core technologies include C++, GAS, Enhanced Input, StateTree, Niagara, UMG/Slate, and Unreal's Online Subsystem.
+The screenshots show that mix of placeholder and original work in the current prototype. The visual direction is still evolving alongside the combat, environments, and UI.
