@@ -1,8 +1,26 @@
 # Aeyerji
 
-**An Unreal Engine 5.8 action-RPG prototype built around ability-driven combat, loot, and progression.**
+**A C++-first Unreal Engine 5.8 multiplayer action-RPG portfolio project built around ability-driven combat, loot, and progression.**
 
 Fight through enemy-packed arenas suspended above the clouds, combining melee and ranged attacks with movement and area abilities. Violet-lit architecture, bright combat effects, and a shared animated UI theme define the current visual direction.
+
+## Technical highlights
+
+- **Gameplay and GAS combat:** native player command flow, targeting, held attacks, ability activation, cooldowns, resource costs, and physical damage rules.
+- **Online session flow:** Unreal Online Subsystem integration for hosting, searching, joining, advertising, and progressing party/lobby state.
+- **Encounter pacing:** data-driven spawn groups, elite pools, rift progress, population staging, safe spawn selection, and kill-velocity pacing.
+- **Inventory and persistence:** server-validated item operations, replicated equipment and grid state, loot resolution, snapshots, and save-data application.
+- **Automation and diagnostics:** focused combat, damage, inventory, and tuning tests alongside runtime telemetry and data-driven balance controls.
+
+## Selected source code
+
+The mirror is organized so a reviewer can jump directly from the systems above into representative C++ implementation:
+
+- [Player command and targeting flow](https://github.com/Commarian/AeyerjiClone/blob/main/Aeyerji/AeyerjiPlayerController.cpp) and [primary melee ability](https://github.com/Commarian/AeyerjiClone/blob/main/Aeyerji/Private/Abilities/GA_PrimaryMeleeBasic.cpp)
+- [Online session and lobby subsystem](https://github.com/Commarian/AeyerjiClone/blob/main/Aeyerji/Private/Frontend/AeyerjiSessionSubsystem.cpp)
+- [Encounter director and rift population pacing](https://github.com/Commarian/AeyerjiClone/blob/main/Aeyerji/Private/Director/AeyerjiEncounterDirector.cpp)
+- [Replicated inventory, equipment, and save-data handling](https://github.com/Commarian/AeyerjiClone/blob/main/Aeyerji/Private/Items/InventoryComponent.cpp)
+- [Combat responsiveness automation test](https://github.com/Commarian/AeyerjiClone/blob/main/Aeyerji/Private/Tests/AeyerjiCombatResponsivenessTest.cpp)
 
 [![Combat beside a glowing arena structure, with enemies, ability slots, and progression HUD](Screenshot%20%2828%29.png)](Screenshot%20%2828%29.png)
 
